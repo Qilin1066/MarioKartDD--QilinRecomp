@@ -132,6 +132,28 @@ target_link_libraries(qilin_rt PRIVATE qilin_warnings)
 
 enable_testing()
 
+# ---- The disc: >>> the disc agent's block (docs/disc.md) ----
+# A GameCube image (.iso, .gcm, .ciso) or extracted folder, read in place.
+# Runtime code too (no std::format): the game reads its files through it.
+add_library(qilin_disc STATIC disc/src/disc.cpp disc/src/file.cpp disc/src/tools.cpp)
+target_include_directories(qilin_disc PUBLIC disc/include)
+target_link_libraries(qilin_disc PRIVATE qilin_warnings)
+
+# qilin-disc: info, list, extract, dol, verify (the launcher's and the build's way to main.dol).
+add_executable(qilin_disc_tool disc/src/main.cpp)
+set_target_properties(qilin_disc_tool PROPERTIES OUTPUT_NAME qilin-disc)
+target_include_directories(qilin_disc_tool PRIVATE disc/src)
+target_link_libraries(qilin_disc_tool PRIVATE qilin_disc qilin_dol qilin_warnings)
+qilin_tool(qilin_disc_tool)
+
+# Synthetic discs as image, CISO and folder: no game files needed.
+add_executable(qilin_disc_tests disc/tests/tests.cpp)
+target_link_libraries(qilin_disc_tests PRIVATE qilin_disc qilin_warnings)
+qilin_tool(qilin_disc_tests)
+add_test(NAME qilin_disc_tests COMMAND qilin_disc_tests)
+set_tests_properties(qilin_disc_tests PROPERTIES TIMEOUT 120)
+# ---- <<< the disc agent's block ----
+
 # ---- The host platform: window, input and audio (SDL3), Vulkan ----
 # Fetched at configure time, pinned, built statically: SDL3, the Vulkan headers
 # and volk (which loads Vulkan at run time, so no SDK is needed to build or run).
