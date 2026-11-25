@@ -487,7 +487,7 @@ private:
             return fill(out, d, madd(F(a), F(cr), F(b), in.op == Op::fmsubs || in.op == Op::fnmsubs, in.op == Op::fnmadds || in.op == Op::fnmsubs));
         case Op::frsp: return fill(out, d, std::format("fp::single_s({})", F(b)));
         case Op::fres: return fill(out, d, std::format("fp::res_s({})", F(b)));
-        case Op::fmr: return one(d, F(b));
+        case Op::fmr: return d == b ? (line("/* fmr to itself */"), true) : one(d, F(b));
         case Op::fneg: return one(d, std::format("fp::neg_s({})", F(b)));
         case Op::fabs: return one(d, std::format("fp::abs_s({})", F(b)));
         case Op::fnabs: return one(d, std::format("fp::nabs_s({})", F(b)));
@@ -721,7 +721,9 @@ private:
             line(std::format("{{ const uint32_t v = {}; {} = ({} & {}u) | (v << {}u); }}", v, f, f, 15u & ~(1u << sh), sh));
             return true;
         }
-        case Op::mcrf: line(std::format("{} = {};", CR(in.crfd()), CR(in.crfs()))); return true;
+        case Op::mcrf:
+            line(in.crfd() == in.crfs() ? std::string("/* mcrf to itself */") : std::format("{} = {};", CR(in.crfd()), CR(in.crfs())));
+            return true;
         case Op::mcrxr:
             line(std::format("{} = ({} << 3) | ({} << 2) | ({} << 1); {} = 0u; {} = 0u; {} = 0u;", CR(in.crfd()), SO(), OV(), CA(), SO(), OV(), CA()));
             return true;
@@ -885,7 +887,7 @@ private:
         case Op::frsqrte: line(std::format("{} = fp::estimate_rsqrt({});", F(d), F(b))); return true;
         case Op::fctiw: line(std::format("{} = fp::to_int({}, false);", F(d), F(b))); return true;
         case Op::fctiwz: line(std::format("{} = fp::to_int({}, true);", F(d), F(b))); return true;
-        case Op::fmr: line(std::format("{} = {};", F(d), F(b))); return true;
+        case Op::fmr: line(d == b ? std::string("/* fmr to itself */") : std::format("{} = {};", F(d), F(b))); return true;
         case Op::fneg: line(std::format("{} = fp::from_bits(fp::bits({}) ^ fp::kSign);", F(d), F(b))); return true;
         case Op::fabs: line(std::format("{} = fp::from_bits(fp::bits({}) & ~fp::kSign);", F(d), F(b))); return true;
         case Op::fnabs: line(std::format("{} = fp::from_bits(fp::bits({}) | fp::kSign);", F(d), F(b))); return true;

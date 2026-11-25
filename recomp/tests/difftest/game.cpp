@@ -1,7 +1,10 @@
 // qilin_game_difftest: the game's own functions, lifted with no plan, each run
 // against the reference interpreter (ref.cpp) from the same random states.
 //
-//   qilin_game_difftest <main.dol> [--trials n] [--seed n] [--steps n] [--only address]
+//   qilin_game_difftest <main.dol> [--plan plan.tsv] [--trials n] [--seed n] [--steps n] [--only address]
+//
+// With the library plan, only the functions it lifts are tested, and a run that
+// reaches replaced or dropped code is skipped, as one that reaches a stub is.
 //
 // Where qilin_difftest checks each instruction alone, this checks what the
 // lifter makes of whole functions: its register model across calls, branches,
@@ -24,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <format>
+#include <fstream>
 #include <map>
 #include <print>
 #include <random>
@@ -209,17 +213,19 @@ uint32_t parse_u32(std::string_view s, int radix) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::println(stderr, "usage: qilin_game_difftest <main.dol> [--trials n] [--seed n] [--steps n] [--only address]");
+        std::println(stderr, "usage: qilin_game_difftest <main.dol> [--plan plan.tsv] [--trials n] [--seed n] [--steps n] [--only address]");
         return 2;
     }
     unsigned trials = 8, max_steps = 20000;
     uint32_t seed = 20261125u, only = 0;
+    std::string plan_path;
     for (int i = 2; i + 1 < argc; i += 2) {
         const std::string_view o = argv[i];
         if (o == "--trials") trials = parse_u32(argv[i + 1], 10);
         else if (o == "--seed") seed = parse_u32(argv[i + 1], 10);
         else if (o == "--steps") max_steps = parse_u32(argv[i + 1], 10);
         else if (o == "--only") only = parse_u32(argv[i + 1], 16);
+        else if (o == "--plan") plan_path = argv[i + 1];
         else {
             std::println(stderr, "game difftest: unknown option {}", o);
             return 2;
@@ -252,11 +258,37 @@ int main(int argc, char** argv) {
     p.code.resize((p.text_hi - p.text_lo) / 4);
     p.flags.assign(p.code.size(), 0);
     for (uint32_t a = p.text_lo; a < p.text_hi; a += 4) p.code[p.index(a)] = cfg.insn(a);
+    // The plan's ranges that aren't lifted (start, end, plan, library per line; the narrowest range decides).
+    struct Range {
+        uint32_t start, end;
+        bool lift;
+    };
+    std::vector<Range> plan;
+    if (!plan_path.empty()) {
+        std::ifstream f(plan_path);
+        std::string l;
+        while (std::getline(f, l)) {
+            if (l.empty() || l[0] == '#') continue;
+            const size_t t1 = l.find('	'), t2 = l.find('	', t1 + 1), t3 = l.find('	', t2 + 1);
+            if (t3 == std::string::npos) continue;
+            plan.push_back({parse_u32(l.substr(0, t1), 16), parse_u32(l.substr(t1 + 1, t2 - t1 - 1), 16), l.substr(t2 + 1, t3 - t2 - 1) == "lift"});
+        }
+        if (plan.empty()) {
+            std::println(stderr, "game difftest: cannot read the plan {}", plan_path);
+            return 1;
+        }
+    }
+    auto planned_out = [&](uint32_t a) {
+        const Range* best = nullptr;
+        for (const Range& r : plan)
+            if (a >= r.start && a < r.end && (!best || r.end - r.start < best->end - best->start)) best = &r;
+        return !plan.empty() && (!best || !best->lift);
+    };
     std::vector<uint32_t> lifted;  // the functions under test
     size_t lifted_insns = 0;
     for (const auto& [start, f] : cfg.functions()) {
         p.flags[p.index(start)] |= kStart;
-        if (!lift(lift_input(cfg, f)).ok) {
+        if (planned_out(start) || !lift(lift_input(cfg, f)).ok) {
             p.flags[p.index(start)] |= kStub;
             continue;
         }

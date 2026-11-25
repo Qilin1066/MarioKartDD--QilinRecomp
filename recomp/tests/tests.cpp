@@ -828,6 +828,7 @@ void test_fp_single_mode() {
     // The output compiles without a warning: a lone blr leaves its parameter unnamed, and a
     // "written" flag exists only where some way out reads it.
     CHECK(fn({0x4E800020u}).code.contains("void fn_80003000(Cpu&) {"));
+    CHECK(!fn({0xFC200890u, 0x4E800020u}).code.contains("f1 = f1"));  // fmr f1,f1: no self-assignment
     // cmpwi r3,0; beq +8; lfs f1,0(r4); lfs f1,4(r4); blr: f1 is written on every path to the one way out.
     const Lifted every = fn({0x2C030000u, 0x41820008u, 0xC0240000u, 0xC0240004u, 0x4E800020u});
     CHECK(every.ok && every.code.contains("float f1") && !every.code.contains("bool w"));
