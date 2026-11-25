@@ -12,10 +12,12 @@ builds (lis with addi or ori), and every function a data word points at, in
 libraries other than those given with --internal (libraries whose tables only
 their own replaced code reads). Lifted code calling dropped code (which isn't translated at all) is
 reported too: such a function needs a replace range in the plan
-(identify_libraries.py's overrides) and a replacement.
+(make_plan.py's tables) and a replacement.
 
   qilin cfg <main.dol> --json cfg.json
-  tools/analysis/check_replacements.py cfg.json [--plan data/R7PP01/plan.tsv]
+  tools/analysis/check_replacements.py cfg.json [--plan data/GM4E01/plan.tsv] [--symbols work/symbols.txt]
+
+With --symbols (port_symbols.py's list) every address is printed with its name.
 
 The narrowest plan range holding an address decides it, as in qilin lift.
 Exit status 1 if any are missing.
@@ -27,19 +29,32 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
+NAMES = {}
+
+
+def name(a):
+    return f"{a:08X} {NAMES[a]}" if a in NAMES else f"{a:08X}"
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cfg", help="qilin cfg --json output")
-    ap.add_argument("--plan", default=str(ROOT / "data/R7PP01/plan.tsv"))
+    ap.add_argument("--plan", default=str(ROOT / "data/GM4E01/plan.tsv"))
     ap.add_argument("--sources", default=str(ROOT / "mkdd/src"))
     ap.add_argument("--dol", help="main.dol: also check function pointers (addresses built by lifted code, data words)")
     ap.add_argument("--internal", action="append",
-                    default=["revolution/bte", "revolution/wpad", "revolution/os", "revolution/vi", "revolution/nand",
-                             "revolution/dvd", ".init"],
+                    default=["dolphin/os", "dolphin/vi", "dolphin/dvd", "dolphin/card", "dolphin/exi", "dolphin/si",
+                             "dolphin/pad", "dolphin/ar", "dolphin/eth", "dolphin/db", "dolphin/base", ".init"],
                     help="a library (prefix) whose data tables only its own replaced code reads")
+    ap.add_argument("--symbols", help="symbols.txt: print names with the addresses")
     args = ap.parse_args()
+
+    global NAMES
+    if args.symbols:
+        for line in open(args.symbols, encoding="utf-8"):
+            if not line.startswith("#") and line.strip():
+                p = line.split()
+                NAMES[int(p[0], 16)] = p[2]
 
     plan = []
     for line in open(args.plan):
@@ -71,7 +86,7 @@ def main() -> int:
 
     print(f"{len(provided)} replacements provided; {len(missing)} functions called by lifted code are dropped or have none")
     for callee, (library, callers) in sorted(missing.items()):
-        print(f"  {callee:08X}  {library}: called from {' '.join(f'{c:08X}' for c in sorted(callers))}")
+        print(f"  {name(callee)}  {library}: called from {', '.join(name(c) for c in sorted(callers))}")
     pointed = check_pointers(args, decide, provided) if args.dol else {}
     return 1 if missing or pointed else 0
 
@@ -119,7 +134,7 @@ def check_pointers(args, decide, provided):
                         found.setdefault(v, []).append(f"code {a:08X}")
     print(f"{len(found)} functions lifted code or data points at are dropped or have no replacement")
     for v, where in sorted(found.items()):
-        print(f"  {v:08X}  {decide(v)[0]}: {decide(v)[1]}: {' '.join(where[:6])}")
+        print(f"  {name(v)}  {decide(v)[0]}: {decide(v)[1]}: {' '.join(where[:6])}")
     return found
 
 

@@ -1,0 +1,70 @@
+# The library plan: which code is lifted, replaced or dropped (docs/code-analysis.md).
+# Written by tools/analysis/make_plan.py from the ported symbols; read by qilin lift --plan.
+# start	end	plan	library
+80003100	80003400	replace	.init: OS start-up (__start, __init_registers, __init_data)
+80003400	80003458	replace	.init: OS start-up (__init_hardware, __flush_cache)
+80003458	80003590	lift	.init: EABI runtime (memset, __fill_mem, memcpy)
+80003590	80005544	drop	.init: debugger stub and exception vectors
+800056C0	800057B4	lift	game: kartLocale
+800057B4	8000A540	lift	JSystem/J3DU
+8000A540	800173DC	lift	JSystem/JKernel
+800173DC	800180B4	lift	JSystem/JSupport
+800180B4	800182A0	lift	JSystem/JGadget
+800182A0	800240B4	lift	JSystem/JUtility
+800240B4	80026880	lift	JSystem/JUtility (force feedback)
+80026880	80026F0C	lift	JSystem/JMath
+80026F0C	8004D918	lift	JSystem/J2DGraph
+8004D918	8007A494	lift	JSystem/J3D
+8007A494	8007BE38	lift	JSystem/JFramework
+8007BE38	8008959C	lift	JSystem/JParticle
+8008959C	8008F938	lift	JSystem/JAudio (JAInterface)
+8008F938	800A1A60	lift	JSystem/JAudio (JASystem)
+800A1A60	800A23EC	lift	JSystem/JAudio (JASystem: DSP driver)
+800A23EC	800A9600	lift	JSystem/JAudio (JAUtility)
+800A9600	800A9714	replace	dolphin/base (CPU registers: HID, L2CR, MMCR ...)
+800A9714	800AA6B8	lift	dolphin/mtx
+800AA6B8	800AEC3C	replace	dolphin/dvd
+800AEC3C	800B0AA0	replace	dolphin/vi
+800B0AA0	800B1384	lift	dolphin/ai (its registers and DMA are emulated)
+800B1384	800B2E58	replace	dolphin/ar (ARAM)
+800B2E58	800B31F4	lift	dolphin/arq (request queue over AR)
+800B31F4	800B37F4	lift	dolphin/dsp (task manager; the DSP's mailboxes are emulated)
+800B37F4	800BA4FC	replace	dolphin/card
+800BA4FC	800C2E00	lift	dolphin/gx (its FIFO and registers are emulated)
+800C2E00	800C2E38	drop	debugger link stubs (amcstubs, odenotstub)
+800C2E38	800C38B8	drop	OdemuExi2 (debugger link over EXI2)
+800C38B8	800C5294	replace	dolphin/exi
+800C5294	800C53AC	lift	dolphin/exi: EXIGetType (a table over EXIGetID)
+800C53AC	800C5980	replace	dolphin/exi
+800C5980	800C64FC	lift	dolphin/gd (display-list writer)
+800C64FC	800E1158	lift	dolphin/ip (TCP/IP stack, over eth)
+800E1158	800E4760	replace	dolphin/eth (Broadband Adapter driver)
+800E4760	800E58D8	lift	dolphin/ip: md5, base64
+800E58D8	800E6B9C	replace	dolphin/os
+800E6B9C	800E6DD0	lift	dolphin/os: OSAlloc (heaps) and OSArena (arena bounds), no hardware access
+800E6DD0	800E8078	replace	dolphin/os
+800E8078	800E80F8	lift	dolphin/os: OSReport (formats through MSL's vprintf)
+800E80F8	800EC7B8	replace	dolphin/os
+800EC7B8	800EC84C	lift	dolphin/os: __init_user, __init_cpp, _ExitProcess (the EABI's constructors)
+800EC84C	800ECD44	lift	dolphin/pad: PADClamp (stick clamping, no hardware access)
+800ECD44	800EE684	replace	dolphin/pad
+800EE684	800EE700	lift	dolphin/pad: __PADDisableRecalibration (a flag in low memory)
+800EE700	800F0714	replace	dolphin/si
+800F0714	800F0800	replace	dolphin/db (debugger hooks)
+800F0800	800F8298	lift	dolphin/thp (movie decoder)
+800F8298	800FA4D0	lift	Logitech steering-wheel force feedback (over SISteering)
+800FA4D0	800FEFA0	lift	dolphin/upnp (over ip)
+800FEFA0	800FFD9C	lift	EABI runtime
+800FFD9C	8010C4D0	lift	EABI MSL (C library)
+8010C4D0	801116DC	drop	MetroTRK (debugger stub)
+801116DC	80111854	replace	MetroTRK: console procedures behind MSL's FILE (no debugger)
+80111854	8011223C	drop	MetroTRK (debugger stub)
+8011223C	801122AC	lift	game: Bando (engine sound)
+801122AC	80123198	lift	game: Inagaki (audio)
+80123198	8017872C	lift	game: Kameda (2D screens, scenes)
+8017872C	801B5A18	lift	game: Kaneshige (race, course, movies)
+801B5A18	801CBF4C	lift	game: Kawano (drivers, animation)
+801CBF4C	801E7ABC	lift	game: Osako (system, applications, network)
+801E7ABC	8024A7E0	lift	game: Sato (items, objects, effects)
+8024A7E0	8029866C	lift	game: Shiraiwa (map objects, wipes)
+8029866C	802D8518	lift	game: Yamamoto (kart physics, camera)
