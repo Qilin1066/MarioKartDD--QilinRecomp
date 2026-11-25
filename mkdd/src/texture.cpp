@@ -195,9 +195,8 @@ uint64_t hash_texture(uint32_t address, const uint8_t* src, uint32_t bytes) {
 
 const uint8_t* guest(uint32_t phys, uint32_t size) {
     const uint32_t a = phys & 0x1FFFFFFFu;
-    if ((a < 0x01800000u && a + size <= 0x01800000u) || (a >= 0x10000000u && a + size <= 0x14000000u))
-        return rt::guest_ptr(0x80000000u | a);
-    rt::fatal(nullptr, "a texture of %u bytes at %08X is outside MEM1 and MEM2", size, phys);
+    if (in_memory(a, size)) return rt::guest_ptr(0x80000000u | a);
+    rt::fatal(nullptr, "a texture of %u bytes at %08X is outside MEM1", size, phys);
 }
 
 using Key = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t>;  // address, format, w, h, levels, palette

@@ -260,7 +260,7 @@ if(QILIN_HOST)
     # The game's renderer end to end, without the game: GX register writes through
     # the recorder and renderer, the frame read back (skipped without Vulkan 1.3).
     add_executable(mkdd_render_test mkdd/tests/render_test.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp
-                   mkdd/src/renderer.cpp mkdd/src/priority.cpp)
+                   mkdd/src/renderer.cpp mkdd/src/priority.cpp mkdd/src/gpu.cpp)
     target_include_directories(mkdd_render_test PRIVATE mkdd/src)
     target_link_libraries(mkdd_render_test PRIVATE qilin_host qilin_rt qilin_warnings)
     qilin_tool(mkdd_render_test)

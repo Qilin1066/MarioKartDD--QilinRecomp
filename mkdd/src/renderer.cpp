@@ -124,6 +124,14 @@ struct Slot {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     Buffer vertices, indices, states, staging;
+    // Copies the CPU reads (gx::Copy::to_memory): four bytes a pixel in
+    // `readback`, written to guest memory once the fence has passed.
+    struct Readback {
+        VkDeviceSize at;
+        uint32_t dest, width, height;
+    };
+    Buffer readback;
+    std::vector<Readback> readbacks;
     VkDescriptorPool descriptors = VK_NULL_HANDLE;
     std::vector<Spare> garbage;  // images this frame stopped using: spare once its fence has passed
 };
@@ -152,6 +160,25 @@ struct PipelineKey {
     gx::PipelineKey k;
     bool operator<(const PipelineKey& o) const { return std::memcmp(&k, &o.k, sizeof k) < 0; }
 };
+
+// A pixel shader's SPIR-V with early fragment tests declared: the depth test
+// and write come before the shader, and its discard then only keeps the
+// colour from being written. (One more execution mode beside the entry
+// point's own, rather than a second copy of every module in shaders.inc.)
+std::vector<uint32_t> with_early_tests(const uint32_t* code, size_t bytes) {
+    std::vector<uint32_t> out(code, code + bytes / 4);
+    for (size_t i = 5; i < out.size();) {
+        const uint32_t op = out[i] & 0xFFFFu, words = out[i] >> 16;
+        if (words == 0) break;
+        if (op == 16) {  // OpExecutionMode: entry point, mode
+            const uint32_t early[3] = {(3u << 16) | 16u, out[i + 1], 9u};  // EarlyFragmentTests
+            out.insert(out.begin() + long(i), early, early + 3);
+            return out;
+        }
+        i += words;
+    }
+    rt::fatal(nullptr, "render: a pixel shader with no execution mode to put early tests beside");
+}
 
 VkShaderModule module(VkDevice dev, const uint32_t* code, size_t bytes) {
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -189,6 +216,7 @@ struct Renderer::Impl {
 
     VkShaderModule gx_vert, gx_frag, gx_frag_depth, fs_vert, clear_frag, copy_frag;
     VkShaderModule gx_frag_stages[16];  // specialised, by TEV stage count
+    VkShaderModule gx_frag_early, gx_frag_stages_early[16];  // the same with early tests (PipelineKey::depth_out 2)
     VkDescriptorSetLayout states_layout, textures_layout, copy_set_layout;
     VkPipelineLayout gx_layout, clear_layout, copy_layout;
     std::map<PipelineKey, VkPipeline> pipelines;  // the ubershader's (main thread)
@@ -370,6 +398,14 @@ struct Renderer::Impl {
             size_t bytes;
         } kStages[16] = {{kGxFragStages1, sizeof kGxFragStages1}, {kGxFragStages2, sizeof kGxFragStages2}, {kGxFragStages3, sizeof kGxFragStages3}, {kGxFragStages4, sizeof kGxFragStages4}, {kGxFragStages5, sizeof kGxFragStages5}, {kGxFragStages6, sizeof kGxFragStages6}, {kGxFragStages7, sizeof kGxFragStages7}, {kGxFragStages8, sizeof kGxFragStages8}, {kGxFragStages9, sizeof kGxFragStages9}, {kGxFragStages10, sizeof kGxFragStages10}, {kGxFragStages11, sizeof kGxFragStages11}, {kGxFragStages12, sizeof kGxFragStages12}, {kGxFragStages13, sizeof kGxFragStages13}, {kGxFragStages14, sizeof kGxFragStages14}, {kGxFragStages15, sizeof kGxFragStages15}, {kGxFragStages16, sizeof kGxFragStages16}};
         for (unsigned i = 0; i < 16; ++i) gx_frag_stages[i] = module(gpu.device, kStages[i].code, kStages[i].bytes);
+        {
+            const auto early = [&](const uint32_t* code, size_t bytes) {
+                const std::vector<uint32_t> spv = with_early_tests(code, bytes);
+                return module(gpu.device, spv.data(), spv.size() * 4);
+            };
+            gx_frag_early = early(kGxFrag, sizeof kGxFrag);
+            for (unsigned i = 0; i < 16; ++i) gx_frag_stages_early[i] = early(kStages[i].code, kStages[i].bytes);
+        }
         fs_vert = module(gpu.device, kFullscreenVert, sizeof kFullscreenVert);
         clear_frag = module(gpu.device, kClearFrag, sizeof kClearFrag);
         copy_frag = module(gpu.device, kCopyFrag, sizeof kCopyFrag);
@@ -624,7 +660,9 @@ struct Renderer::Impl {
             for (uint32_t i = 0; i <= gx::kShapeWords; ++i) entries[i] = {i, uint32_t(i * sizeof(uint32_t)), sizeof(uint32_t)};
             info = {1 + gx::kShapeWords, entries, sizeof values, values};
         }
-        const VkShaderModule fs = shape ? gx_frag_stages[((*shape)[0] >> 10) & 15] : k.depth_out ? gx_frag_depth : gx_frag;
+        const bool early = k.depth_out == 2;
+        const VkShaderModule fs = shape ? (early ? gx_frag_stages_early : gx_frag_stages)[((*shape)[0] >> 10) & 15]
+                                  : k.depth_out == 1 ? gx_frag_depth : early ? gx_frag_early : gx_frag;
         return make_pipeline(gx_vert, fs, gx_layout, true, kTopology[k.topology], b, true, true, logic,
                              k.topology == 1 && gpu.wide_lines, shape ? &info : nullptr, k.small_vertices != 0, gpu.dynamic_blend);
     }
@@ -659,7 +697,7 @@ struct Renderer::Impl {
                 gx::ShapeWords w;
                 std::memcpy(w.data(), p + one, sizeof w);
                 const SpecKey key{k, gx::intern_shape(w)};
-                if (!k.depth_out && requested.insert(key).second) spec.push_back({false, key});
+                if (k.depth_out != 1 && requested.insert(key).second) spec.push_back({false, key});
                 p += one + sizeof w, n -= one + sizeof w;
             } else {
                 return;  // damaged: keep what was read
@@ -703,7 +741,7 @@ struct Renderer::Impl {
             // topology, depth-writing or not, either vertex layout) are all
             // built now, so no draw ever waits for one.
             for (uint8_t topology = 0; topology < 3; ++topology)
-                for (uint8_t depth_out = 0; depth_out < 2; ++depth_out)
+                for (uint8_t depth_out = 0; depth_out < 3; ++depth_out)
                     for (uint8_t small = 0; small < 2; ++small) {
                         gx::PipelineKey k{};
                         k.topology = topology, k.depth_out = depth_out, k.small_vertices = small;
@@ -765,7 +803,7 @@ struct Renderer::Impl {
     VkPipeline gx_pipeline_lookup(const gx::PipelineKey& raw, uint32_t shape) {
         ++draws_total;
         const gx::PipelineKey k = base_key(raw);
-        if (specialize != Specialize::kOff && specialize_on && !k.depth_out) {  // depth-writing draws (rare) keep the ubershader
+        if (specialize != Specialize::kOff && specialize_on && k.depth_out != 1) {  // depth-writing draws (rare) keep the ubershader
             const SpecKey key{k, shape};
             if (auto it = specialized.find(key); it != specialized.end()) {
                 ++draws_specialized;
@@ -1206,6 +1244,7 @@ struct Renderer::Impl {
             host::transition(cmd, target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             copy_dumps->push_back(std::move(dmp));
         }
+        if (c.to_memory && !c.to_xfb) read_back(cmd, s, c, *target);
         barrier(cmd);
         begin_efb(cmd);
         if (c.clear && (c.clear_color || c.clear_alpha || c.clear_depth)) {
@@ -1251,6 +1290,56 @@ struct Renderer::Impl {
             vkCmdPushConstants(cmd, clear_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof q, &q);
             vkCmdDraw(cmd, 3, 1, 0, 0);
         }
+    }
+
+    // A small copy for the CPU: one texel of each of its pixels (the middle
+    // one, above the console's resolution) into the slot's buffer.
+    void read_back(VkCommandBuffer cmd, Slot& s, const gx::Copy& c, const Image& target) {
+        constexpr VkDeviceSize kRoom = 4096;  // 64 copies a frame
+        if (!s.readback.buffer) s.readback = Buffer::host_visible(gpu, kRoom, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        const VkDeviceSize at = s.readbacks.empty() ? 0 : s.readbacks.back().at + 64;
+        if (at + 64 > kRoom) {
+            static bool said = false;
+            approximated(said, "more than 64 EFB copies for the CPU in a frame: the rest aren't written to memory");
+            return;
+        }
+        VkBufferImageCopy regions[16];
+        uint32_t n = 0;
+        for (uint32_t y = 0; y < c.dest_height; ++y)
+            for (uint32_t x = 0; x < c.dest_width; ++x) {
+                VkBufferImageCopy& r = regions[n++] = {};
+                r.bufferOffset = at + 4 * (y * 4 + x);
+                r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                r.imageOffset = {int32_t(x * scale + scale / 2), int32_t(y * scale + scale / 2), 0};
+                r.imageExtent = {1, 1, 1};
+            }
+        host::transition(cmd, target.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        vkCmdCopyImageToBuffer(cmd, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s.readback.buffer, n, regions);
+        host::transition(cmd, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        s.readbacks.push_back({at, c.dest & 0x1FFFFFFFu, c.dest_width, c.dest_height});
+    }
+    // The slot's GPU work is done: its copies for the CPU go to guest memory,
+    // as the texture the console would have written (a 4x4 tile: alpha and
+    // red of each pixel, then green and blue). The game's thread may be
+    // running: it sees the bytes a frame or two after the copy, where the
+    // console has them when the GPU reaches the copy.
+    void finish_readbacks(Slot& s) {
+        for (const Slot::Readback& r : s.readbacks) {
+            const uint8_t* px = static_cast<const uint8_t*>(s.readback.mapped) + r.at;
+            uint8_t* tile = rt::guest_ptr(0x80000000u | r.dest);
+            for (uint32_t y = 0; y < r.height; ++y)
+                for (uint32_t x = 0; x < r.width; ++x) {
+                    const uint32_t i = y * 4 + x;
+                    tile[2 * i] = px[4 * i + 3], tile[2 * i + 1] = px[4 * i];
+                    tile[32 + 2 * i] = px[4 * i + 1], tile[32 + 2 * i + 1] = px[4 * i + 2];
+                }
+        }
+        s.readbacks.clear();
+    }
+    // Readbacks of frames the GPU has finished, without waiting for it.
+    void poll_readbacks() {
+        for (Slot& s : slots)
+            if (!s.readbacks.empty() && vkGetFenceStatus(gpu.device, s.fence) == VK_SUCCESS) finish_readbacks(s);
     }
 
     void clamp_rect(VkRect2D& r) const {
@@ -1325,10 +1414,12 @@ struct Renderer::Impl {
 
     void render(gx::Frame& f) {
         collect_specialized();
+        poll_readbacks();  // the last frame's, if the GPU is done with it
         slot = (slot + 1) % 2;
         Slot& s = slots[slot];
         const uint64_t w0 = gx::now_ns();  // the GPU finishing the frame before last
         check(vkWaitForFences(gpu.device, 1, &s.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+        finish_readbacks(s);
         gx::recorder_stats().gpu_wait_ns.fetch_add(gx::now_ns() - w0, std::memory_order_relaxed);
         if (timed[slot]) {  // the frame this slot drew last: done (its fence passed)
             uint64_t t[2];
@@ -1619,6 +1710,7 @@ struct Renderer::Impl {
             s.indices.destroy(gpu);
             s.states.destroy(gpu);
             s.staging.destroy(gpu);
+            s.readback.destroy(gpu);
             vkDestroyDescriptorPool(gpu.device, s.descriptors, nullptr);
             vkDestroyFence(gpu.device, s.fence, nullptr);
             vkDestroyCommandPool(gpu.device, s.pool, nullptr);
@@ -1637,6 +1729,8 @@ struct Renderer::Impl {
         for (VkDescriptorSetLayout l : {states_layout, textures_layout, copy_set_layout}) vkDestroyDescriptorSetLayout(gpu.device, l, nullptr);
         for (VkShaderModule m : {gx_vert, gx_frag, gx_frag_depth, fs_vert, clear_frag, copy_frag}) vkDestroyShaderModule(gpu.device, m, nullptr);
         for (VkShaderModule m : gx_frag_stages) vkDestroyShaderModule(gpu.device, m, nullptr);
+        vkDestroyShaderModule(gpu.device, gx_frag_early, nullptr);
+        for (VkShaderModule m : gx_frag_stages_early) vkDestroyShaderModule(gpu.device, m, nullptr);
         if (timestamps) vkDestroyQueryPool(gpu.device, timestamps, nullptr);
         efb.destroy(gpu);
         if (efb_other.image) efb_other.destroy(gpu);
@@ -1661,6 +1755,10 @@ void Renderer::save_now() {
     impl_->save_now(keys);
 }
 Renderer::~Renderer() { impl_->destroy(); }
+void Renderer::finish_copies() {
+    vkDeviceWaitIdle(impl_->gpu.device);
+    impl_->poll_readbacks();
+}
 void Renderer::render(gx::Frame& frame) {
     const uint64_t t0 = gx::now_ns();
     impl_->render(frame);

@@ -22,6 +22,10 @@ Stats gpu_stats();
 // How long the guest has waited for room in the GPU thread's queue, in all.
 uint64_t fifo_wait_ns();
 
+// Commands given straight to the decoder on the calling thread, as the GPU
+// thread gives it the pipe's bursts (the tests and their bench: no registers
+// mapped, no GPU thread; a command may be split between calls).
+void decode_commands(const uint8_t* bytes, size_t size);
 // mkdd --bench-record <file.dff> [times]: decode and record a frame
 // captured with MKDD_DFF that many times (default 200) and print how
 // long recording it takes (no window, no game run; RAM and registers from the
