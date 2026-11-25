@@ -147,7 +147,16 @@ def build(symbols, dol):
     text = sorted((a, a + s) for a, s, _, t, _ in dol.sections if t)
     init_end = text[0][1]
     rows = []
-    for address, _, name, lib, obj, _ in sorted(symbols):
+    alone_end = None
+    for address, size, name, lib, obj, _ in sorted(symbols):
+        if lib == "-" and alone_end is None:
+            # kartLocale.o is linked alone before JSystem and has one function: what follows
+            # it, named or not, is JSystem's (J3DU's weak template functions, mostly unnamed)
+            alone_end = address + size
+        elif alone_end:
+            address, alone_end = alone_end, 0
+        if lib == "-" and alone_end == 0:
+            lib, obj = "JSystemV.a", "J3DUMotion.cpp"
         plan, label = decide(address, name, lib, obj, init_end)
         section = next(i for i, (lo, hi) in enumerate(text) if lo <= address < hi)
         if rows and rows[-1][2:] == [plan, label, section]:

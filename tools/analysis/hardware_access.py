@@ -5,14 +5,17 @@ For every load and store (and `dcbz`, `dcbz_l`), the base register's value is
 traced back on the straight line through the function: `lis`, `addi`, `ori`,
 register copies, and loads of a pointer variable (small data via r2/r13, or
 an absolute `lis`/`lwz`) whose initial value is in the DOL. If the address
-is known, it's classified:
+is known, it's classified (GameCube memory map):
 
-  wgpipe     0xCC008000: the GX write-gather pipe (the command FIFO)
-  hw-legacy  0xCC000000-0xCC00FFFF otherwise: CP, PE, VI, PI, MI, DSP, DI, SI, EXI, AI
-  hw-wii     0xCD000000-0xCD00FFFF: Hollywood (IPC, GPIO, the Wii's DI/SI/EXI/AI ...)
-  mem1-unc   0xC0000000-0xC17FFFFF: MEM1 through its uncached mirror
-  mem2-unc   0xD0000000-0xD3FFFFFF: MEM2 through its uncached mirror
-  locked     0xE0000000-0xE0003FFF: the locked cache (a scratchpad in L1)
+  cp       0xCC000000: command processor      pe    0xCC001000: pixel engine
+  vi       0xCC002000: video interface        pi    0xCC003000: processor interface (interrupts, FIFO)
+  mi       0xCC004000: memory interface       dsp   0xCC005000: DSP mailboxes, ARAM, audio DMA
+  dvd      0xCC006000: disc interface         si    0xCC006400: serial interface (controllers)
+  exi      0xCC006800: EXI (cards, RTC, BBA)  ai    0xCC006C00: audio streaming interface
+  wgpipe   0xCC008000: the GX write-gather pipe (the command FIFO)
+  mem-unc  0xC0000000-0xC17FFFFF: main memory through its uncached mirror
+  locked   0xE0000000-0xE0003FFF: the locked cache (a scratchpad in L1)
+  lowmem   0x80000000-0x800030FF: the OS globals and boot information in low memory
 
 The trace doesn't follow branches back into loops or values passed in from a
 caller, so it finds addresses a function builds itself. A pointer the game
@@ -21,7 +24,8 @@ here: the runtime catches those, as every mirror and register access traps
 during bring-up (docs/roadmap-and-design-targets.md).
 
 Usage:
-  hardware_access.py --qilin build/qilin --dol main.dol [--list]
+  hardware_access.py --qilin build/qilin --dol main.dol [--plan data/GM4E01/plan.tsv]
+                     [--symbols work/symbols.txt] [--cfg cfg.json] [--list]
 """
 import argparse
 import collections
@@ -30,17 +34,26 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import identify_libraries as il  # noqa: E402
+import gcdol  # noqa: E402
 
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CLASSES = [
-    ("wgpipe", 0xCC008000, 0xCC009000),
-    ("hw-legacy", 0xCC000000, 0xCC010000),
-    ("hw-wii", 0xCD000000, 0xCD010000),
-    ("mem1-unc", 0xC0000000, 0xC1800000),
-    ("mem2-unc", 0xD0000000, 0xD4000000),
+    ("wgpipe", 0xCC008000, 0xCC008040),
+    ("cp", 0xCC000000, 0xCC001000),
+    ("pe", 0xCC001000, 0xCC002000),
+    ("vi", 0xCC002000, 0xCC003000),
+    ("pi", 0xCC003000, 0xCC004000),
+    ("mi", 0xCC004000, 0xCC005000),
+    ("dsp", 0xCC005000, 0xCC006000),
+    ("dvd", 0xCC006000, 0xCC006400),
+    ("si", 0xCC006400, 0xCC006800),
+    ("exi", 0xCC006800, 0xCC006C00),
+    ("ai", 0xCC006C00, 0xCC007000),
+    ("mem-unc", 0xC0000000, 0xC1800000),
     ("locked", 0xE0000000, 0xE0004000),
-    ("lowmem", 0x80000000, 0x80004000),  # the OS globals and boot information in low memory
+    ("lowmem", 0x80000000, 0x80003100),
 ]
+REGISTERS = ("wgpipe", "cp", "pe", "vi", "pi", "mi", "dsp", "dvd", "si", "exi", "ai")
 MEMOP = re.compile(r"^(l|st)(b|h|w|f|mw|sw|psq_)\w*$|^(dcbz|dcbz_l|dcbf|dcbst|dcbi|icbi)$")
 DISP = re.compile(r"^(\w+) (\w+),(-?\d+)\((r\d+)\)$")      # stw r4,-32768(r3)
 INDEXED = re.compile(r"^(\w+) (\w+),(r\d+),(r\d+)$")        # stwx r4,r3,r5 / dcbz r3,r4 (via rA0)
@@ -98,9 +111,9 @@ def gpr_writes(m, text):
 
 
 class Tracer:
-    def __init__(self, result, r2, r13):
-        self.insns = result["insns"]
-        self.dol = result["dol"]
+    def __init__(self, insns, dol, r2, r13):
+        self.insns = insns
+        self.dol = dol
         self.r2, self.r13 = r2, r13
 
     def value(self, r, before, start, depth=0):
@@ -160,20 +173,30 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--qilin", required=True)
     ap.add_argument("--dol", required=True)
-    ap.add_argument("--list", action="store_true", help="list every access found outside replaced code")
+    ap.add_argument("--plan", default=os.path.join(ROOT, "data", "GM4E01", "plan.tsv"))
+    ap.add_argument("--symbols", help="symbols.txt (port_symbols.py): name the functions")
+    ap.add_argument("--cfg", help="an existing `qilin cfg --json` of the DOL")
+    ap.add_argument("--list", action="store_true", help="list every access found in lifted code")
     args = ap.parse_args()
 
-    r = il.analyse(args.qilin, args.dol)
-    insns, funcs, labels = r["insns"], r["funcs"], r["labels"]
-    import struct
-    r2, r13 = il.small_data_bases(insns, struct.unpack(">I", r["dol"].data[0xE0:0xE4])[0])
-    tracer = Tracer(r, r2, r13)
+    dol = gcdol.Dol(args.dol)
+    insns = gcdol.parse_insns(gcdol.run_qilin(args.qilin, args.dol, "insns"))
+    funcs = gcdol.cfg_functions(gcdol.run_qilin(args.qilin, args.dol, "cfg", args.cfg))
+    plan = gcdol.Plan(args.plan)
+    names = {a: n for a, _, n, _, _, _ in gcdol.read_symbols(args.symbols)} if args.symbols else {}
+    _, r2, r13 = gcdol.small_data_bases(dol)
+    tracer = Tracer(insns, dol, r2, r13)
 
     per_lib = collections.defaultdict(collections.Counter)
     funcs_lib = collections.defaultdict(lambda: collections.defaultdict(set))
+    kinds = {}
+    order = []
     found = []
-    for i, (s, e) in enumerate(funcs):
-        lib = labels[i]
+    for s, e, _ in funcs:
+        kind, lib = plan.decide(s)
+        if lib not in kinds:
+            kinds[lib] = kind
+            order.append(lib)
         for a in range(s, e, 4):
             w, m, text = insns.get(a, (0, "", ""))
             if not MEMOP.match(m):
@@ -208,30 +231,34 @@ def main():
             funcs_lib[lib][cls].add(s)
             found.append((a, s, lib, cls, addr, text))
 
-    order = [seg["lib"] for seg in r["segs"]]
-    seen = []
+    used = [c[0] for c in CLASSES if any(per_lib[lib][c[0]] for lib in order)]
+    print("| Library | Plan | " + " | ".join(used) + " |")
+    print("|---|---|" + "---|" * len(used))
     for lib in order:
-        if lib not in seen:
-            seen.append(lib)
-    names = [c[0] for c in CLASSES]
-    print("| Library | Plan | " + " | ".join(names) + " |")
-    print("|---|---|" + "---|" * len(names))
-    for lib in seen:
         if not per_lib[lib]:
             continue
-        plan = il.PLAN.get(lib, ("?", ""))[0]
-        cells = [f"{per_lib[lib][c]} ({len(funcs_lib[lib][c])})" if per_lib[lib][c] else "" for c in names]
-        print(f"| {lib} | {plan} | " + " | ".join(cells) + " |")
+        cells = [f"{per_lib[lib][c]} ({len(funcs_lib[lib][c])})" if per_lib[lib][c] else "" for c in used]
+        print(f"| {lib} | {kinds[lib]} | " + " | ".join(cells) + " |")
     print()
     print("Cells: accesses (functions).")
-    outside = [f for f in found if il.PLAN.get(f[2], ("?",))[0] != "replace"]
-    print(f"Accesses outside replaced libraries: {len(outside)} in {len({f[1] for f in outside})} functions")
-    if args.list:
-        for a, s, lib, cls, addr, text in outside:
-            print(f"  {a:08X} in {s:08X} [{lib}] {cls} {addr:08X}: {text}")
+    lifted = [f for f in found if kinds[f[2]] == "lift"]
+    print(f"Accesses in lifted code: {len(lifted)} in {len({f[1] for f in lifted})} functions")
+    by_func = collections.defaultdict(list)
+    for f in lifted:
+        by_func[f[1]].append(f)
+    for s in sorted(by_func):
+        hits = by_func[s]
+        what = collections.Counter(h[3] for h in hits)
+        span = sorted({h[4] for h in hits})
+        print(f"  {s:08X} {names.get(s, '?')} [{hits[0][2]}]: "
+              + ", ".join(f"{c} x{n}" for c, n in what.items())
+              + f" ({span[0]:08X}" + (f"..{span[-1]:08X})" if len(span) > 1 else ")"))
+        if args.list:
+            for a, _, _, cls, addr, text in hits:
+                print(f"      {a:08X} {cls} {addr:08X}: {text}")
     # Data words holding a hardware register address: pointer variables such as the SDK's
     # __VIRegs. (Mirror addresses aren't counted: floats like -2.0 fall in those ranges.)
-    ptrs = [(a, v) for a, v in r["dol"].data_words() if classify(v) in ("wgpipe", "hw-legacy", "hw-wii")]
+    ptrs = [(a, v) for a, v in dol.data_words() if classify(v) in REGISTERS]
     print(f"Data words holding a hardware register address: {len(ptrs)}")
     for a, v in ptrs:
         print(f"  {a:08X} = {v:08X} ({classify(v)})")
