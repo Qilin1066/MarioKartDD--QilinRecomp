@@ -37,7 +37,7 @@ static_assert(std::endian::native == std::endian::little, "hosts are little-endi
 struct Cpu;
 using GuestFn = void (*)(Cpu&);
 
-// Called for an access outside cached MEM1 and MEM2 (hardware registers, the
+// Called for an access outside cached MEM1 (hardware registers, the
 // write-gather pipe, uncached mirrors, the locked cache), for an indirect call,
 // when guest code traps, and when a replaced or dropped function is called
 // (the runtime runs its native replacement). Each must not return if it can't
@@ -72,13 +72,13 @@ struct Cpu {
     }
 };
 
-// Cached MEM1 (0x80000000, 24 MB), MEM2 (0x90000000, 64 MB) and the 16 KB
-// locked cache (0xE0000000: the game does its paired-single work there, every
-// skinned vertex of a fight) are plain host memory at mem + address, kept in
-// the guest's byte order. Accesses from 0xC0000000 to 0xDFFFFFFF take the slow
-// branch: the uncached RAM mirrors and the write-gather pipe are handled
-// there, the rest by the hooks. Anywhere else that nothing backs faults, and
-// the crash report names the address.
+// The guest is a GameCube: cached MEM1 (0x80000000, 24 MB) and the 16 KB
+// locked cache (0xE0000000) are plain host memory at mem + address, kept in
+// the guest's byte order; there is no MEM2. Accesses from 0xC0000000 to
+// 0xDFFFFFFF take the slow branch: the uncached mirror of MEM1 and the
+// write-gather pipe are handled there, the rest (the hardware registers at
+// 0xCC000000) by the hooks. Anywhere else nothing backs, so an access faults
+// and the crash report names the address.
 constexpr uint32_t kSlowFrom = 0xC0000000u, kSlowSize = 0x20000000u;
 QILIN_INLINE bool is_slow(uint32_t a) { return a - kSlowFrom < kSlowSize; }
 
@@ -91,12 +91,10 @@ inline PipeWrite g_pipe_write = nullptr;
 inline bool is_pipe(uint32_t a) { return (a & ~31u) == 0xCC008000u; }
 
 // Plain memory in the slow range, for an access wholly inside it: the uncached
-// mirrors of MEM1 (0xC0000000) and MEM2 (0xD0000000), the same memory as
-// 0x80000000 and 0x90000000. The address in mem, else 0 (the hooks take it:
-// hardware).
+// mirror of MEM1 (0xC0000000), the same memory as 0x80000000. The address in
+// mem, else 0 (the hooks take it: hardware).
 inline uint32_t plain_memory(uint32_t a, unsigned size) {
     if (a - 0xC0000000u <= 0x01800000u - size) return a - 0x40000000u;
-    if (a - 0xD0000000u <= 0x04000000u - size) return a - 0x40000000u;
     return 0;
 }
 
@@ -218,7 +216,7 @@ inline uint32_t mulhwu(uint32_t a, uint32_t b) { return static_cast<uint32_t>((u
 
 // ---------------------------------------------------------------- floating point
 //
-// Broadway's floating-point results, bit for bit, as Dolphin's interpreter
+// Gekko's floating-point results (Broadway's are the same), bit for bit, as Dolphin's interpreter
 // records them from hardware tests (Source/Core/Core/PowerPC/Interpreter/
 // Interpreter_FPUtils.h, Common/FloatUtils.cpp; written here from those rules).
 // The game runs with FPSCR[NI] set (OSInit calls PPCSetFpNonIEEEMode), round

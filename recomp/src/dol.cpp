@@ -11,11 +11,10 @@ namespace qilin {
 namespace {
 
 constexpr KnownBuild kKnownBuilds[] = {
-    // Europe/Australia, disc revision 1 (Redump: "Mario Kart: Double Dash!! (Europe,
-    // Australia) (En,Fr,De,Es,It) (Rev 1)"). docs/dol-analysis.md has what
-    // was checked.
-    {"6ae3388ff644758f030bb28de28f898885dc7c2da76bff082faae9eb60e66137", "R7PP01", 1,
-     "Mario Kart: Double Dash!! (Europe, Australia)"},
+    // USA, disc revision 0 (GM4E01; Redump: "Mario Kart: Double Dash!! (USA)").
+    // docs/recompiler-core.md has what was checked.
+    {"e96b8578451b9157e2b68fe5e918ebb572940c3ea54d6c8c7d45c24382bf12ae", "GM4E01", 0,
+     "Mario Kart: Double Dash!! (USA)"},
 };
 
 constexpr size_t kHeaderSize = 0x100;
@@ -50,7 +49,7 @@ std::expected<Dol, std::string> Dol::load(const std::filesystem::path& path) {
 
 std::expected<Dol, std::string> Dol::parse(std::span<const uint8_t> file) {
     if (file.size() < kHeaderSize) return fail("not a DOL: shorter than its 256-byte header");
-    if (file.size() > kMem1Size + kHeaderSize) return fail("not a DOL: larger than the Wii's MEM1");
+    if (file.size() > kMem1Size + kHeaderSize) return fail("not a DOL: larger than the console's 24 MB of RAM");
 
     Dol dol;
     dol.file_size = static_cast<uint32_t>(file.size());

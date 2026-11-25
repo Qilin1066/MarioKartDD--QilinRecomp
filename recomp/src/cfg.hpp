@@ -72,6 +72,7 @@ struct Function {
     std::vector<JumpTable> jtabs;
     std::vector<uint32_t> bad;         // reached an invalid word, or left the text section
     std::vector<uint32_t> escapes;     // branch targets outside the function that aren't clean boundaries
+    std::vector<uint32_t> absolute;    // `bla` to an address outside the image (low memory: exception-vector code)
     std::vector<uint32_t> imm_ptrs;    // lis/addi pairs pointing into text
     uint32_t bytes() const { return 4 * static_cast<uint32_t>(insns.size()); }
 };
@@ -88,13 +89,17 @@ struct Suspect {
 //            targets any word of it: inside a function right after code that
 //            can't fall through, or CodeWarrior's leftovers just past a
 //            function's end (a lone blr, or an epilogue after a final bctr);
+//   data     not reached, nothing branches or points to it, and it starts at an
+//            address reached code forms with lis/addi (a table the code reads:
+//            the linker's section tables in .init, a string);
 //   unknown  anything else. Done means unknown == 0 in every lifted library.
 struct Coverage {
     std::string section;
     uint32_t lo = 0, hi = 0;
-    uint64_t code = 0, padding = 0, dead = 0, unknown = 0;
+    uint64_t code = 0, padding = 0, dead = 0, data = 0, unknown = 0;
     std::vector<std::pair<uint32_t, uint32_t>> unknown_spans;  // [lo, hi)
     std::vector<std::pair<uint32_t, uint32_t>> dead_spans;     // [lo, hi): code nothing reaches or points at
+    std::vector<std::pair<uint32_t, uint32_t>> data_spans;     // [lo, hi): data the code addresses
 };
 
 // part / whole as a percentage with `decimals` places, in integer arithmetic,
@@ -116,6 +121,7 @@ public:
     // Decoded word at a text address (invalid outside text).
     ppc::Insn insn(uint32_t a) const;
     bool in_text(uint32_t a) const;
+    bool outside_image(uint32_t a) const { return !dol_.mapped(a); }
     // Does execution never continue past this instruction?
     static bool is_terminator(const ppc::Insn& in);
 

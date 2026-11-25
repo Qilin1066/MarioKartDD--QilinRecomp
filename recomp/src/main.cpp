@@ -1,4 +1,4 @@
-// qilin: Mario Kart: Double Dash!! (Wii) static recompiler (work in progress).
+// qilin: Mario Kart: Double Dash!! (GameCube) static recompiler.
 //
 //   qilin info    <main.dol> [--json out.json]   SHA-256, supported build, entry point, sections, BSS
 //   qilin insns   <main.dol> [-o out.txt]        every word of the text sections, decoded
@@ -209,13 +209,14 @@ int cmd_coverage(const Args& a) {
     cfg.run();
     uint64_t unknown = 0;
     for (const Coverage& c : cfg.coverage()) {
-        const uint64_t words = c.code + c.padding + c.dead + c.unknown;
-        std::println("{} {:08X}-{:08X}: {} words: code {} ({}), padding {}, dead {}, unknown {} ({}) in {} spans", c.section,
-                     c.lo, c.hi, words, c.code, percent(c.code, words, 3), c.padding, c.dead, c.unknown,
+        const uint64_t words = c.code + c.padding + c.dead + c.data + c.unknown;
+        std::println("{} {:08X}-{:08X}: {} words: code {} ({}), padding {}, dead {}, data {}, unknown {} ({}) in {} spans", c.section,
+                     c.lo, c.hi, words, c.code, percent(c.code, words, 3), c.padding, c.dead, c.data, c.unknown,
                      percent(c.unknown, words, 3), c.unknown_spans.size());
         if (a.list) {
             for (const auto& [lo, hi] : c.unknown_spans) std::println("  {:08X}-{:08X} ({} words)", lo, hi, (hi - lo) / 4);
             for (const auto& [lo, hi] : c.dead_spans) std::println("  dead {:08X}-{:08X} ({} words)", lo, hi, (hi - lo) / 4);
+            for (const auto& [lo, hi] : c.data_spans) std::println("  data {:08X}-{:08X} ({} words)", lo, hi, (hi - lo) / 4);
         }
         unknown += c.unknown;
     }
@@ -357,7 +358,7 @@ int cmd_lift(const Args& a) {
         }
         if (++n % kChunk == 0) flush();
     }
-    flush();
+    if (!chunk.empty()) flush();  // (not when the last chunk came out full: that would be a file too many)
     while (a.files && files < a.files) flush();
     if (a.files && files != a.files) throw Failure{std::format("{} functions don't fit {} files", n, a.files)};
     header += "}  // namespace qilin::gen\n";

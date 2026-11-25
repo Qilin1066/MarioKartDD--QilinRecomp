@@ -53,6 +53,7 @@ bool in_slice(const Insn& in, std::string* why) {
     }
     if (s.flags & ppc::kPrivileged) return no(std::format("privileged ({})", s.name));
     if ((s.flags & ppc::kOe) && in.oe()) return no(std::format("overflow-enable form ({}o)", s.name));
+    if (ppc::lmw_loads_base(in)) return no("lmw with its base among the registers loaded");
     switch (in.op) {
     case Op::lswi: case Op::lswx: case Op::stswi: case Op::stswx: return no("string load/store");
     case Op::sc: return no("system call");
@@ -772,6 +773,11 @@ private:
                     line(std::format("{} = {};", LR(), hex(pc + 4)));
                     return true;
                 }
+                if (in.aa() && f_.outside_image && f_.outside_image(t)) {
+                    // `bla` into low memory (exception-vector code, copied there at run time): the dispatcher's.
+                    line(std::format("{} = {}; {} c.hooks->call(c, {}); {}", LR(), hex(pc + 4), sync_out(), hex(t), sync_in()));
+                    return true;
+                }
                 if (!f_.is_function || !f_.is_function(t)) {
                     error_ = std::format("call to {:08X}, which isn't a known function", t);
                     return false;
@@ -1016,6 +1022,7 @@ LiftInput lift_input(const Cfg& cfg, const Function& f) {
     in.falls_into = f.falls_into;
     const auto& fs = cfg.functions();
     in.is_function = [&fs](uint32_t a) { return fs.contains(a); };
+    in.outside_image = [&cfg](uint32_t a) { return cfg.outside_image(a); };
     in.pure_call = [&cfg](uint32_t target, RegEffects& e) {
         const FunctionInsns code = [&cfg](uint32_t start) {
             std::vector<std::pair<uint32_t, Insn>> v;

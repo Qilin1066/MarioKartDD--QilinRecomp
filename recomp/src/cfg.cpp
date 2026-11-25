@@ -176,11 +176,13 @@ void Cfg::add_start(uint32_t a, Origin o) {
 // in any order the scheduler chose, all on the straight line into the bctr.
 // Where the function containing `a` most likely starts, before any analysis
 // has found it: the nearest stack-frame set-up (stwu r1, -n(r1)) at a clean
-// boundary, or the section start.
+// boundary, the word after the nearest padding or data (a function is one run
+// of code), or the section start.
 uint32_t Cfg::prologue_before(uint32_t lo, uint32_t a) const {
     for (uint32_t p = a; p > lo;) {
         p -= 4;
         const Insn in = insn(p);
+        if (!in.valid()) return p + 4;
         if (in.op == Op::stwu && in.rd() == 1 && in.ra() == 1 && in.simm() < 0 && clean_boundary(p)) return p;
     }
     return lo;
@@ -283,13 +285,15 @@ bool Cfg::reaches_alone(uint32_t def, uint32_t use, unsigned r, uint32_t start, 
 
 // The value of GPR r at `at` when the function sets it more than once, but
 // the last time before `at` is `lis rX, hi` (possibly with `addi`/`ori rX,
-// rX, lo` right after) at the head of a region that can only be entered
-// through that head: a loop set up after earlier, unrelated uses of the
-// register. The region [head, end] grows to cover every branch back into it;
-// any branch into it from before the head, or any other write in it, fails.
+// rX, lo` right after, or `addi r, rY, lo` after `lis rY, hi`) at the head of
+// a region that can only be entered through that head: a loop set up after
+// earlier, unrelated uses of the register. The region [head, end] grows to
+// cover every branch back into it; any branch into it from before the head,
+// or any other write in it, fails. A volatile register (r3-r12) qualifies
+// only if the region makes no call.
 std::optional<uint32_t> Cfg::region_constant(uint32_t start, uint32_t fend, uint32_t at, unsigned r,
                                              Regions& regions) const {
-    if (r < 14) return std::nullopt;  // calls must preserve it
+    if (r == 0 || r == 1 || r == 2 || r == 13) return std::nullopt;
     std::optional<uint32_t> last;
     for (uint32_t p = start; p < at; p += 4) {
         const Insn in = insn(p);
@@ -302,14 +306,17 @@ std::optional<uint32_t> Cfg::region_constant(uint32_t start, uint32_t fend, uint
     const Insn w = insn(*last);
     if (w.op == Op::addis && w.ra() == 0) {
         value = w.uimm() << 16;
-    } else if (((w.op == Op::addi && w.ra() == r) || (w.op == Op::ori && w.rd() == r && w.ra() == r)) && *last > start) {
-        // The `lis` is the previous writer of r on the straight line.
+    } else if (((w.op == Op::addi && w.ra() != 0) || (w.op == Op::ori && w.ra() == r)) && *last > start) {
+        // The `lis` is the previous writer of the high half's register (r
+        // itself, or another the low half is added to) on the straight line.
+        const unsigned high_reg = w.op == Op::addi ? w.ra() : w.rd();
         std::optional<uint32_t> hi;
         for (uint32_t p = *last; p > start;) {
             p -= 4;
             const Insn x = insn(p);
             if (!x.valid() || ends_straight_line(x)) return std::nullopt;
-            if (writes_gpr(x, r)) {
+            if (high_reg < 14 && (ppc::spec(x.op).flags & ppc::kLk) && x.lk()) return std::nullopt;  // a call may change it
+            if (writes_gpr(x, high_reg)) {
                 hi = p;
                 break;
             }
@@ -343,9 +350,10 @@ std::optional<uint32_t> Cfg::region_constant(uint32_t start, uint32_t fend, uint
         const Insn in = insn(p);
         if (!in.valid()) return std::nullopt;
         const bool call = (ppc::spec(in.op).flags & ppc::kLk) && in.lk() && !not_calls_.contains(p);
+        if (call && r < 14) return std::nullopt;  // a call may change a volatile register
         if (!call && writes_gpr(in, r) && !epilogue_restore(p)) return std::nullopt;
     }
-    regions.emplace_back(head, end);
+    regions.emplace_back(head + 4, end);  // (a pointer to the head itself enters through it: the function's start, say)
     return value;
 }
 
@@ -503,23 +511,31 @@ bool Cfg::resolve_table(uint32_t start, uint32_t bound, uint32_t fend, uint32_t 
     if (!lw || insn(*lw).op != Op::lwzx) return false;
     const Insn load = insn(*lw);
     // The table address: lis rX, hi; addi rA, rX, lo (or ori).
-    const auto base_def = def_of(load.ra(), *lw);
-    if (!base_def) return false;
-    const Insn base = insn(*base_def);
-    if (!((base.op == Op::addi && base.ra() != 0) || base.op == Op::ori)) return false;
-    const unsigned high_reg = base.op == Op::addi ? base.ra() : base.rd();  // ori rA, rS, uimm: rS is in the rD field
-    const uint32_t low = base.op == Op::addi ? static_cast<uint32_t>(base.simm()) : base.uimm();
-    std::optional<uint32_t> high_value;
-    if (const auto hi_def = def_of(high_reg, *base_def)) {
-        const Insn high = insn(*hi_def);
-        if (high.op != Op::addis || high.ra() != 0) return false;
-        high_value = high.uimm() << 16;
+    uint32_t table = 0;
+    if (const auto base_def = def_of(load.ra(), *lw)) {
+        const Insn base = insn(*base_def);
+        if (!((base.op == Op::addi && base.ra() != 0) || base.op == Op::ori)) return false;
+        const unsigned high_reg = base.op == Op::addi ? base.ra() : base.rd();  // ori rA, rS, uimm: rS is in the rD field
+        const uint32_t low = base.op == Op::addi ? static_cast<uint32_t>(base.simm()) : base.uimm();
+        std::optional<uint32_t> high_value;
+        if (const auto hi_def = def_of(high_reg, *base_def)) {
+            const Insn high = insn(*hi_def);
+            if (high.op != Op::addis || high.ra() != 0) return false;
+            high_value = high.uimm() << 16;
+        } else {
+            high_value = constant_reg(start, at, high_reg);  // a data-pool base set up earlier
+            if (!high_value) high_value = region_constant(start, fend, at, high_reg, regions);  // ... or at a loop's head
+        }
+        if (!high_value) return false;
+        table = *high_value + low;
     } else {
-        high_value = constant_reg(start, at, high_reg);  // a data-pool base set up earlier
-        if (!high_value) high_value = region_constant(start, fend, at, high_reg, regions);  // ... or at a loop's head
+        // The whole address in a register set before a loop that is entered
+        // by a jump to its condition at the foot (the SDK's GXSetVtxDescv):
+        // nothing on the straight line above the switch defines it.
+        const auto whole = region_constant(start, fend, at, load.ra(), regions);
+        if (!whole) return false;
+        table = *whole;
     }
-    if (!high_value) return false;
-    const uint32_t table = *high_value + low;
     const DolSection* data = dol_.section_at(table);
     if (!data || data->text || table % 4) return false;
     // The index: slwi rB, rI, 2; or rB stepping by 4 alongside rI (scaled_index).
@@ -654,6 +670,7 @@ Cfg::Explored Cfg::explore(uint32_t start, uint32_t bound) const {
                 if (in.lk()) {
                     if (not_calls_.contains(a)) break;  // reads the PC; execution continues
                     if (in_text(target)) f.calls.insert(target);
+                    else if (in.aa() && !dol_.mapped(target)) f.absolute.push_back(a);  // low memory: the dispatcher's
                     else f.escapes.push_back(a);
                     break;
                 }
@@ -910,10 +927,14 @@ std::vector<Coverage> Cfg::coverage() const {
             if (const uint32_t v = dol_.u32(a); in_text(v)) referenced.insert(v);
     }
     auto padding = [](const Insn& in) { return in.word == 0 || in.word == 0x60000000u; };  // zero, nop
+    // Addresses reached code forms with lis/addi: an unreached run that starts
+    // at one is data the code reads (a start there was tried, and didn't hold).
+    std::set<uint32_t> addressed;
+    for (const auto& [start, f] : funcs_) addressed.insert(f.imm_ptrs.begin(), f.imm_ptrs.end());
 
     std::vector<Coverage> out;
     for (const DolSection* s : text_) {
-        Coverage c{s->name(), s->address, s->end(), 0, 0, 0, 0, {}, {}};
+        Coverage c{s->name(), s->address, s->end(), 0, 0, 0, 0, 0, {}, {}, {}};
         for (uint32_t a = s->address; a < s->end();) {
             const size_t i = (a - text_lo_) / 4;
             if (owned[i]) {
@@ -941,6 +962,9 @@ std::vector<Coverage> Cfg::coverage() const {
             if (dead) {
                 c.dead += words;
                 c.dead_spans.emplace_back(a, b);
+            } else if (!targeted && addressed.contains(a) && !funcs_.contains(a)) {
+                c.data += words;
+                c.data_spans.emplace_back(a, b);
             } else {
                 c.unknown += words;
                 c.unknown_spans.emplace_back(a, b);
@@ -972,9 +996,9 @@ std::string Cfg::summary() const {
                      insns, proven + heuristic, proven, heuristic, icalls, itails, tails, falls);
     s += std::format("{} suspects, {} rejected starts\n", suspects_.size(), rejected_.size());
     for (const Coverage& c : coverage()) {
-        const uint64_t words = c.code + c.padding + c.dead + c.unknown;
-        s += std::format("{} {:08X}-{:08X}: code {} ({}), padding {}, dead {}, unknown {} in {} spans\n", c.section, c.lo,
-                         c.hi, c.code, percent(c.code, words, 2), c.padding, c.dead, c.unknown, c.unknown_spans.size());
+        const uint64_t words = c.code + c.padding + c.dead + c.data + c.unknown;
+        s += std::format("{} {:08X}-{:08X}: code {} ({}), padding {}, dead {}, data {}, unknown {} in {} spans\n", c.section, c.lo,
+                         c.hi, c.code, percent(c.code, words, 2), c.padding, c.dead, c.data, c.unknown, c.unknown_spans.size());
     }
     return s;
 }
