@@ -303,7 +303,7 @@ set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/bo
 # ---- The game: built only from the player's own main.dol ----
 # cmake -DQILIN_GAME_DOL=<extracted disc>/sys/main.dol: qilin lift turns it
 # into C++ at build time (into the build tree, never the source tree), with the
-# library plan in data/R7PP01, and the mkdd executable is built from that.
+# library plan in data/GM4E01, and the mkdd executable is built from that.
 set(QILIN_GAME_DOL "" CACHE FILEPATH "Mario Kart: Double Dash!! (PAL, Rev 1) main.dol: builds the mkdd executable")
 if(QILIN_GAME_DOL)
     if(NOT QILIN_HOST)
@@ -324,9 +324,9 @@ if(QILIN_GAME_DOL)
     endforeach()
     add_custom_command(
         OUTPUT ${gen}/functions.hpp ${gen_sources}
-        COMMAND qilin lift ${QILIN_GAME_DOL} -o ${gen} --plan ${CMAKE_CURRENT_SOURCE_DIR}/data/R7PP01/plan.tsv
+        COMMAND qilin lift ${QILIN_GAME_DOL} -o ${gen} --plan ${CMAKE_CURRENT_SOURCE_DIR}/data/GM4E01/plan.tsv
                 --files ${QILIN_LIFT_FILES}
-        DEPENDS qilin ${QILIN_GAME_DOL} ${CMAKE_CURRENT_SOURCE_DIR}/data/R7PP01/plan.tsv
+        DEPENDS qilin ${QILIN_GAME_DOL} ${CMAKE_CURRENT_SOURCE_DIR}/data/GM4E01/plan.tsv
         COMMENT "Lifting the game's main.dol to C++")
     add_executable(mkdd ${mkdd_runtime_sources} ${gen_sources})
     target_include_directories(mkdd PRIVATE mkdd/src ${gen})
@@ -404,7 +404,7 @@ if(QILIN_PLAYER_KIT)
 
     install(TARGETS qilin RUNTIME DESTINATION kit COMPONENT player)
     install(FILES "${kit_archive}" DESTINATION kit/lib COMPONENT player)
-    install(FILES "${CMAKE_BINARY_DIR}/kit.ninja" data/R7PP01/plan.tsv DESTINATION kit COMPONENT player)
+    install(FILES "${CMAKE_BINARY_DIR}/kit.ninja" data/GM4E01/plan.tsv DESTINATION kit COMPONENT player)
     file(GLOB kit_headers runtime/include/qilin/rt/*.hpp)
     install(FILES ${kit_headers} DESTINATION kit/include/qilin/rt COMPONENT player)
 endif()
