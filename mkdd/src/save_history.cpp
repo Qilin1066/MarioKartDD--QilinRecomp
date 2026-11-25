@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <sstream>
 #include <string_view>
 #include <system_error>
@@ -56,6 +57,11 @@ bool copy_flushed(const fs::path& from, const fs::path& to, std::string& error) 
     if (!ok) { fs::remove(to, ec); return fail(error, "save copy flush/close failed"); }
     return true;
 }
+// A save lives on a memory card: <folder>/card-a or card-b (card.cpp), one host file each.
+bool on_a_card(const fs::path& relative) {
+    const auto first = relative.begin();
+    return first != relative.end() && (*first == "card-a" || *first == "card-b") && std::next(first) != relative.end();
+}
 bool backup_paths(const fs::path& folder, const fs::path& backup, fs::path& relative, fs::path& target, std::string& error) {
     const fs::path history = folder / "save-backups";
     relative = backup.lexically_relative(history);
@@ -64,20 +70,20 @@ bool backup_paths(const fs::path& folder, const fs::path& backup, fs::path& rela
     if (!parent.ends_with(kSuffix)) return fail(error, "invalid backup directory");
     parent.resize(parent.size() - std::char_traits<char>::length(kSuffix));
     const fs::path destination = relative.parent_path().parent_path() / parent;
-    if (!plain_path(folder / "nand", destination)) return fail(error, "invalid save destination");
-    target = folder / "nand" / destination;
+    if (!on_a_card(destination) || !plain_path(folder, destination)) return fail(error, "invalid save destination");
+    target = folder / destination;
     std::error_code ec;
     if (!fs::is_regular_file(backup, ec)) return fail(error, "backup is missing", ec);
     return true;
 }
 }  // namespace
 
-bool backup_save(const fs::path& nand, const fs::path& file, std::string& error) {
-    const fs::path relative = file.lexically_relative(nand);
-    if (!plain_path(nand, relative)) return fail(error, "invalid save path");
+bool backup_save(const fs::path& folder, const fs::path& file, std::string& error) {
+    const fs::path relative = file.lexically_relative(folder);
+    if (!on_a_card(relative) || !plain_path(folder, relative)) return fail(error, "invalid save path");
     std::error_code ec;
     if (!fs::is_regular_file(file, ec)) return fail(error, "save is not a regular file", ec);
-    const fs::path history_root = nand.parent_path() / "save-backups";
+    const fs::path history_root = folder / "save-backups";
     fs::path history_relative = relative;
     history_relative += kSuffix;
     if (!plain_path(history_root, history_relative)) return fail(error, "invalid history path");
@@ -131,9 +137,8 @@ std::vector<SaveBackup> save_backups(const fs::path& folder) {
 #endif
             char label[64]{};
             std::strftime(label, sizeof label, "%Y-%m-%d %H:%M:%S UTC", &calendar);
-            const std::string relative_save = target.lexically_relative(folder / "nand").generic_string();
-            const std::string kind = relative_save.starts_with("title/00010000/52375050/data/") ? "Game save: " : "Wii data: ";
-            out.push_back({it->path(), kind + target.filename().string() + " / " + label});
+            const std::string kind = *target.lexically_relative(folder).begin() == "card-a" ? "Card A: " : "Card B: ";
+            out.push_back({it->path(), kind + target.stem().string() + " / " + label});
         }
     }
     std::sort(out.begin(), out.end(), [](const SaveBackup& a, const SaveBackup& b) { return a.file.filename() > b.file.filename(); });
@@ -185,7 +190,7 @@ bool apply_save_restore(const fs::path& folder, std::string& error) {
     fs::path temporary = target; temporary += ".restore.tmp";
     fs::remove(temporary, ec); ec.clear();
     if (!copy_flushed(backup, temporary, error)) return false;
-    if (fs::exists(target, ec) && !backup_save(folder / "nand", target, error)) { fs::remove(temporary, ec); return false; }
+    if (fs::exists(target, ec) && !backup_save(folder, target, error)) { fs::remove(temporary, ec); return false; }
     fs::rename(temporary, target, ec);
 #if defined(_WIN32)
     // A restarted child can reach this before the old process has finished closing its handles.
