@@ -41,8 +41,13 @@ So the port works per object:
   5. Weak functions the release build emitted in another object: leftover
      retail functions are compared with every object's unmatched weak
      functions, and named only on equal sizes or the call graph's word.
-  6. Confidence per name (the last column):
-       A  equal size, and the neighbours in the object or the call graph agree
+  6. Data: port_data.py places the map's data symbols by the references of the
+     functions named so far, and the alignment is repeated with them: a
+     function should reference the data it was first to reference in the
+     debug build (a getter is named by the variable it returns).
+  7. Confidence per name (the last column):
+       A  equal size, and the neighbours in the object, the call graph or the
+          data it reads agree
        B  equal size alone, or unequal size confirmed by the call graph
        C  placed by order between matched neighbours; or equal size with a
           doubt (the call graph contradicts, or a skipped debug function of
@@ -74,6 +79,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gcdol  # noqa: E402
+import port_data  # noqa: E402
 
 K = 3                 # anchor: this many consecutive equal sizes
 ANCHOR_BYTES = 0x100  # ... adding up to at least this
@@ -118,6 +124,8 @@ class Port:
                 self.objects.append([d.lib, d.obj, i, i])
             self.objects[-1][3] = i + 1
         self.match = {}
+        self.data_kids = {}
+        self.data_users = {}
         self.fixed = {}
         self.order = []
         # the link tree, by function index
@@ -487,6 +495,11 @@ class Port:
                 if k in self.match:
                     for rj in callers.get(self.match[k], ()):
                         b[rj] = min(6.0, b.get(rj, 0.0) + 2.0)
+            for address in self.data_kids.get(i, ()):  # ... and whoever reads its data, if few do
+                users = self.data_users.get(address, ())
+                if len(users) <= 6:
+                    for rj in users:
+                        b[rj] = min(8.0, b.get(rj, 0.0) + (3.0 if len(users) <= 2 else 1.0))
         return bonus
 
     def prune(self):
@@ -528,6 +541,12 @@ class Port:
         for k in self.children.get(i, ()):
             if k in self.match and self.match[k] in self.rcalls[j]:
                 yes += 1
+        mine = self.data_kids.get(i, ())
+        if mine:  # the data this function was the first to reference
+            hit = sum(1 for address in mine if address in self.rdata[j])
+            yes += hit
+            if not hit and all(self.small[0] <= a < self.small[1] for a in mine):
+                no += 1  # small data is addressed directly: a function reads its own
         return yes, no
 
     # ---- 5. confidence ----------------------------------------------------------------------
@@ -716,7 +735,27 @@ class Port:
         else:
             self.align_all(self.call_bonus())
         self.adopt()
-        return self.confidence()
+        conf = self.confidence()
+        # The data each function reads: place the map's data symbols by the names so far, align
+        # again with them as evidence.
+        _, r2, r13 = gcdol.small_data_bases(self.dol)
+        data = port_data.Data(self, r2, r13)
+        sec = data.sections
+        self.small = (sec[".sdata"][0], sec[".sbss2"][1])
+        for _ in range(2):
+            _, self.data_kids = data.place(conf)
+            self.data_users = collections.defaultdict(set)
+            for j, refs in enumerate(self.rdata):
+                for address in refs:
+                    self.data_users[address].add(j)
+            self.adopted = {}
+            self.align_all(self.call_bonus())
+            self.align_all(self.call_bonus())
+            self.adopt()
+            conf = self.confidence()
+        placed, self.data_kids = data.place(conf)
+        self.data = placed
+        return conf
 
 
 def pal_symbols(path):
@@ -769,6 +808,7 @@ def main():
     ap.add_argument("--qilin", help="the qilin executable (or give --cfg)")
     ap.add_argument("--cfg", help="an existing `qilin cfg --json` of the DOL")
     ap.add_argument("-o", "--output", help="symbols.txt to write (atomically)")
+    ap.add_argument("--data-output", help="symbols-data.txt to write: the map's data symbols in the retail DOL")
     ap.add_argument("--pal", help="third_party/mkdd/Release_eu/symbols.yml: check against the PAL names")
     ap.add_argument("--pal-slices", help="third_party/mkdd/Release_eu/dol_slices.yml: the PAL build's object "
                     "order places objects that no anchor does")
@@ -805,6 +845,24 @@ def main():
         g = got[lib]
         print(f"{lib:14s} {n:6d} {sum(g.values()):6d} " + " ".join(f"{g[c]:6d}" for c in "ABCD"))
     named = len(conf)
+    shown = [d for d in port.data if not d[2].name.startswith("@")]
+    tally = collections.Counter((d[2].section, d[3]) for d in shown)
+    print("data symbols placed (compiler-made @names left out):")
+    for section in port_data.SECTIONS:
+        total = sum(1 for x in port.map.sections.get(section, []) if not x.name.startswith("@"))
+        print(f"  {section:8s} {sum(tally[(section, c)] for c in 'ABC'):5d} of {total:5d}   "
+              + "  ".join(f"{c} {tally[(section, c)]}" for c in "ABC"))
+    if args.data_output:
+        rows = sorted(f"{r:08X} {size:06X} {sym.name} {sym.lib or '-'} {sym.obj} {c}\n" for r, size, sym, c in shown)
+        tmp = args.data_output + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write("# GM4E01 rev 0 main.dol: data symbols ported from the debug build's map by tools/analysis/port_symbols.py\n")
+            f.write("# ADDRESS SIZE NAME LIBRARY OBJECT CONFIDENCE (the size is the debug build's; LIBRARY/OBJECT the debug map's)\n")
+            f.write("# Confidence: A between agreeing references from named functions; B one reference, or chosen between two\n")
+            f.write("# shifts; C by the nearest reference only (tools/analysis/port_data.py)\n")
+            f.writelines(rows)
+        os.replace(tmp, args.data_output)
+        print(f"wrote {len(rows)} data symbols to {args.data_output}")
     print(f"objects judged absent from the retail DOL: {len(port.absent)} "
           f"({sum(port.objects[n][3] - port.objects[n][2] for n in port.absent)} functions)")
     print(f"weak functions found in another object than the debug build's: {len(port.adopted)}")
