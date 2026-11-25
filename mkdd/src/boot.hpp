@@ -19,10 +19,12 @@ void load_game(const std::filesystem::path& folder);
 std::span<const qilin::rt::Provided> os_replacements();
 std::span<const qilin::rt::Provided> dvd_replacements();
 std::span<const qilin::rt::Provided> vi_replacements();
-// The console settings the game reads (sc.cpp), from the settings file; before the game starts.
-void set_console(unsigned language, bool widescreen, unsigned sound);
-std::span<const qilin::rt::Provided> sc_replacements();
-std::span<const qilin::rt::Provided> wpad_replacements();
-std::span<const qilin::rt::Provided> nand_replacements();
+// For libraries whose replacements aren't written yet (stubs_tmp.cpp: to be deleted).
+std::span<const qilin::rt::Provided> temporary_stubs();
+
+// The console settings the game reads from SRAM (os.cpp), from the settings
+// file; before the game starts. `language` is SRAM's: 0 English, 1 German,
+// 2 French, 3 Spanish, 4 Italian, 5 Dutch.
+void set_console(unsigned language, bool stereo, bool progressive);
 
 }  // namespace mkdd

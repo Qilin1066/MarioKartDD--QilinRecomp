@@ -16,6 +16,8 @@ constexpr KnownBuild kKnownBuilds[] = {
     // was checked.
     {"6ae3388ff644758f030bb28de28f898885dc7c2da76bff082faae9eb60e66137", "R7PP01", 1,
      "Mario Kart: Double Dash!! (Europe, Australia)"},
+    // Mario Kart: Double Dash!! (USA), GameCube, disc revision 0.
+    {"e96b8578451b9157e2b68fe5e918ebb572940c3ea54d6c8c7d45c24382bf12ae", "GM4E01", 0, "Mario Kart: Double Dash!! (USA)"},
 };
 
 constexpr size_t kHeaderSize = 0x100;

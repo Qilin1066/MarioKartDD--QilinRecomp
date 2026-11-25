@@ -1,6 +1,6 @@
-// Booting the game: main.dol into MEM1, the boot information the disc loader
-// leaves in low memory, then what __start does, natively (the plan replaces
-// the start-up code: docs/code-analysis.md).
+// Booting the game: main.dol into MEM1, the boot information the console's
+// boot ROM and the disc's apploader leave in low memory, then what __start
+// does, natively (the plan replaces the start-up code).
 #include "qilin/rt/report.hpp"
 #include "boot.hpp"
 
@@ -30,51 +30,54 @@ std::vector<uint8_t> read_file(const std::filesystem::path& p) {
     return out;
 }
 
-// Low memory as the Wii's boot program, IOS53 and the disc's apploader leave
-// it for a retail console. The values are Dolphin's (Boot_BS2Emu.cpp,
-// IOS/VersionInfo.cpp: hardware observations, GPL-2.0-or-later; facts only,
-// docs/prior-art.md). The OS replacements own the OS's own state, so these
-// matter for code that reads them directly: lifted code reads only the bus
-// clock (docs/runtime-analysis.md).
-void write_boot_info(std::span<const uint8_t> disc_header) {
-    std::memcpy(rt::guest_ptr(0x80000000u), disc_header.data(), 0x20);  // disc ID, version, magic
-    rt::poke32(0x80000020u, 0x0D15EA5Eu);  // boot magic
+uint32_t be32(std::span<const uint8_t> d, size_t at) {
+    return uint32_t{d[at]} << 24 | uint32_t{d[at + 1]} << 16 | uint32_t{d[at + 2]} << 8 | d[at + 3];
+}
+
+constexpr uint32_t kMemSize = 0x01800000u, kMemEnd = 0x80000000u + kMemSize;
+
+// Low memory as a retail NTSC GameCube's boot ROM (the IPL) and the disc's
+// apploader leave it.
+//  - The apploader's part is from its own code (sys/apploader.img, the routine
+//    at 81200778): the debug monitor's size and address and the simulated
+//    memory size from BI2's first words; the file table at the top of memory,
+//    32-byte aligned, with BI2's 0x2000 bytes straight below it; the boot
+//    magic, arena and file-table words (the routine at 81200728). Arena high
+//    is the file table's address, so BI2 lies inside the arena: OSInit and
+//    __start read what they need from it before anything is allocated.
+//  - The IPL's part (memory size, console type, clocks, video mode, ARAM
+//    size) is the hardware's, as Dolphin documents it (facts only).
+void write_boot_info(std::span<const uint8_t> header, std::span<const uint8_t> bi2, std::span<const uint8_t> fst) {
+    std::memcpy(rt::guest_ptr(0x80000000u), header.data(), 0x20);  // the disc ID, to its magic (C2339F3D at +0x1C)
+    rt::poke32(0x80000028u, kMemSize);     // physical memory
+    rt::poke32(0x8000002Cu, 0x00000003u);  // console type: retail, HW2 (OSGetConsoleType, 800E5A00, returns it)
+    rt::poke32(0x800000CCu, 0);            // video mode: NTSC
+    rt::poke32(0x800000D0u, 0x01000000u);  // ARAM: 16 MB
+    rt::poke32(0x800000F8u, 162000000u);   // bus clock
+    rt::poke32(0x800000FCu, 486000000u);   // CPU clock
+
+    const uint32_t fst_max = be32(header, 0x42C);  // the disc header's FSTMaxLength
+    if (fst.size() > fst_max || fst_max > 0x00400000u)
+        rt::fatal(nullptr, "the disc's file table (%zu bytes) doesn't fit its header's limit (%u)", fst.size(), fst_max);
+    rt::poke32(0x800000E8u, be32(bi2, 0));                     // debug monitor size (0)
+    rt::poke32(0x800000ECu, (kMemEnd - be32(bi2, 0)) & ~31u);  // debug monitor address
+    const uint32_t simulated = be32(bi2, 4) ? be32(bi2, 4) : kMemSize;
+    if (simulated != kMemSize)
+        rt::fatal(nullptr, "BI2 asks for %08X bytes of simulated memory: only a retail console's %08X is modelled", simulated, kMemSize);
+    rt::poke32(0x800000F0u, simulated);
+    const uint32_t fst_at = (kMemEnd - fst_max) & ~31u, bi2_at = fst_at - 0x2000u;
+    std::memcpy(rt::guest_ptr(fst_at), fst.data(), fst.size());
+    std::memcpy(rt::guest_ptr(bi2_at), bi2.data(), 0x2000);
+    rt::poke32(0x800000F4u, bi2_at);
+    rt::poke32(0x80000020u, 0x0D15EA5Eu);  // booted from a disc by the apploader
     rt::poke32(0x80000024u, 1);
-    rt::poke32(0x80000028u, 0x01800000u);  // MEM1 size
-    rt::poke32(0x8000002Cu, 0x00000023u);  // console type: retail Wii (RVL retail 3)
-    rt::poke32(0x80000030u, 0);            // arena low: none, so OSInit uses the linker's
-    rt::poke32(0x80000034u, 0x817FEC60u);  // arena high
-    rt::poke32(0x800000ECu, 0x81800000u);  // debug monitor: none (top of MEM1)
-    rt::poke32(0x800000F0u, 0x01800000u);  // simulated memory size
-    rt::poke32(0x800000F4u, 0);            // BI2: none (no debugger, no arguments)
-    rt::poke32(0x800000F8u, 0x0E7BE2C0u);  // bus clock, 243 MHz
-    rt::poke32(0x800000FCu, 0x2B73A840u);  // CPU clock, 729 MHz
-    rt::poke32(0x800000CCu, 1);            // video: PAL (the IPL's VI set-up)
-    rt::poke32(0x800030D8u, 0xFFFFFFFFu);
-    rt::poke16(0x800030E0u, 0);            // PADInit
-    rt::poke16(0x800030E6u, 0x8201);
-    rt::poke32(0x80003100u, 0x01800000u);  // MEM1 physical and simulated size, end, arena
-    rt::poke32(0x80003104u, 0x01800000u);
-    rt::poke32(0x80003108u, 0x81800000u);
-    rt::poke32(0x8000310Cu, 0);
-    rt::poke32(0x80003110u, 0x81800000u);
-    rt::poke32(0x80003118u, 0x04000000u);  // MEM2, as IOS53 leaves it
-    rt::poke32(0x8000311Cu, 0x04000000u);
-    rt::poke32(0x80003120u, 0x93600000u);
-    rt::poke32(0x80003124u, 0x90000800u);  // MEM2 arena
-    rt::poke32(0x80003128u, 0x935E0000u);
-    rt::poke32(0x80003130u, 0x935E0000u);  // IPC buffer
-    rt::poke32(0x80003134u, 0x93600000u);
-    rt::poke32(0x80003138u, 0x00000011u);  // Hollywood revision
-    rt::poke32(0x80003140u, 0x0035161Fu);  // IOS53 version
-    rt::poke32(0x80003144u, 0x00030110u);
-    rt::poke32(0x80003148u, 0x93600000u);  // IOS's reserved MEM2
-    rt::poke32(0x8000314Cu, 0x93620000u);
-    rt::poke32(0x80003158u, 0x0000FF01u);  // RAM vendor
-    rt::poke8(0x8000315Cu, 0x80);          // boot flag
-    rt::poke16(0x8000315Eu, 0x0113);       // boot program version
-    std::memcpy(rt::guest_ptr(0x80003180u), disc_header.data(), 4);  // game ID, kept for the OS's check
-    rt::poke32(0x80003184u, 0x80000000u);
+    rt::poke32(0x80000030u, 0);        // arena low: none, so OSInit uses the linker's
+    rt::poke32(0x80000034u, fst_at);   // arena high
+    rt::poke32(0x80000038u, fst_at);   // the file table
+    rt::poke32(0x8000003Cu, fst_max);
+    rt::poke32(0x800030D8u, 0);  // system time's offset from the time base (64 bits)
+    rt::poke32(0x800030DCu, 0);
+    rt::poke16(0x800030E4u, 0);  // controller 4's buttons at boot (__check_pad3): none held
 }
 
 }  // namespace
@@ -85,16 +88,19 @@ void load_game(const std::filesystem::path& folder) {
     auto dol = qilin::Dol::load(dol_path);
     if (!dol) rt::fatal(nullptr, "%s: %s", dol_path.string().c_str(), dol.error().c_str());
     const qilin::KnownBuild* known = qilin::known_build(dol->sha256);
-    if (!known || known->disc_id != "R7PP01")
-        rt::fatal(nullptr, "%s isn't the supported build (Mario Kart: Double Dash!! PAL Rev 1, R7PP01): SHA-256 %s",
+    if (!known || known->disc_id != build::kDiscId)
+        rt::fatal(nullptr, "%s isn't the supported build (Mario Kart: Double Dash!! USA, GM4E01 revision 0): SHA-256 %s",
                   dol_path.string().c_str(), dol->sha256.c_str());
     // The image covers every section and the BSS; bytes outside the sections are zero.
     std::memcpy(rt::guest_ptr(dol->base()), dol->image().data(), dol->image().size());
 
-    const std::vector<uint8_t> boot = read_file(folder / "sys" / "boot.bin");
-    if (boot.size() < 0x20 || std::memcmp(boot.data(), "R7PP01", 6) != 0)
-        rt::fatal(nullptr, "%s isn't Mario Kart: Double Dash!!'s PAL disc header", (folder / "sys" / "boot.bin").string().c_str());
-    write_boot_info(std::span(boot).first(0x20));
+    const auto header_path = folder / "sys" / "boot.bin";
+    const std::vector<uint8_t> header = read_file(header_path);
+    if (header.size() < 0x440 || std::memcmp(header.data(), build::kDiscId, 6) != 0 || header[7] != 0)
+        rt::fatal(nullptr, "%s isn't the header of Mario Kart: Double Dash!!'s USA disc (GM4E01, revision 0)", header_path.string().c_str());
+    const std::vector<uint8_t> bi2 = read_file(folder / "sys" / "bi2.bin");
+    if (bi2.size() != 0x2000) rt::fatal(nullptr, "%s should be 8192 bytes", (folder / "sys" / "bi2.bin").string().c_str());
+    write_boot_info(header, bi2, read_file(folder / "sys" / "fst.bin"));
 }
 
 [[noreturn]] void start_game() {
@@ -121,10 +127,16 @@ void load_game(const std::filesystem::path& folder) {
     for (uint32_t e = b::kBssInitInfo; rt::peek32(e + 4) != 0; e += 8)
         std::memset(rt::guest_ptr(rt::peek32(e)), 0, rt::peek32(e + 4));
     rt::poke32(0x80000044u, 0);  // the debugger's exception mask
-    // DBInit, OSInit: native (os.cpp). No debugger, so no MetroTRK.
-    rt::call(c, 0x801E17F8u);  // DBInit
-    rt::call(c, 0x801FF230u);  // OSInit
-    // __check_pad3 resets when the buttons that ask for it are held at boot: none are.
+    // BI2's debug flag is 0 on a retail disc (no MetroTRK) and it gives no
+    // arguments: checked, since the rest of __start is skipped on that account.
+    const uint32_t bi2 = rt::peek32(0x800000F4u);
+    if (rt::peek32(bi2 + 0x0C) != 0 || rt::peek32(bi2 + 8) != 0)
+        rt::fatal(&c, "BI2 asks for a debugger (%u) or passes arguments (at %u): not a retail disc", rt::peek32(bi2 + 0x0C),
+                  rt::peek32(bi2 + 8));
+    rt::call(c, b::kDBInit);
+    rt::call(c, b::kOSInit);
+    // __check_pad3 resets the console when controller 4 holds a button
+    // combination at boot (0x800030E4): none is held.
     rt::call(c, b::kInitUser);  // static constructors
     c.r[3] = 0;                 // argc
     c.r[4] = 0;                 // argv

@@ -51,9 +51,16 @@ uint64_t idle_time_ns();
 // Called when the guest writes WPAR (PPCMtwpar), which resets the write-gather
 // pipe; the GPU (gpu.cpp) installs it.
 void on_wpar_write(void (*reset)());
-// The guest's time base: 60.75 MHz (a quarter of the bus clock) since boot,
-// less the time the game spent paused.
+// The guest's time base: 40.5 MHz (a quarter of the bus clock), counted from
+// 1 January 2000, 00:00 local time as on the console, less the time the game
+// spent paused.
 uint64_t time_base();
+// Whether a component cable is plugged in (the port's progressive setting,
+// set_console in boot.hpp): VIGetDTVStatus.
+bool component_cable();
+// The console's reset switch, held or not: the host sets it; the game reads
+// it through OSGetResetSwitchState.
+inline std::atomic<bool> g_reset_button{false};
 
 // Pausing the game for the settings menu. The main thread asks; the guest's
 // running thread parks at the next retrace (vi.cpp), and since only one
@@ -62,7 +69,7 @@ uint64_t time_base();
 // they were.
 void request_pause(bool on);
 bool game_parked();
-void park_if_requested();  // the guest's thread, at each retrace  // ticks since 1 January 2000, 00:00 local time, as on the console
+void park_if_requested();  // the guest's thread, at each retrace
 // Days since 1970-01-01 of a Gregorian date, and back.
 int64_t days_from_civil(int64_t y, unsigned m, unsigned d);
 void civil_from_days(int64_t days, int64_t& y, unsigned& m, unsigned& d);
@@ -71,7 +78,7 @@ void civil_from_days(int64_t days, int64_t& y, unsigned& m, unsigned& d);
 // main sets it up; it doesn't return.
 void set_command_line(int argc, char** argv);
 [[noreturn]] void restart_program();
-inline constexpr uint64_t kTimerHz = 60750000;
+inline constexpr uint64_t kTimerHz = 40500000;
 // A safe point: run what's queued if interrupts are on, then switch threads
 // if that woke one of higher priority (threads.cpp).
 void deliver_interrupts(qilin::rt::Cpu& c);
@@ -87,8 +94,10 @@ uint32_t interrupt_mask();  // the OS's: bit 31-n set masks interrupt n
 void set_interrupts_enabled(bool on);  // a thread switch restores the new thread's
 bool in_interrupt();                   // inside an interrupt's work
 
-// Raise OS interrupt `n` (__OS_INTERRUPT_*: 17 CP, 18 PE token, 19 PE
-// finish ...): its registered handler runs as an interrupt, if unmasked.
+// Raise OS interrupt `n` (__OS_INTERRUPT_*, listed in os.cpp: 5 audio DMA,
+// 6 ARAM, 7 DSP, 9-16 EXI, 17 CP, 18 PE token, 19 PE finish, 20 SI ...): its
+// registered handler runs as an interrupt, if unmasked; a masked one is held
+// until the OS unmasks it.
 void raise_interrupt(uint32_t n);
 // Inside an interrupt's work: run OS interrupt `n`'s handler now. False if
 // the OS has it masked (nothing ran). For level-triggered sources (the DSP).

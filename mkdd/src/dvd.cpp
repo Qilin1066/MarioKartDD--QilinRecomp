@@ -1,22 +1,28 @@
-// The DVD library's replacements: the disc's file system from sys/fst.bin,
-// file data from the extracted files/ folder.
+// The DVD library's replacements (dolphin/dvd): the disc's file system from
+// sys/fst.bin, its data from the extracted disc, and the drive's one-at-a-time
+// command queue with a drive's timing.
 //
-// Guest structures (RVL SDK, dvd.h): a DVDCommandBlock is 0x30 bytes, with its
-// state at +0x0C (0 done, 1 busy) and the bytes transferred at +0x20; a
-// DVDFileInfo is a command block, then the file's start (in 4-byte units, as
-// the Wii's FST stores it) at +0x30, its length at +0x34 and the callback for
+// Guest structures, from this SDK's code (DVDReadAbsAsyncPrio, 800AD9FC;
+// DVDFastOpen, 800AB860; DVDReadPrio, 800ABCD4): a DVDCommandBlock is 0x30
+// bytes, with the command at +0x08, the state at +0x0C (0 done, 1 busy,
+// 2 waiting, 10 cancelled, -1 fatal error), the disc offset at +0x10, the
+// length at +0x14, the buffer at +0x18, the bytes transferred at +0x20 and the
+// callback at +0x28; a DVDFileInfo is a command block, then the file's start
+// on the disc in bytes at +0x30, its length at +0x34 and the callback for
 // asynchronous reads at +0x38.
-#include <cstdlib>
-#include <set>
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
-#include <map>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "boot.hpp"
 #include "os.hpp"
+#include "threads.hpp"
 
 namespace mkdd {
 namespace rt = qilin::rt;
@@ -24,37 +30,109 @@ using rt::Cpu;
 
 namespace {
 
+uint32_t be32(const std::vector<uint8_t>& d, size_t at) {
+    return uint32_t{d[at]} << 24 | uint32_t{d[at + 1]} << 16 | uint32_t{d[at + 2]} << 8 | d[at + 3];
+}
+std::vector<uint8_t> read_whole(const std::filesystem::path& path) {
+    std::vector<uint8_t> d;
+    FILE* f = std::fopen(path.string().c_str(), "rb");
+    if (!f) rt::fatal(nullptr, "cannot read %s", path.string().c_str());
+    uint8_t buf[65536];
+    for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) d.insert(d.end(), buf, buf + n);
+    std::fclose(f);
+    return d;
+}
+
+// ---- the disc's data, by disc offset: all the drive ever reads. A disc
+// image (a GameCube .iso or .gcm isn't encrypted) would be a second kind.
+struct Disc {
+    virtual ~Disc() = default;
+    // `size` bytes from `offset` into `to`; false (with `what` saying why) if they can't be had.
+    virtual bool read(uint64_t offset, uint8_t* to, size_t size, std::string& what) = 0;
+};
+
+// An extracted disc: sys/ holds the header, BI2, the apploader, main.dol and
+// the file table, files/ the files, each at the offset the header or the file
+// table gives it. What lies between them reads as zeros.
+class ExtractedDisc final : public Disc {
+public:
+    struct Piece {
+        uint64_t offset, size;
+        std::filesystem::path path;
+    };
+    void add(uint64_t offset, uint64_t size, std::filesystem::path path) { pieces_.push_back({offset, size, std::move(path)}); }
+    void done() {
+        std::sort(pieces_.begin(), pieces_.end(), [](const Piece& a, const Piece& b) { return a.offset < b.offset; });
+    }
+    ~ExtractedDisc() override {
+        if (open_) std::fclose(open_);
+    }
+    bool read(uint64_t offset, uint8_t* to, size_t size, std::string& what) override {
+        std::memset(to, 0, size);
+        // The first piece that ends after the offset, then on while they overlap.
+        auto p = std::partition_point(pieces_.begin(), pieces_.end(), [&](const Piece& x) { return x.offset + x.size <= offset; });
+        for (; p != pieces_.end() && p->offset < offset + size; ++p) {
+            const uint64_t from = std::max(offset, p->offset), to_end = std::min(offset + size, p->offset + p->size);
+            if (from >= to_end) continue;
+            const size_t index = static_cast<size_t>(p - pieces_.begin());
+            if (!open_ || open_index_ != index) {
+                if (open_) std::fclose(open_);
+                open_ = std::fopen(p->path.string().c_str(), "rb");
+                open_index_ = index;
+                if (!open_) {
+                    what = "the game reads " + p->path.string() + ", which isn't there: extract the whole disc (files/ next to sys/)";
+                    return false;
+                }
+            }
+#if defined(_WIN32)
+            _fseeki64(open_, static_cast<long long>(from - p->offset), SEEK_SET);
+#else
+            fseeko(open_, static_cast<off_t>(from - p->offset), SEEK_SET);
+#endif
+            if (std::fread(to + (from - offset), 1, to_end - from, open_) != to_end - from) {
+                what = p->path.string() + " is shorter than the disc's file table says";
+                return false;
+            }
+        }
+        return true;
+    }
+
+private:
+    std::vector<Piece> pieces_;
+    FILE* open_ = nullptr;  // the file read last: reads come in runs from one file
+    size_t open_index_ = 0;
+};
+
+// ---- the file table
 struct Entry {
     bool dir;
     std::string name;
     uint32_t parent;  // dirs: the parent's index; files: the containing dir
-    uint32_t start;   // files: offset on the disc / 4; dirs: unused
+    uint32_t start;   // files: offset on the disc; dirs: unused
     uint32_t size;    // files: length; dirs: index after the last entry inside
     std::string path; // relative to files/, with '/'
 };
 
 std::vector<Entry> g_fst;
-std::map<uint32_t, uint32_t> g_by_start;  // a file's start -> its entry
+std::unique_ptr<Disc> g_disc;
+uint64_t g_disc_size = 0;  // the end of the last file: for the drive's speed across the disc
 uint32_t g_current_dir = 0;
-bool g_auto_invalidation = true;
 
-uint32_t be32(const std::vector<uint8_t>& d, size_t at) {
-    return uint32_t{d[at]} << 24 | uint32_t{d[at + 1]} << 16 | uint32_t{d[at + 2]} << 8 | d[at + 3];
-}
-
-void load_fst() {
-    if (!g_fst.empty()) return;
-    const auto path = game_folder() / "sys" / "fst.bin";
-    std::vector<uint8_t> d;
-    if (FILE* f = std::fopen(path.string().c_str(), "rb")) {
-        uint8_t buf[65536];
-        for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) d.insert(d.end(), buf, buf + n);
-        std::fclose(f);
-    }
-    if (d.size() < 12) rt::fatal(nullptr, "cannot read the disc's file table %s", path.string().c_str());
+void load_disc() {
+    const auto sys = game_folder() / "sys";
+    const std::vector<uint8_t> header = read_whole(sys / "boot.bin"), d = read_whole(sys / "fst.bin");
+    if (header.size() < 0x440) rt::fatal(nullptr, "%s is too short for a disc header", (sys / "boot.bin").string().c_str());
+    if (d.size() < 12) rt::fatal(nullptr, "cannot read the disc's file table %s", (sys / "fst.bin").string().c_str());
     const uint32_t count = be32(d, 8);
     const size_t strings = size_t{count} * 12;
-    if (count == 0 || strings > d.size()) rt::fatal(nullptr, "%s is malformed", path.string().c_str());
+    if (count == 0 || strings > d.size()) rt::fatal(nullptr, "%s is malformed", (sys / "fst.bin").string().c_str());
+    auto disc = std::make_unique<ExtractedDisc>();
+    std::error_code ec;
+    disc->add(0, 0x440, sys / "boot.bin");
+    disc->add(0x440, 0x2000, sys / "bi2.bin");
+    disc->add(0x2440, std::filesystem::file_size(sys / "apploader.img", ec), sys / "apploader.img");
+    disc->add(be32(header, 0x420), std::filesystem::file_size(sys / "main.dol", ec), sys / "main.dol");
+    disc->add(be32(header, 0x424), d.size(), sys / "fst.bin");
     g_fst.resize(count);
     // Directories own the entries up to their end index; walk with a stack of them.
     std::vector<uint32_t> dirs{0};
@@ -76,9 +154,12 @@ void load_fst() {
             x.parent = be32(d, e + 4);
             dirs.push_back(i);
         } else {
-            g_by_start[x.start] = i;
+            disc->add(x.start, x.size, game_folder() / "files" / std::filesystem::path(x.path));
+            g_disc_size = std::max(g_disc_size, uint64_t{x.start} + x.size);
         }
     }
+    disc->done();
+    g_disc = std::move(disc);
 }
 
 bool same_name(const std::string& a, std::string_view b) {
@@ -88,7 +169,8 @@ bool same_name(const std::string& a, std::string_view b) {
 }
 
 // The SDK's lookup: from the current directory, or the root after a leading
-// '/'; "." and ".." step in place and up; names compare without case.
+// '/'; "." and ".." step in place and up; names compare without case. (Long
+// names are allowed: OSInit sets the flag for it, 800E5C8C.)
 int32_t path_to_entry(std::string_view path) {
     uint32_t dir = g_current_dir;
     if (!path.empty() && path[0] == '/') {
@@ -119,114 +201,223 @@ int32_t path_to_entry(std::string_view path) {
     return static_cast<int32_t>(dir);
 }
 
-// Read from the file whose FST start is `start`: what the drive would return.
-int32_t read_file(Cpu& c, uint32_t start, uint32_t addr, uint32_t length, uint32_t offset) {
-    const auto it = g_by_start.find(start);
-    if (it == g_by_start.end()) rt::fatal(&c, "DVD read from %08X, which starts no file", start << 2);
-    const Entry& e = g_fst[it->second];
-    if (uint64_t{offset} + length > ((uint64_t{e.size} + 31) & ~uint64_t{31}))
-        rt::fatal(&c, "DVD read past the end of %s (%u bytes at %u)", e.path.c_str(), length, offset);
-    const auto host = game_folder() / "files" / e.path;
-    FILE* f = std::fopen(host.string().c_str(), "rb");
-    if (!f) {
-        // Development, with part of a disc: MKDD_DEV_MISSING_FILES=<list> reads a missing file
-        // as zeros and adds its name to the list (once), to find what a scene needs.
-        if (const char* list = std::getenv("MKDD_DEV_MISSING_FILES")) {
-            static std::set<std::string> said;
-            if (said.insert(e.path).second)
-                if (FILE* out = std::fopen(list, "a")) {
-                    std::fprintf(out, "%s\n", e.path.c_str());
-                    std::fclose(out);
-                }
-            std::memset(rt::guest_ptr(addr), 0, length);
-            return static_cast<int32_t>(length);
-        }
-        rt::fatal(&c, "the game reads %s, which isn't there: extract the whole disc (files/ next to sys/)",
-                  host.string().c_str());
-    }
-    std::memset(rt::guest_ptr(addr), 0, length);  // reads past the end of the file, up to the 32-byte unit, give zeros
-    std::fseek(f, static_cast<long>(offset), SEEK_SET);
-    const size_t got = std::fread(rt::guest_ptr(addr), 1, length, f);
-    std::fclose(f);
-    if (got < length && offset + got < e.size) rt::fatal(&c, "short read from %s", host.string().c_str());
-    return static_cast<int32_t>(length);
+// ---- the drive: one command at a time, the rest waiting by priority, each
+// finishing as an interrupt after the time a drive takes. The game's own
+// bookkeeping counts on reads taking time (a completion callback that runs
+// before the call that started the read has returned finds it half done).
+constexpr uint32_t kCommand = 0x08, kState = 0x0C, kOffset = 0x10, kLength = 0x14, kAddr = 0x18, kTransferred = 0x20,
+                   kCallback = 0x28;
+constexpr uint32_t kFileStart = 0x30, kFileLength = 0x34, kFileCallback = 0x38;
+enum : uint32_t { kEnd = 0, kBusy = 1, kWaiting = 2, kCancelled = 10, kFatal = 0xFFFFFFFFu };
+constexpr uint32_t kSyncQueue = 0x00000200u;  // threads in DVDReadPrio (a key of our own)
+
+struct Command {
+    uint32_t block;
+    uint32_t callback;  // guest (result, block), or 0
+    int32_t priority;
+};
+std::deque<Command> g_waiting;
+Command g_executing{};
+bool g_busy = false, g_completion_posted = false;
+uint64_t g_done_at = 0;  // time base
+uint64_t g_head = 0;     // where the last read ended on the disc
+
+// How long a read takes. The drive turns at a constant rate, so data passes
+// faster towards the outer edge: 2 MiB/s at the start of the disc to 3.125
+// MiB/s at the end of a full one (Dolphin's figures for the GameCube's drive),
+// taken here as linear in the offset. Moving the head costs a seek: 20 ms and
+// up to 100 ms more with the distance. MKDD_DVD_SPEED=<n> divides both (for
+// tests; 0: no time at all).
+double drive_speed() {
+    static const double speed = [] {
+        const char* e = std::getenv("MKDD_DVD_SPEED");
+        return e ? std::max(0.0, std::atof(e)) : 1.0;
+    }();
+    return speed;
+}
+uint64_t read_ticks(uint64_t offset, uint32_t length) {
+    if (drive_speed() == 0.0) return 0;
+    constexpr double kFullDisc = 1459978240.0, kMiB = 1048576.0;
+    const double rate = (2.0 + 1.125 * std::min(1.0, double(offset) / kFullDisc)) * kMiB;
+    const double distance = offset > g_head ? double(offset - g_head) : double(g_head - offset);
+    const double seek = distance < 32768.0 ? 0.0 : 0.020 + 0.100 * std::min(1.0, distance / kFullDisc);
+    return static_cast<uint64_t>((seek + double(length) / rate) / drive_speed() * double(kTimerHz));
 }
 
-void finish(uint32_t block, int32_t result) {
-    rt::poke32(block + 0x20, result < 0 ? 0 : static_cast<uint32_t>(result));
-    rt::poke32(block + 0x0C, result < 0 ? 0xFFFFFFFFu : 0);  // DVD_STATE_END, or FATAL_ERROR
+void start_next() {
+    if (g_busy || g_waiting.empty()) return;
+    g_executing = g_waiting.front();
+    g_waiting.pop_front();
+    g_busy = true;
+    const uint32_t b = g_executing.block;
+    rt::poke32(b + kState, kBusy);
+    g_done_at = time_base() + read_ticks(rt::peek32(b + kOffset), rt::peek32(b + kLength));
+    wake_idle();
+}
+
+void finish(Cpu& c, const Command& cmd, uint32_t state, int32_t result) {
+    rt::poke32(cmd.block + kState, state);
+    if (cmd.callback) guest_callback(c, cmd.callback, static_cast<uint32_t>(result), cmd.block);
+    wake_all(c, kSyncQueue);
+}
+
+void complete(Cpu& c) {  // as an interrupt
+    g_completion_posted = false;
+    if (!g_busy) return;  // cancelled since
+    const Command cmd = g_executing;
+    const uint32_t b = cmd.block, offset = rt::peek32(b + kOffset), length = rt::peek32(b + kLength), addr = rt::peek32(b + kAddr);
+    std::string what;
+    if (addr < 0x80000000u || uint64_t{addr} + length > 0x81800000u) rt::fatal(&c, "DVD read of %u bytes to %08X, outside memory", length, addr);
+    if (!g_disc->read(offset, rt::guest_ptr(addr), length, what)) rt::fatal(&c, "%s", what.c_str());
+    g_head = uint64_t{offset} + length;
+    rt::poke32(b + kTransferred, length);
+    g_busy = false;
+    start_next();  // before the callback, which may queue more behind it
+    finish(c, cmd, kEnd, static_cast<int32_t>(length));
+}
+
+void poll_drive() {
+    if (g_busy && !g_completion_posted && time_base() >= g_done_at) {
+        g_completion_posted = true;
+        post_interrupt(complete);
+    }
+}
+
+// DVDReadAbsAsyncPrio: queue a read by disc offset.
+void queue_read(uint32_t block, uint32_t addr, uint32_t length, uint32_t offset, uint32_t callback, int32_t priority) {
+    rt::poke32(block + kCommand, 1);
+    rt::poke32(block + kAddr, addr);
+    rt::poke32(block + kLength, length);
+    rt::poke32(block + kOffset, offset);
+    rt::poke32(block + kTransferred, 0);
+    rt::poke32(block + kCallback, callback);
+    rt::poke32(block + kState, kWaiting);
+    auto at = g_waiting.begin();
+    while (at != g_waiting.end() && at->priority <= priority) ++at;  // first come first served within a priority
+    g_waiting.insert(at, {block, callback, priority});
+    start_next();
+}
+
+// The bounds DVDReadPrio and DVDReadAsyncPrio check (they panic outside them):
+// the offset inside the file, the end within the file rounded up to the
+// drive's 32 bytes.
+void check_bounds(Cpu& c, const char* who, uint32_t fi, uint32_t length, uint32_t offset) {
+    const uint32_t size = rt::peek32(fi + kFileLength);
+    if (offset >= size) rt::fatal(&c, "%s: offset %u is outside the file (%u bytes)", who, offset, size);
+    if (uint64_t{offset} + length >= uint64_t{size} + 32) rt::fatal(&c, "%s: %u bytes at %u run past the file's end (%u bytes)", who, length, offset, size);
 }
 
 // ---- the API
-void DVDInit(Cpu&) { load_fst(); }
+void DVDInit(Cpu&) {  // OSInit calls it, and the game again
+    if (g_disc) return;
+    load_disc();
+    add_timer_source(poll_drive, [] { return g_busy && !g_completion_posted ? g_done_at : UINT64_MAX; });
+}
 
 void DVDConvertPathToEntrynum(Cpu& c) {
-    load_fst();
     c.r[3] = static_cast<uint32_t>(path_to_entry(reinterpret_cast<const char*>(rt::guest_ptr(c.r[3]))));
 }
 
+bool open_entry(uint32_t n, uint32_t fi) {
+    if (n >= g_fst.size() || g_fst[n].dir) return false;
+    rt::poke32(fi + kFileStart, g_fst[n].start);
+    rt::poke32(fi + kFileLength, g_fst[n].size);
+    rt::poke32(fi + kFileCallback, 0);
+    rt::poke32(fi + kState, kEnd);
+    return true;
+}
 void DVDFastOpen(Cpu& c) {  // (entrynum, fileInfo) -> TRUE, or FALSE for a directory or a bad number
-    load_fst();
-    const uint32_t n = c.r[3], fi = c.r[4];
-    if (n == 0 || n >= g_fst.size() || g_fst[n].dir) {
-        c.r[3] = 0;
-        return;
-    }
-    rt::poke32(fi + 0x30, g_fst[n].start);
-    rt::poke32(fi + 0x34, g_fst[n].size);
-    rt::poke32(fi + 0x38, 0);
-    rt::poke32(fi + 0x0C, 0);  // DVD_STATE_END
-    c.r[3] = 1;
+    c.r[3] = static_cast<int32_t>(c.r[3]) >= 0 && open_entry(c.r[3], c.r[4]);
+}
+void DVDOpen(Cpu& c) {  // (path, fileInfo) -> TRUE, or FALSE if there's no such file
+    const char* path = reinterpret_cast<const char*>(rt::guest_ptr(c.r[3]));
+    const int32_t n = path_to_entry(path);
+    if (n < 0) rt::log("DVDOpen: there's no %s on the disc (under /%s)", path, g_fst[g_current_dir].path.c_str());
+    c.r[3] = n >= 0 && open_entry(static_cast<uint32_t>(n), c.r[4]);
 }
 
-void DVDClose(Cpu& c) { c.r[3] = 1; }  // nothing is ever left in flight
-
-void DVDReadPrio(Cpu& c) {  // (fileInfo, addr, length, offset, prio) -> bytes read
-    const uint32_t fi = c.r[3];
-    const int32_t n = read_file(c, rt::peek32(fi + 0x30), c.r[4], c.r[5], c.r[6]);
-    finish(fi, n);
-    c.r[3] = static_cast<uint32_t>(n);
+// DVDCancel: take a command out of the queue, or stop the one running; its
+// callback hears -3. Done at once, so there's nothing to wait for.
+void cancel(Cpu& c, uint32_t block) {
+    const uint32_t state = rt::peek32(block + kState);
+    if (state == kWaiting) {
+        for (auto it = g_waiting.begin(); it != g_waiting.end(); ++it)
+            if (it->block == block) {
+                const Command cmd = *it;
+                g_waiting.erase(it);
+                finish(c, cmd, kCancelled, -3);
+                return;
+            }
+    } else if (state == kBusy && g_busy && g_executing.block == block) {
+        const Command cmd = g_executing;
+        g_busy = false;
+        start_next();
+        finish(c, cmd, kCancelled, -3);
+    }
+}
+void DVDCancel(Cpu& c) {  // (block) -> 0
+    cancel(c, c.r[3]);
+    c.r[3] = 0;
+}
+void DVDClose(Cpu& c) {  // (fileInfo) -> TRUE: cancels what the file still has going
+    cancel(c, c.r[3]);
+    c.r[3] = 1;
 }
 
 void DVDReadAsyncPrio(Cpu& c) {  // (fileInfo, addr, length, offset, callback, prio) -> TRUE
-    const uint32_t fi = c.r[3], callback = c.r[7];
-    const int32_t n = read_file(c, rt::peek32(fi + 0x30), c.r[4], c.r[5], c.r[6]);
-    rt::poke32(fi + 0x38, callback);
-    rt::poke32(fi + 0x0C, 1);  // busy until the "interrupt" says it's done
-    post_interrupt([fi, n, callback](Cpu& cc) {
-        finish(fi, n);
-        if (callback) guest_callback(cc, callback, static_cast<uint32_t>(n), fi);
-    });
+    const uint32_t fi = c.r[3];
+    check_bounds(c, "DVDReadAsync", fi, c.r[5], c.r[6]);
+    rt::poke32(fi + kFileCallback, c.r[7]);  // the SDK's own callback passes the result on to it: here it's called directly
+    queue_read(fi, c.r[4], c.r[5], rt::peek32(fi + kFileStart) + c.r[6], c.r[7], static_cast<int32_t>(c.r[8]));
     c.r[3] = 1;
+}
+
+void DVDReadPrio(Cpu& c) {  // (fileInfo, addr, length, offset, prio) -> bytes read, -1 on a fatal error, -3 if cancelled
+    const uint32_t fi = c.r[3];
+    check_bounds(c, "DVDRead", fi, c.r[5], c.r[6]);
+    queue_read(fi, c.r[4], c.r[5], rt::peek32(fi + kFileStart) + c.r[6], 0, static_cast<int32_t>(c.r[7]));
+    for (;;) {
+        const uint32_t state = rt::peek32(fi + kState);
+        if (state == kEnd) {
+            c.r[3] = rt::peek32(fi + kTransferred);
+            return;
+        }
+        if (state == kFatal || state == kCancelled) {
+            c.r[3] = state == kFatal ? 0xFFFFFFFFu : 0xFFFFFFFDu;
+            return;
+        }
+        wait_on(c, kSyncQueue);
+    }
 }
 
 void DVDGetCommandBlockStatus(Cpu& c) {
     deliver_interrupts(c);  // a polling loop: let a pending completion arrive
-    const uint32_t s = rt::peek32(c.r[3] + 0x0C);
+    const uint32_t s = rt::peek32(c.r[3] + kState);
     c.r[3] = s == 3 ? 1 : s;  // DVD_STATE_COVER_CLOSED reads as busy
 }
 
 void DVDGetDriveStatus(Cpu& c) {
     deliver_interrupts(c);
-    c.r[3] = 0;  // idle (nothing stays in flight past a safe point with interrupts on)
+    c.r[3] = g_busy ? kBusy : kEnd;
 }
-
-void DVDSetAutoInvalidation(Cpu& c) {
-    const bool was = g_auto_invalidation;
-    g_auto_invalidation = c.r[3] != 0;
-    c.r[3] = was;
-}
+void DVDCheckDisk(Cpu& c) { c.r[3] = 1; }  // the game's disc is in the drive
+void DVDGetCurrentDiskID(Cpu& c) { c.r[3] = 0x80000000u; }  // where the boot ROM read it to
 
 const rt::Provided kReplacements[] = {
-    {0x801E2AD4u, "DVDInit", DVDInit},
-    {0x801E2470u, "DVDConvertPathToEntrynum", DVDConvertPathToEntrynum},
-    {0x801E2778u, "DVDFastOpen", DVDFastOpen},
-    {0x801E27E0u, "DVDClose", DVDClose},
-    {0x801E28ECu, "DVDReadPrio", DVDReadPrio},
-    {0x801E2804u, "DVDReadAsyncPrio", DVDReadAsyncPrio},
-    {0x801E6B40u, "DVDGetCommandBlockStatus", DVDGetCommandBlockStatus},
-    {0x801E6C08u, "DVDGetDriveStatus", DVDGetDriveStatus},
-    {0x801E6CA4u, "DVDSetAutoInvalidation", DVDSetAutoInvalidation},
+    // dvdfs.c
+    {0x800AB56Cu, "DVDConvertPathToEntrynum", DVDConvertPathToEntrynum},
+    {0x800AB860u, "DVDFastOpen", DVDFastOpen},
+    {0x800AB8D4u, "DVDOpen", DVDOpen},
+    {0x800AB99Cu, "DVDClose", DVDClose},
+    {0x800ABBE4u, "DVDReadAsyncPrio", DVDReadAsyncPrio},
+    {0x800ABCD4u, "DVDReadPrio", DVDReadPrio},
+    // dvd.c
+    {0x800ABE14u, "DVDInit", DVDInit},
+    {0x800ADE4Cu, "DVDGetCommandBlockStatus", DVDGetCommandBlockStatus},
+    {0x800ADE98u, "DVDGetDriveStatus", DVDGetDriveStatus},
+    {0x800AE220u, "DVDCancel", DVDCancel},
+    {0x800AE2F0u, "DVDGetCurrentDiskID", DVDGetCurrentDiskID},
+    {0x800AE2F8u, "DVDCheckDisk", DVDCheckDisk},
 };
 
 }  // namespace

@@ -423,9 +423,7 @@ int main(int argc, char** argv) {
     rt::provide(mkdd::dvd_replacements());
     rt::provide(mkdd::vi_replacements());
     rt::provide(mkdd::thread_replacements());
-    rt::provide(mkdd::sc_replacements());
-    rt::provide(mkdd::wpad_replacements());
-    rt::provide(mkdd::nand_replacements());
+    rt::provide(mkdd::temporary_stubs());  // stubs_tmp.cpp: until PAD, CARD, AR and the DSP have their own
     mkdd::init_hardware();
     if (bench_dff) {  // then out at once: the GPU thread is waiting, and exit's destructors would wait for it
         const int code = mkdd::bench_recording(bench_dff, bench_times);
@@ -481,7 +479,7 @@ int main(int argc, char** argv) {
 
     const std::filesystem::path data = qilin::host::user_folder();
     mkdd::Settings settings = mkdd::load_settings(data);
-    mkdd::set_console(settings.language, settings.widescreen, settings.sound);
+    mkdd::set_console(0, settings.sound != 0, false);  // SRAM: English, the sound setting, no component cable
     const float aspect = settings.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;  // as the console tells the game (sc.cpp)
     std::unique_ptr<qilin::host::Display> display;
     std::unique_ptr<mkdd::Renderer> renderer;

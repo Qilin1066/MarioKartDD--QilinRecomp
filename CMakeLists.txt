@@ -246,10 +246,10 @@ add_test(NAME mkdd_threads_test COMMAND mkdd_threads_test)
 set_tests_properties(mkdd_threads_test PROPERTIES TIMEOUT 30)
 add_test(NAME mkdd_threads_test_shutdown COMMAND mkdd_threads_test)
 set_tests_properties(mkdd_threads_test_shutdown PROPERTIES TIMEOUT 30 ENVIRONMENT THREADS_TEST_LEAVE=shutdown
-                     PASS_REGULAR_EXPRESSION "the game chose to power off: closing")
+                     PASS_REGULAR_EXPRESSION "the game chose the console's menu: closing")
 add_test(NAME mkdd_threads_test_restart COMMAND mkdd_threads_test)
 set_tests_properties(mkdd_threads_test_restart PROPERTIES TIMEOUT 30 ENVIRONMENT THREADS_TEST_LEAVE=restart
-                     PASS_REGULAR_EXPRESSION "OSRestart started the program again(.|\n)*all passed")
+                     PASS_REGULAR_EXPRESSION "OSResetSystem started the program again(.|\n)*all passed")
 
 # The settings file's reader and writer.
 add_executable(mkdd_settings_test mkdd/tests/settings_test.cpp mkdd/src/settings.cpp)
@@ -298,7 +298,7 @@ if(Python3_FOUND)
 endif()
 
 # The game's runtime: everything in mkdd but the code lifted from main.dol.
-set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/wpad.cpp mkdd/src/nand.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
+set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/stubs_tmp.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/wpad.cpp mkdd/src/nand.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
 
 # ---- The game: built only from the player's own main.dol ----
 # cmake -DQILIN_GAME_DOL=<extracted disc>/sys/main.dol: qilin lift turns it
@@ -310,6 +310,7 @@ if(QILIN_GAME_DOL)
         message(FATAL_ERROR "the game needs the host platform layer: configure with QILIN_HOST=ON")
     endif()
     set(QILIN_LIFT_FILES 32)
+    set(QILIN_GAME_PLAN "${CMAKE_CURRENT_SOURCE_DIR}/data/GM4E01/plan.tsv" CACHE FILEPATH "The library plan qilin lift reads")
     set(gen ${CMAKE_CURRENT_BINARY_DIR}/generated)
     set(gen_sources ${gen}/table.cpp ${gen}/replaced.cpp)
     math(EXPR last "${QILIN_LIFT_FILES} - 1")
@@ -324,9 +325,9 @@ if(QILIN_GAME_DOL)
     endforeach()
     add_custom_command(
         OUTPUT ${gen}/functions.hpp ${gen_sources}
-        COMMAND qilin lift ${QILIN_GAME_DOL} -o ${gen} --plan ${CMAKE_CURRENT_SOURCE_DIR}/data/R7PP01/plan.tsv
+        COMMAND qilin lift ${QILIN_GAME_DOL} -o ${gen} --plan ${QILIN_GAME_PLAN}
                 --files ${QILIN_LIFT_FILES}
-        DEPENDS qilin ${QILIN_GAME_DOL} ${CMAKE_CURRENT_SOURCE_DIR}/data/R7PP01/plan.tsv
+        DEPENDS qilin ${QILIN_GAME_DOL} ${QILIN_GAME_PLAN}
         COMMENT "Lifting the game's main.dol to C++")
     add_executable(mkdd ${mkdd_runtime_sources} ${gen_sources})
     target_include_directories(mkdd PRIVATE mkdd/src ${gen})
@@ -336,7 +337,7 @@ if(QILIN_GAME_DOL)
     endif()
     target_compile_definitions(mkdd PRIVATE MKDD_VERSION="${PROJECT_VERSION}")
     # Our own sources get the warning set; the lifter's output doesn't (unused labels and locals).
-    set_source_files_properties(mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/wpad.cpp mkdd/src/nand.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/settings.cpp
+    set_source_files_properties(mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/stubs_tmp.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/wpad.cpp mkdd/src/nand.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/settings.cpp
         PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/W4;/permissive-,-Wall;-Wextra;-Wpedantic;-Wshadow>")
     # The renderer writes Vulkan structures {sType} with the rest zeroed, as the host layer does.
     set_source_files_properties(mkdd/src/renderer.cpp mkdd/src/menu.cpp
