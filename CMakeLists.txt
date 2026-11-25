@@ -471,7 +471,7 @@ if(QILIN_PLAYER_KIT)
     target_link_libraries(mkdd_kit_link_check PRIVATE qilin_rt "${kit_archive}" ${kit_system_libraries})
     add_dependencies(mkdd_kit_link_check mkdd_kit)
 
-    install(TARGETS qilin RUNTIME DESTINATION kit COMPONENT player)
+    install(TARGETS qilin qilin_disc_tool RUNTIME DESTINATION kit COMPONENT player)
     install(FILES "${kit_archive}" DESTINATION kit/lib COMPONENT player)
     install(FILES "${CMAKE_BINARY_DIR}/kit.ninja" data/R7PP01/plan.tsv DESTINATION kit COMPONENT player)
     file(GLOB kit_headers runtime/include/qilin/rt/*.hpp)

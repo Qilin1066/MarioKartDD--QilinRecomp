@@ -6,10 +6,11 @@
 #   ./mkdd.sh                    start the game; build it first if it isn't built
 #   ./mkdd.sh update             get the latest code (git pull), rebuild what changed, start
 #   ./mkdd.sh build              build (or rebuild what changed) without starting
-#   ./mkdd.sh --disc <folder>    use this extracted disc (remembered for next time)
+#   ./mkdd.sh --disc <path>      use this disc (remembered for next time)
 #
-# The disc folder is the one with sys/ and files/ (Dolphin: right-click the
-# game, Extract Entire Disc). The build is optimised for this machine's own
+# The disc is your own copy of the game (USA, GM4E01): an image (.iso, .gcm
+# or .ciso) as it is, or a folder extracted from one (the one with sys/ and
+# files/). The build is optimised for this machine's own
 # CPU (QILIN_NATIVE) and runs as many compiles at once as the memory allows
 # (about 1.5 GB each: a 4 GB Pi 4 runs two), so the first build takes 10 to
 # 20 minutes on a desktop and about an hour on a Pi 4.
@@ -24,8 +25,8 @@ while [ $# -gt 0 ]; do
         update) mode=update ;;
         build) mode=build ;;
         play) mode=play ;;
-        --disc) [ $# -ge 2 ] || { echo "--disc needs the extracted disc's folder" >&2; exit 2; }; disc=$2; shift ;;
-        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --disc) [ $# -ge 2 ] || { echo "--disc needs the disc image or the extracted disc's folder" >&2; exit 2; }; disc=$2; shift ;;
+        -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1 (see ./mkdd.sh --help)" >&2; exit 2 ;;
     esac
     shift
@@ -34,11 +35,17 @@ stop() { printf '\nStopped: %s\n' "$1" >&2; exit 1; }
 
 # The disc: given, or the one used last.
 if [ -z "$disc" ] && [ -f "$disc_file" ]; then disc=$(cat "$disc_file"); fi
-[ -n "$disc" ] || stop "which disc? Run ./mkdd.sh --disc <the extracted disc's folder> (the one with sys/ and files/)"
-disc=$(cd "$disc" 2>/dev/null && pwd) || stop "the disc folder isn't there"
-[ -d "$disc/files" ] || stop "$disc has no files folder: extract the whole disc"
-[ -f "$disc/sys/fst.bin" ] || stop "$disc has no sys/fst.bin: extract the whole disc"
-[ -f "$disc/sys/main.dol" ] || stop "$disc has no sys/main.dol: extract the whole disc (Dolphin: Extract Entire Disc)"
+[ -n "$disc" ] || stop "which disc? Run ./mkdd.sh --disc <your disc image (.iso, .gcm, .ciso), or an extracted disc's folder>"
+if [ -d "$disc" ]; then
+    disc=$(cd "$disc" && pwd)
+    [ -d "$disc/files" ] || stop "$disc has no files folder: extract the whole disc, or use the image itself"
+    [ -f "$disc/sys/fst.bin" ] || stop "$disc has no sys/fst.bin: extract the whole disc, or use the image itself"
+    [ -f "$disc/sys/main.dol" ] || stop "$disc has no sys/main.dol: extract the whole disc, or use the image itself"
+elif [ -f "$disc" ]; then
+    disc=$(cd "$(dirname "$disc")" && pwd)/$(basename "$disc")
+else
+    stop "the disc isn't there: $disc"
+fi
 
 exe="$build/mkdd"
 if [ "$mode" = play ] && [ -x "$exe" ] && [ -f "$disc_file" ] && [ "$(cat "$disc_file")" = "$disc" ]; then
@@ -97,7 +104,23 @@ fi
 
 mkdir -p "$build"
 echo "Building Mario Kart: Double Dash!! with $CXX, $jobs at a time (the first build lifts the whole game to C++)."
-cmake -S "$root" -B "$build" -DCMAKE_BUILD_TYPE=Release -DQILIN_NATIVE=ON -DQILIN_GAME_DOL="$disc/sys/main.dol" >/dev/null ||
+# The disc is read where it lies (docs/disc.md): qilin-disc, built first, says what it is and
+# copies its main.dol out for the build. The copy is replaced only when it differs, so the
+# game's code is lifted again only for a different disc.
+cmake -S "$root" -B "$build" -DCMAKE_BUILD_TYPE=Release -DQILIN_NATIVE=ON >/dev/null ||
+    stop "CMake couldn't configure the build (its messages are above)"
+cmake --build "$build" --target qilin_disc_tool --parallel "$jobs" >/dev/null || stop "the disc tool didn't build (run cmake --build $build --target qilin_disc_tool to see why)"
+info=$("$build/qilin-disc" info "$disc" --json) || stop "that isn't a disc this can read (the message above says why)"
+# (One "name": value a line; a value with or without quotes.)
+field() { printf '%s\n' "$info" | tr -d '\r' | sed -n "s/^ *\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\} *\$/\1/p"; }
+[ "$(field id)" = GM4E01 ] && [ "$(field revision)" = 0 ] ||
+    stop "that disc is $(field id), revision $(field revision): this port needs Mario Kart: Double Dash!! for the USA, GM4E01, revision 0"
+[ "$(field dol_sha256)" = e96b8578451b9157e2b68fe5e918ebb572940c3ea54d6c8c7d45c24382bf12ae ] ||
+    stop "that disc's main.dol isn't the supported build's (SHA-256 $(field dol_sha256)): a modified or damaged copy?"
+"$build/qilin-disc" dol "$disc" "$build/main.dol.new" >/dev/null || stop "the disc's main.dol couldn't be copied out"
+if [ -f "$build/main.dol" ] && cmp -s "$build/main.dol" "$build/main.dol.new"; then rm -f "$build/main.dol.new"
+else mv -f "$build/main.dol.new" "$build/main.dol"; fi
+cmake -S "$root" -B "$build" -DCMAKE_BUILD_TYPE=Release -DQILIN_NATIVE=ON -DQILIN_GAME_DOL="$build/main.dol" >/dev/null ||
     stop "CMake couldn't configure the build (its messages are above)"
 cmake --build "$build" --target mkdd --parallel "$jobs" || stop "the build failed (its messages are above)"
 # Remember only a successfully built disc. A failed change of disc must not

@@ -4,10 +4,10 @@
 #
 # Cross-compiles on Linux with llvm-mingw, then lays out:
 #   MarioKartDD--QilinRecomp/Play Double Dash.bat, README.txt, LICENSES/
-#   MarioKartDD--QilinRecomp/kit/  qilin.exe, lib/libmkdd_kit.a, include/, kit.ninja,
+#   MarioKartDD--QilinRecomp/kit/  qilin.exe, qilin-disc.exe, lib/libmkdd_kit.a, include/, kit.ninja,
 #                            plan.tsv, play.ps1, ninja.exe, toolchain/ (llvm-mingw, trimmed), VERSION
-# Nothing in it is made from the game: the player's PC lifts their own
-# main.dol and compiles that code with the bundled compiler (play.ps1).
+# Nothing in it is made from the game: the player's PC reads main.dol from their own
+# disc, lifts it and compiles that code with the bundled compiler (play.ps1).
 #
 # Environment:
 #   LLVM_MINGW_CROSS    the Linux-hosted llvm-mingw release, unpacked
@@ -26,7 +26,7 @@ pkg="$stage/MarioKartDD--QilinRecomp"
 # shellcheck disable=SC2086
 cmake -S "$root" -B "$build" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$root/tools/player-kit/mingw-cross.cmake" \
       -DCMAKE_BUILD_TYPE=Release -DQILIN_PLAYER_KIT=ON -DQILIN_WERROR=ON ${CMAKE_EXTRA:-}
-cmake --build "$build" --target qilin mkdd_kit mkdd_kit_link_check --parallel
+cmake --build "$build" --target qilin qilin_disc_tool mkdd_kit mkdd_kit_link_check --parallel
 cmake --install "$build" --component player --prefix "$pkg"
 
 "$root/tools/player-kit/trim-toolchain.sh" "$LLVM_MINGW_WINDOWS" "$pkg/kit/toolchain"
@@ -38,7 +38,8 @@ printf '%s\n' "$version" > "$pkg/kit/VERSION"
 
 # Every licence of what's included, by component.
 lic="$pkg/LICENSES"
-mkdir -p "$lic/MarioKartDD--QilinRecomp" "$lic/llvm-mingw" "$lic/ninja" "$lic/SDL3" "$lic/Dear ImGui" "$lic/Vulkan-Headers" "$lic/volk"
+mkdir -p "$lic/MarioKartDD--QilinRecomp" "$lic/llvm-mingw" "$lic/ninja" "$lic/SDL3" "$lic/Dear ImGui" "$lic/Vulkan-Headers" "$lic/volk" \
+         "$lic/SMAA" "$lic/FidelityFX-FSR"
 mv "$pkg/kit/toolchain/licenses/"* "$lic/llvm-mingw/"
 rmdir "$pkg/kit/toolchain/licenses"
 sed 's/$/\r/' "$root/LICENSE" > "$lic/MarioKartDD--QilinRecomp/LICENSE.txt"  # GPL-3.0
@@ -49,6 +50,9 @@ imgui=$(sed -n 's/^FETCHCONTENT_SOURCE_DIR_IMGUI:PATH=//p' "$build/CMakeCache.tx
 cp "$imgui/LICENSE.txt" "$lic/Dear ImGui/"
 cp "$build/_deps/vulkanheaders-src/LICENSE.md" "$lic/Vulkan-Headers/" 2>/dev/null || cp "$build/_deps/vulkanheaders-src/LICENSE"* "$lic/Vulkan-Headers/"
 cp "$build/_deps/volk-src/LICENSE.md" "$lic/volk/"
+# (Compiled in: SMAA's tables and shaders, FSR 1's shaders and constants.)
+cp "$build/_deps/qilin_post/smaa/LICENSE.txt" "$lic/SMAA/"
+cp "$build/_deps/qilin_post/fsr1/license.txt" "$lic/FidelityFX-FSR/"
 
 rm -f "$out"
 (cd "$stage" && zip -q -r -9 "$out" MarioKartDD--QilinRecomp)
