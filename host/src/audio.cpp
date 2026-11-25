@@ -26,12 +26,46 @@ struct StreamLock {
 size_t frames_of(double ms, unsigned rate) { return static_cast<size_t>(ms * double(rate) / 1000.0); }
 }  // namespace
 
-AudioOut::AudioOut() {
+std::vector<std::string> AudioOut::playback_devices() {
+    std::vector<std::string> out;
+    const bool started = SDL_InitSubSystem(SDL_INIT_AUDIO);
+    int n = 0;
+    if (SDL_AudioDeviceID* ids = started ? SDL_GetAudioPlaybackDevices(&n) : nullptr) {
+        for (int i = 0; i < n; ++i)
+            if (const char* name = SDL_GetAudioDeviceName(ids[i])) out.push_back(name);
+        SDL_free(ids);
+    }
+    if (started) SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    return out;
+}
+
+AudioOut::AudioOut(const Options& options) {
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) die("SDL audio can't start");
-    const SDL_AudioSpec spec{SDL_AUDIO_S16, 2, 32000};
+    // The device asked for, if it's there; else the system's default, which SDL
+    // moves to the new default device when the system's changes.
+    SDL_AudioDeviceID id = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+    device_name_ = "the system's default device";
+    if (!options.device.empty()) {
+        int n = 0;
+        if (SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&n)) {
+            for (int i = 0; i < n && id == SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK; ++i)
+                if (const char* name = SDL_GetAudioDeviceName(ids[i]); name && options.device == name) id = ids[i], device_name_ = name;
+            SDL_free(ids);
+        }
+        if (id == SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK)
+            std::fprintf(stderr, "mkdd: the settings' sound device \"%s\" isn't connected: using the system's default\n", options.device.c_str());
+    }
+    // Surround where it's asked for, or where it's left to a device that has six channels or more.
+    channels_ = options.output == SoundOutput::surround ? 6 : 2;
+    if (options.output == SoundOutput::device) {
+        SDL_AudioSpec own{};
+        if (SDL_GetAudioDeviceFormat(id, &own, nullptr) && own.channels >= 6) channels_ = 6;
+    }
+    const SDL_AudioSpec spec{SDL_AUDIO_S16, static_cast<int>(channels_), 32000};
     rate_ = 32000;
+    surround_.set_rate(rate_);
     // The device asks for sound as it needs it (feed): nothing waits inside SDL.
-    stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, [](void* self, SDL_AudioStream* stream, int additional, int) {
+    stream_ = SDL_OpenAudioDeviceStream(id, &spec, [](void* self, SDL_AudioStream* stream, int additional, int) {
         static_cast<AudioOut*>(self)->feed(stream, additional);
     }, this);
     if (!stream_) die("no sound output device");
@@ -54,13 +88,20 @@ AudioOut::~AudioOut() {
 // The device's thread: SDL needs `bytes` more of the stream's own format.
 void AudioOut::feed(SDL_AudioStream* stream, int bytes) {
     if (bytes <= 0) return;
-    const size_t frames = (static_cast<size_t>(bytes) + 3) / 4;
+    const size_t frame_bytes = size_t{2} * channels_;
+    const size_t frames = (static_cast<size_t>(bytes) + frame_bytes - 1) / frame_bytes;
     feeding_.resize(frames * 2);
     callbacks_.fetch_add(1, std::memory_order_relaxed);
     bool ran_dry;
     const size_t n = queue_.pull(feeding_.data(), frames, ran_dry);
     if (ran_dry) empty_.fetch_add(1, std::memory_order_relaxed);
-    if (n && !SDL_PutAudioStreamData(stream, feeding_.data(), static_cast<int>(n * 4))) die("sound callback cannot queue data");  // (short of it, the device plays silence)
+    const int16_t* data = feeding_.data();
+    if (n && channels_ == 6) {
+        decoded_.resize(n * 6);
+        surround_.decode(feeding_.data(), n, decoded_.data());
+        data = decoded_.data();
+    }
+    if (n && !SDL_PutAudioStreamData(stream, data, static_cast<int>(n * frame_bytes))) die("sound callback cannot queue data");  // (short of it, the device plays silence)
 }
 
 void AudioOut::push(const int16_t* lr, size_t frames, unsigned rate) {
@@ -73,9 +114,10 @@ void AudioOut::push(const int16_t* lr, size_t frames, unsigned rate) {
         if (rate != rate_) {  // what is queued was made for the old rate: it goes
             if (!SDL_ClearAudioStream(stream_)) die("old sound format cannot be cleared");
             smoothed_ms_ = target_ms_;
-            const SDL_AudioSpec spec{SDL_AUDIO_S16, 2, static_cast<int>(rate)};
+            const SDL_AudioSpec spec{SDL_AUDIO_S16, static_cast<int>(channels_), static_cast<int>(rate)};
             if (!SDL_SetAudioStreamFormat(stream_, &spec, nullptr)) die("the sound rate can't change");
             rate_ = rate;
+            surround_.set_rate(rate_);
             queue_.clear();
             queue_.set_limits(frames_of(target_ms_, rate_), frames_of(2.0 * target_ms_, rate_));
         }

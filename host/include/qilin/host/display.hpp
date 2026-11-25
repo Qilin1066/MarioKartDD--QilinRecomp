@@ -3,12 +3,14 @@
 // tests and for machines without a display.
 //
 // The picture is drawn into the window through a look (plain, or a CRT
-// television), at a size the settings choose, and anything drawn over it
-// (the settings menu) after. F11 or Alt+Enter switch borderless full screen.
+// television), at a size the settings choose, after anti-aliasing and
+// upscaling where they ask for them (SMAA, FSR 1), and anything drawn over
+// it (the settings menu) after. F11 or Alt+Enter switch borderless full screen.
 //
 // Runtime code: no std::format (macOS 10.15).
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -22,11 +24,13 @@
 
 namespace qilin::host {
 
+inline constexpr int kPlayerPlaces = 4;  // the controllers that can each play a port of their own
+
 class Display {
 public:
     struct Options {
         const char* title = "Mario Kart: Double Dash!!";
-        uint32_t width = 1280, height = 720;  // the window's, or the headless target's, size
+        uint32_t width = 960, height = 720;  // the window's, or the headless target's, size
         bool headless = false;
         bool fullscreen = false;              // borderless, at the desktop's mode
         std::string monitor;                  // the display's name; empty or missing: the main one
@@ -44,36 +48,34 @@ public:
     // The buttons held on all of them together and the mouse's left button
     // (PadButton bits), as of the last poll.
     uint32_t buttons() const;
-    // For more than one player: the controllers in the order each first had a
-    // button pressed (a controller nobody touches never joins; one unplugged
-    // leaves its slot reserved, so the other player does not change places). How many have joined, and one's
-    // buttons now (0 for a place nobody has).
-    int joined_pads() const;
+    // Whose controller is whose: four places, each with a controller of its
+    // own. A place set to a device's identity (Controller::key) is that
+    // device's; one left empty is automatic: the controllers nobody named,
+    // in the order each first had a button pressed (a controller nobody
+    // touches never joins; one unplugged leaves its place reserved, so the
+    // other players do not change places; plugged in again, it has its place
+    // back); "none": no controller.
     struct Controller { std::string key, name; uint32_t id; };
     std::vector<Controller> controllers() const;
-    void set_player_controllers(const std::string& first, const std::string& second);
+    void set_player_controllers(const std::array<std::string, kPlayerPlaces>& identities);
     void reset_player_order();
+    int joined_pads() const;  // how many have had a button pressed
     bool pad_connected(int place) const;
     std::string player_controller_name(int place) const;
+    // The controller at a place, as of the last poll (not connected: at rest).
+    PadState pad_state(int place) const;
     bool focused() const;
-    void set_input_thresholds(unsigned stick, unsigned trigger, unsigned pointer);
+    // Where a stick's direction and a trigger count as buttons (percent of their travel, 5-95).
+    void set_input_thresholds(unsigned stick, unsigned trigger);
     void set_rumble_strength(unsigned percent);
-    uint32_t pad_buttons(int place) const;
-    // That controller's right stick (as right_stick, which is whichever controller's is pushed furthest).
-    void pad_right_stick(int place, float& x, float& y) const;
     // A key by its SDL name ("X", "Space", "Left Shift"): a code for key_down,
     // or -1 if there's no such key. Whether it's held, as of the last poll
     // (never, headless).
     int key_code(const char* name) const;
     bool key_down(int code) const;
-    // The right stick, -1 to 1 each way (y up), dead zone removed.
-    void right_stick(float& x, float& y) const;
-    // If the mouse moved over the window since the last poll: where, over the
-    // picture last presented, -1 to 1 each way (y up; beyond 1 off the picture).
-    bool mouse_moved(float& x, float& y) const;
-    // Rumble, on or off: on every controller, or on the one at a place.
-    void rumble(bool on);
+    // Rumble, on or off: on the controller at a place, or off on every one.
     void rumble_pad(int place, bool on);
+    void rumble_off();
     // Show a frame of RGBA8 pixels, at `aspect` (displayed width / height);
     // `lines`: the console picture's height in its own pixels (whole
     // multiples and the CRT's raster go by it). Black around it.
@@ -102,7 +104,13 @@ public:
     Gpu& gpu();
     // Headless: the last frame presented, as RGBA8 at the target's size.
     std::vector<uint8_t> read_back();
+    // The last picture as it is shown (through the settings' passes and look,
+    // without what's drawn over it), as RGBA8 at the window's size (headless:
+    // the target's): for a capture. Empty before the first picture.
+    std::vector<uint8_t> capture(uint32_t& width, uint32_t& height);
     const std::string& device_name() const;
+    // FSR 1 needs compute shaders on the queue that draws.
+    bool fsr_available() const;
 
     // The picture's settings, from the next present.
     void set_picture(const Picture& p);

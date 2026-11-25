@@ -1,5 +1,7 @@
-// Sound out: interleaved 16-bit stereo through an SDL audio stream on the
-// default playback device. push() may be called from any thread.
+// Sound out: interleaved 16-bit stereo through an SDL audio stream on a
+// playback device (the system's default, or one by name), as stereo or as 5.1
+// decoded from the game's Dolby Surround signal. push() may be called from
+// any thread.
 //
 // The sound waits in a queue of our own (AudioQueue), which the device's
 // thread empties as it plays (SDL asks for what it needs: the stream itself
@@ -25,6 +27,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 struct SDL_AudioStream;
@@ -89,13 +92,70 @@ private:
     bool playing_ = false;
 };
 
+// What the device is given: the game's two channels as they are; 5.1 decoded
+// from them (SurroundDecoder); or whichever suits the device (surround where
+// it has six channels or more).
+enum class SoundOutput : uint8_t { stereo, surround, device };
+
+// The GameCube has two channels; its surround is Dolby Surround, carried in
+// them: what is the same in both is the centre's, what is opposite is the
+// rear's. This is the passive decoder a receiver of the time had: left and
+// right as they are, the centre their sum, the rear their difference (band
+// limited to 7 kHz and 10 ms late, as the specification asks, so that front
+// sounds leaking into it are heard from the front), both 3 dB down; nothing
+// in the LFE channel (bass is the speakers' own to manage). Frames in:
+// left, right. Frames out: front left, front right, centre, LFE, rear left,
+// rear right (SDL's order for six channels).
+class SurroundDecoder {
+public:
+    void set_rate(unsigned rate) {
+        rate_ = rate ? rate : 32000;
+        delay_.assign(size_t(rate_) / 100, 0.0f);  // 10 ms
+        at_ = 0, low_ = 0.0f;
+        // One pole at 7 kHz.
+        const double x = 2.0 * 3.14159265358979323846 * 7000.0 / double(rate_);
+        k_ = float(x / (x + 1.0));
+    }
+    void decode(const int16_t* lr, size_t frames, int16_t* out) {
+        if (delay_.empty()) set_rate(rate_);
+        constexpr float half_power = 0.70710678f;
+        for (size_t i = 0; i < frames; ++i) {
+            const float l = lr[2 * i], r = lr[2 * i + 1];
+            low_ += k_ * ((l - r) * half_power - low_);
+            const float rear = delay_[at_];
+            delay_[at_] = low_;
+            at_ = (at_ + 1) % delay_.size();
+            int16_t* o = out + 6 * i;
+            o[0] = lr[2 * i], o[1] = lr[2 * i + 1];
+            o[2] = clip((l + r) * half_power);
+            o[3] = 0;
+            // One rear signal for two speakers: each at half its power.
+            o[4] = o[5] = clip(rear * half_power);
+        }
+    }
+
+private:
+    static int16_t clip(float v) { return static_cast<int16_t>(std::clamp(v, -32768.0f, 32767.0f)); }
+    unsigned rate_ = 32000;
+    std::vector<float> delay_;
+    size_t at_ = 0;
+    float low_ = 0.0f, k_ = 0.0f;
+};
+
 class AudioOut {
 public:
+    struct Options {
+        std::string device;  // by its name; empty, or one that isn't there: the system's default
+        SoundOutput output = SoundOutput::stereo;
+    };
+    // The playback devices' names, for the settings.
+    static std::vector<std::string> playback_devices();
+
     // Queued sound aimed for, the latency it adds: 40 ms, or more where the device takes its
     // sound in pieces too large for that (twice a piece and 10 ms). The cap is twice the target.
     static constexpr double kTargetMs = 40.0;
 
-    AudioOut();  // fails loudly if there's no playback device
+    explicit AudioOut(const Options& options = {});  // fails loudly if there's no playback device
     ~AudioOut();
     AudioOut(const AudioOut&) = delete;
     AudioOut& operator=(const AudioOut&) = delete;
@@ -106,6 +166,9 @@ public:
     void set_volume(unsigned percent, bool muted = false);
 
     double target_ms() const { return target_ms_; }
+    // What was opened, for the log: the device's name, and whether it's given 5.1.
+    const std::string& device_name() const { return device_name_; }
+    bool surround() const { return channels_ == 6; }
 
     // Since the last call (any thread): how much was queued on average and at
     // most, the playback speed, how often the queue ran dry, and how often and
@@ -120,7 +183,10 @@ private:
     void feed(SDL_AudioStream* stream, int bytes);
 
     SDL_AudioStream* stream_ = nullptr;
-    unsigned rate_ = 0;
+    unsigned rate_ = 0, channels_ = 2;
+    std::string device_name_;
+    SurroundDecoder surround_;       // the device thread's own
+    std::vector<int16_t> decoded_;
     double target_ms_ = kTargetMs, device_period_ms_ = 0;
     double smoothed_ms_ = kTargetMs, ratio_ = 1.0;  // the pushing thread's own
     // SDL stream lock protects the queue, format and resampler state, including callbacks.
