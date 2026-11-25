@@ -1,12 +1,14 @@
-// Bounded save history, stored outside the emulated NAND.
+// Bounded save history, stored beside the memory cards' folders (card.cpp):
+// <folder>/save-backups/card-a/<file>.history/<time>.bak.
 #pragma once
 #include <filesystem>
 #include <string>
 #include <vector>
 namespace mkdd {
 struct SaveBackup { std::filesystem::path file; std::string label; };
-// Keep the five most recent pre-write copies per NAND file.
-bool backup_save(const std::filesystem::path& nand, const std::filesystem::path& file, std::string& error);
+// Keep the five most recent pre-write copies per card file. `folder` is the
+// user folder, `file` a file in its card-a or card-b.
+bool backup_save(const std::filesystem::path& folder, const std::filesystem::path& file, std::string& error);
 std::vector<SaveBackup> save_backups(const std::filesystem::path& folder);
 // A restore is applied on the next start, before any guest file is opened.
 bool request_save_restore(const std::filesystem::path& folder, const std::filesystem::path& backup, std::string& error);

@@ -396,8 +396,10 @@ int main(int argc, char** argv) {
     rt::provide(mkdd::vi_replacements());
     rt::provide(mkdd::thread_replacements());
     rt::provide(mkdd::sc_replacements());
-    rt::provide(mkdd::wpad_replacements());
-    rt::provide(mkdd::nand_replacements());
+    rt::provide(mkdd::pad_replacements());
+    rt::provide(mkdd::card_replacements());
+    rt::provide(mkdd::exi_replacements());
+    rt::provide(mkdd::ar_replacements());
     mkdd::init_hardware();
     if (bench_dff) {  // then out at once: the GPU thread is waiting, and exit's destructors would wait for it
         const int code = mkdd::bench_recording(bench_dff, bench_times);

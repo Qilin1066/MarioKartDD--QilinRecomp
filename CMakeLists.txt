@@ -132,6 +132,28 @@ target_link_libraries(qilin_rt PRIVATE qilin_warnings)
 
 enable_testing()
 
+# ---- The disc: >>> the disc agent's block (docs/disc.md) ----
+# A GameCube image (.iso, .gcm, .ciso) or extracted folder, read in place.
+# Runtime code too (no std::format): the game reads its files through it.
+add_library(qilin_disc STATIC disc/src/disc.cpp disc/src/file.cpp disc/src/tools.cpp)
+target_include_directories(qilin_disc PUBLIC disc/include)
+target_link_libraries(qilin_disc PRIVATE qilin_warnings)
+
+# qilin-disc: info, list, extract, dol, verify (the launcher's and the build's way to main.dol).
+add_executable(qilin_disc_tool disc/src/main.cpp)
+set_target_properties(qilin_disc_tool PROPERTIES OUTPUT_NAME qilin-disc)
+target_include_directories(qilin_disc_tool PRIVATE disc/src)
+target_link_libraries(qilin_disc_tool PRIVATE qilin_disc qilin_dol qilin_warnings)
+qilin_tool(qilin_disc_tool)
+
+# Synthetic discs as image, CISO and folder: no game files needed.
+add_executable(qilin_disc_tests disc/tests/tests.cpp)
+target_link_libraries(qilin_disc_tests PRIVATE qilin_disc qilin_warnings)
+qilin_tool(qilin_disc_tests)
+add_test(NAME qilin_disc_tests COMMAND qilin_disc_tests)
+set_tests_properties(qilin_disc_tests PROPERTIES TIMEOUT 120)
+# ---- <<< the disc agent's block ----
+
 # ---- The host platform: window, input and audio (SDL3), Vulkan ----
 # Fetched at configure time, pinned, built statically: SDL3, the Vulkan headers
 # and volk (which loads Vulkan at run time, so no SDK is needed to build or run).
@@ -343,7 +365,7 @@ if(Python3_FOUND)
 endif()
 
 # The game's runtime: everything in mkdd but the code lifted from main.dol.
-set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/wpad.cpp mkdd/src/nand.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
+set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
 list(APPEND mkdd_runtime_sources mkdd/src/input.cpp)  # the controller ports (input.hpp)
 
 # ---- The game: built only from the player's own main.dol ----
@@ -381,8 +403,9 @@ if(QILIN_GAME_DOL)
         target_link_libraries(mkdd PRIVATE winmm)  # timeBeginPeriod (main.cpp)
     endif()
     target_compile_definitions(mkdd PRIVATE MKDD_VERSION="${PROJECT_VERSION}")
+    target_compile_definitions(mkdd PRIVATE MKDD_DEVICES_STANDALONE)  # until the merge, as for mkdd_runtime_check below
     # Our own sources get the warning set; the lifter's output doesn't (unused labels and locals).
-    set_source_files_properties(mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/wpad.cpp mkdd/src/nand.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/settings.cpp
+    set_source_files_properties(mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/settings.cpp
         PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/W4;/permissive-,-Wall;-Wextra;-Wpedantic;-Wshadow>")
     # The renderer writes Vulkan structures {sType} with the rest zeroed, as the host layer does.
     set_source_files_properties(mkdd/src/renderer.cpp mkdd/src/menu.cpp
@@ -461,6 +484,8 @@ if(QILIN_HOST AND NOT QILIN_GAME_DOL AND NOT QILIN_PLAYER_KIT)
     target_include_directories(mkdd_runtime_check PRIVATE mkdd/src)
     target_link_libraries(mkdd_runtime_check PRIVATE qilin_rt qilin_dol qilin_host qilin_imgui SDL3::SDL3-static qilin_warnings)
     target_compile_definitions(mkdd_runtime_check PRIVATE MKDD_VERSION="${PROJECT_VERSION}")
+    # Until the host's input layer and the audio layer's ARAM are merged: pad.cpp and ar.cpp bring stand-ins.
+    target_compile_definitions(mkdd_runtime_check PRIVATE MKDD_DEVICES_STANDALONE)
     if(WIN32)
         target_link_libraries(mkdd_runtime_check PRIVATE winmm)
     endif()
@@ -475,11 +500,26 @@ target_link_libraries(mkdd_save_history_test PRIVATE qilin_rt qilin_warnings)
 qilin_tool(mkdd_save_history_test)
 add_test(NAME mkdd_save_history_test COMMAND mkdd_save_history_test)
 
-add_executable(mkdd_nand_test mkdd/tests/nand_test.cpp mkdd/src/nand.cpp mkdd/src/save_history.cpp)
-target_include_directories(mkdd_nand_test PRIVATE mkdd/src host/include)
-target_link_libraries(mkdd_nand_test PRIVATE qilin_rt qilin_warnings)
-qilin_tool(mkdd_nand_test)
-add_test(NAME mkdd_nand_test COMMAND mkdd_nand_test)
+# The devices' replacements over synthetic guest memory, without the game.
+add_executable(mkdd_card_test mkdd/tests/card_test.cpp mkdd/src/card.cpp mkdd/src/later.cpp mkdd/src/save_history.cpp)
+target_include_directories(mkdd_card_test PRIVATE mkdd/src host/include)
+target_link_libraries(mkdd_card_test PRIVATE qilin_rt qilin_warnings)
+qilin_tool(mkdd_card_test)
+add_test(NAME mkdd_card_test COMMAND mkdd_card_test)
+
+add_executable(mkdd_pad_test mkdd/tests/pad_test.cpp mkdd/src/pad.cpp mkdd/src/later.cpp)
+target_include_directories(mkdd_pad_test PRIVATE mkdd/src)
+target_link_libraries(mkdd_pad_test PRIVATE qilin_rt qilin_warnings)
+qilin_tool(mkdd_pad_test)
+add_test(NAME mkdd_pad_test COMMAND mkdd_pad_test)
+
+# (With an ARAM block of its own: the real one is the audio layer's.)
+add_executable(mkdd_ar_test mkdd/tests/ar_test.cpp mkdd/src/ar.cpp mkdd/src/exi.cpp mkdd/src/later.cpp)
+target_include_directories(mkdd_ar_test PRIVATE mkdd/src)
+target_compile_definitions(mkdd_ar_test PRIVATE MKDD_DEVICES_STANDALONE)
+target_link_libraries(mkdd_ar_test PRIVATE qilin_rt qilin_warnings)
+qilin_tool(mkdd_ar_test)
+add_test(NAME mkdd_ar_test COMMAND mkdd_ar_test)
 
 add_executable(qilin_analog_test host/tests/analog_test.cpp)
 target_include_directories(qilin_analog_test PRIVATE host/include)

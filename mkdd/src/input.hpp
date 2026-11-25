@@ -26,13 +26,3 @@ void set_gc_pad(int port, const GcPad& pad);
 bool gc_rumble_wanted(int port);
 
 }  // namespace mkdd
-
-// TEMPORARY: what the base's wpad.cpp (the Wii Remote, not this game's) reads,
-// kept only so the tree builds until the devices layer replaces that file with
-// PADRead over gc_pad. Nothing writes these any more. Remove with wpad.cpp.
-#include <atomic>
-namespace mkdd {
-inline std::atomic<uint32_t> g_controls{0}, g_controls2{0};
-inline std::atomic<bool> g_rumble{false}, g_rumble2{false}, g_player2{false}, g_pointer_on{false};
-inline std::atomic<int32_t> g_pointer_x{0}, g_pointer_y{0}, g_pointer2_x{0}, g_pointer2_y{0};
-}  // namespace mkdd

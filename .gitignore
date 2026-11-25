@@ -1,4 +1,4 @@
-# ---- Game data: never commit (copyright Nintendo) ----
+﻿# ---- Game data: never commit (copyright Nintendo) ----
 *.wbfs
 *.wbf[0-9]*
 *.iso
@@ -23,7 +23,7 @@
 *.dict
 *.debug
 /game/
-/disc/
+# (the extracted disc lives outside the repo; /disc/ is the disc-reading library)
 /extracted/
 /orig/
 
