@@ -12,7 +12,7 @@ builds (lis with addi or ori), and every function a data word points at, in
 libraries other than those given with --internal (libraries whose tables only
 their own replaced code reads). Lifted code calling dropped code (which isn't translated at all) is
 reported too: such a function needs a replace range in the plan
-(identify_libraries.py's overrides) and a replacement.
+(make_plan.py's tables) and a replacement.
 
   qilin cfg <main.dol> --json cfg.json
   tools/analysis/check_replacements.py cfg.json [--plan data/GM4E01/plan.tsv] [--symbols work/symbols.txt]
