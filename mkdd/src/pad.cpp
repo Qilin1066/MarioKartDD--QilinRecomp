@@ -29,12 +29,6 @@ namespace mkdd {
 namespace rt = qilin::rt;
 using rt::Cpu;
 
-#ifdef MKDD_DEVICES_STANDALONE
-// Until the host's input layer is merged: no controllers.
-GcPad gc_pad(int) { return {}; }
-void gc_rumble(int, bool) {}
-#endif
-
 namespace {
 
 constexpr uint32_t kPorts = 4;

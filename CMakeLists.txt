@@ -201,15 +201,48 @@ if(QILIN_HOST)
         target_compile_options(qilin_imgui PRIVATE -w)
     endif()
 
-    add_library(qilin_host STATIC host/src/vulkan.cpp host/src/display.cpp host/src/audio.cpp host/src/paths.cpp)
-    target_include_directories(qilin_host PUBLIC host/include)
+    # SMAA's tables and AMD FSR 1's constants (both MIT), for the passes before the
+    # picture is shown (host/src/post.cpp): the files named in host/shaders/post/third_party.txt,
+    # each fetched once and checked against its SHA-256.
+    set(QILIN_POST_SOURCES ${CMAKE_BINARY_DIR}/_deps/qilin_post)
+    file(STRINGS host/shaders/post/third_party.txt post_pins REGEX "^[0-9a-f]")
+    foreach(pin IN LISTS post_pins)
+        separate_arguments(pin)
+        list(GET pin 0 pin_hash)
+        list(GET pin 1 pin_path)
+        list(GET pin 2 pin_url)
+        file(DOWNLOAD ${pin_url} ${QILIN_POST_SOURCES}/${pin_path} EXPECTED_HASH SHA256=${pin_hash} TLS_VERIFY ON)
+    endforeach()
+
+    # A GLSL compiler for tools/build_shaders.py (the SPIR-V is committed: only
+    # someone changing a shader needs one). Off by default; with it on, the
+    # qilin_shader_compiler target builds Khronos's, pinned, and the script finds it.
+    option(QILIN_SHADER_COMPILER "Build glslang, to regenerate the committed SPIR-V" OFF)
+    if(QILIN_SHADER_COMPILER)
+        set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+        set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
+        set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
+        set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+        set(ENABLE_GLSLANG_BINARIES ON CACHE BOOL "" FORCE)
+        set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(glslang GIT_REPOSITORY https://github.com/KhronosGroup/glslang GIT_TAG 15.4.0 GIT_SHALLOW ON
+                             EXCLUDE_FROM_ALL)
+        FetchContent_MakeAvailable(glslang)
+        add_custom_target(qilin_shader_compiler DEPENDS glslang-standalone)
+    endif()
+
+    add_library(qilin_host STATIC host/src/vulkan.cpp host/src/display.cpp host/src/post.cpp host/src/fsr_constants.cpp
+                host/src/capture.cpp host/src/audio.cpp host/src/paths.cpp)
+    target_include_directories(qilin_host PUBLIC host/include PRIVATE ${QILIN_POST_SOURCES})
     target_link_libraries(qilin_host PUBLIC qilin_volk PRIVATE SDL3::SDL3-static qilin_warnings)
     # Vulkan structures are written {sType} with the rest zeroed: that's the idiom, not a mistake.
     # (On the sources, so it comes after -Wextra on the command line.)
     if(NOT MSVC)
-        set_source_files_properties(host/src/vulkan.cpp host/src/display.cpp host/src/audio.cpp host/src/paths.cpp host/tests/vktest.cpp
+        set_source_files_properties(host/src/vulkan.cpp host/src/display.cpp host/src/post.cpp host/src/audio.cpp host/src/paths.cpp host/tests/vktest.cpp
                                     PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
     endif()
+    # AMD's header, built for the CPU: its warnings aren't ours.
+    set_source_files_properties(host/src/fsr_constants.cpp PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/W0,-w>")
 
     # The Vulkan layer's own test: a device, an offscreen frame, read back. Skips
     # (exit 77) where there's no Vulkan 1.3 device, as on CI runners.
@@ -257,6 +290,12 @@ target_include_directories(qilin_frame_times_test PRIVATE host/include)
 target_link_libraries(qilin_frame_times_test PRIVATE qilin_warnings)
 qilin_tool(qilin_frame_times_test)
 add_test(NAME qilin_frame_times_test COMMAND qilin_frame_times_test)
+# A capture's files: the PNG and tar writers (no window, no GPU).
+add_executable(qilin_capture_test host/tests/capture_test.cpp host/src/capture.cpp)
+target_include_directories(qilin_capture_test PRIVATE host/include)
+target_link_libraries(qilin_capture_test PRIVATE qilin_warnings)
+qilin_tool(qilin_capture_test)
+add_test(NAME qilin_capture_test COMMAND qilin_capture_test)
 
 # The thread model (the game's scheduler and interrupt layer) with guest
 # functions written in C++: no game files needed.
@@ -279,6 +318,12 @@ target_include_directories(mkdd_settings_test PRIVATE mkdd/src host/include)
 target_link_libraries(mkdd_settings_test PRIVATE qilin_rt qilin_warnings)
 qilin_tool(mkdd_settings_test)
 add_test(NAME mkdd_settings_test COMMAND mkdd_settings_test)
+# The controller ports: bindings to a GameCube controller, and scripted input.
+add_executable(mkdd_input_test mkdd/tests/input_test.cpp mkdd/src/input.cpp mkdd/src/settings.cpp)
+target_include_directories(mkdd_input_test PRIVATE mkdd/src host/include)
+target_link_libraries(mkdd_input_test PRIVATE qilin_rt qilin_warnings)
+qilin_tool(mkdd_input_test)
+add_test(NAME mkdd_input_test COMMAND mkdd_input_test)
 
 # The lifter's differential test: random encodings of every instruction in the
 # slice, lifted at build time, run against an independent reference interpreter.
@@ -321,6 +366,7 @@ endif()
 
 # The game's runtime: everything in mkdd but the code lifted from main.dol.
 set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
+list(APPEND mkdd_runtime_sources mkdd/src/input.cpp)  # the controller ports (input.hpp)
 
 # ---- The game: built only from the player's own main.dol ----
 # cmake -DQILIN_GAME_DOL=<extracted disc>/sys/main.dol: qilin lift turns it
@@ -425,7 +471,7 @@ if(QILIN_PLAYER_KIT)
     target_link_libraries(mkdd_kit_link_check PRIVATE qilin_rt "${kit_archive}" ${kit_system_libraries})
     add_dependencies(mkdd_kit_link_check mkdd_kit)
 
-    install(TARGETS qilin RUNTIME DESTINATION kit COMPONENT player)
+    install(TARGETS qilin qilin_disc_tool RUNTIME DESTINATION kit COMPONENT player)
     install(FILES "${kit_archive}" DESTINATION kit/lib COMPONENT player)
     install(FILES "${CMAKE_BINARY_DIR}/kit.ninja" data/GM4E01/plan.tsv DESTINATION kit COMPONENT player)
     file(GLOB kit_headers runtime/include/qilin/rt/*.hpp)

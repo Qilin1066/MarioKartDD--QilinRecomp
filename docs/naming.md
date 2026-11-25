@@ -6,6 +6,7 @@
 |---|---|---|
 | The repo / project | MarioKartDD--QilinRecomp | The game plus the toolchain that ports it |
 | The recompiler CLI | `qilin` | The author's tool: short, unique, easy to type |
+| The disc reader's CLI | `qilin-disc` | The same tool family: it reads a disc, any GameCube disc |
 | C++ namespaces of the recompiler and runtime | `qilin`, `qilin::ppc` (the decoder), `qilin::rt`, `qilin::gen` | Project namespace; avoids collisions with game, SDK or system names |
 | Build options, macros, CMake targets | `QILIN_*`, `qilin_*` | Same prefix as the namespace, so it's obvious what owns them |
 | The game executable players run | `mkdd` | Named after the game. Players launch Mario Kart: Double Dash!!, not a tool |

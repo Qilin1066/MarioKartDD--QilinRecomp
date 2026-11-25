@@ -10,12 +10,13 @@
 // PPM; MKDD_DUMP_EVERY=n changes the 60).
 // mkdd.ini in the game's data folder holds the settings (settings.hpp),
 // which the settings menu (F1 or Esc, menu.hpp) changes; MKDD_SCALE
-// overrides the internal resolution.
-// MKDD_INPUT presses buttons on a schedule, for runs without a player:
-// "A@12,Start@20.5" holds each for a fifth of a second at that many seconds
-// of game time (the game's frames over 60, so a slow GPU doesn't shift them);
-// MKDD_POINTER="x,y" holds the pointer there (-1 to 1, y up);
-// "x,y;x,y@40;x,y@52" moves it there at those many seconds.
+// overrides the render resolution.
+// MKDD_INPUT plays the first controller port on a schedule, for runs without
+// a player (MKDD_INPUT2 to MKDD_INPUT4 the others; a port with a script is
+// connected from the start): "Start@12,A@14.5,Stick:-100:0@20+3" holds each
+// for a fifth of a second, or for the seconds after a +, from that many
+// seconds of game time (the game's frames over 60, so a slow GPU doesn't
+// shift them); input_map.hpp has the whole of it.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -36,7 +37,9 @@
 #include "hw.hpp"
 #include "gx.hpp"
 #include "gpu.hpp"
+#include "enhance.hpp"
 #include "input.hpp"
+#include "input_map.hpp"
 #include "menu.hpp"
 #include "os.hpp"
 #include "priority.hpp"
@@ -51,6 +54,7 @@
 #include "recorder.hpp"
 #include "qilin/host/audio.hpp"
 #include "qilin/host/display.hpp"
+#include "qilin/host/pacing.hpp"
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_video.h>
@@ -76,34 +80,6 @@ extern const unsigned kFunctionCount;
 extern const ::qilin::rt::ReplacedEntry kReplaced[];
 extern const unsigned kReplacedCount;
 }  // namespace qilin::gen
-
-namespace {
-struct Press {
-    double at;
-    uint32_t button;
-};
-std::vector<Press> scripted_input(const char* text) {
-    namespace h = qilin::host;
-    static constexpr struct {
-        const char* name;
-        uint32_t bit;
-    } kNames[] = {{"Up", h::kPadUp}, {"Down", h::kPadDown}, {"Left", h::kPadLeft}, {"Right", h::kPadRight}, {"A", h::kPadA},
-                  {"B", h::kPadB},   {"X", h::kPadX},       {"Y", h::kPadY},       {"Start", h::kPadStart}, {"Back", h::kPadBack},
-                  {"Guide", h::kPadGuide}};
-    std::vector<Press> out;
-    std::string all = text ? text : "";
-    size_t at = 0;
-    while (at < all.size()) {
-        const size_t end = std::min(all.find(',', at), all.size());
-        const std::string item = all.substr(at, end - at);
-        const size_t sep = item.find('@');
-        for (const auto& n : kNames)
-            if (sep != std::string::npos && item.substr(0, sep) == n.name) out.push_back({std::atof(item.c_str() + sep + 1), n.bit});
-        at = end + 1;
-    }
-    return out;
-}
-}  // namespace
 
 namespace {
 bool g_display_locked = false;  // the retraces run at the display's refresh (or a whole fraction of it)
@@ -156,40 +132,36 @@ void steer_to_vblank() {
 }
 
 // The retrace rate for the display the window is on (video.hpp's
-// set_retrace_rate): its refresh, or a whole fraction of it, when that is
-// within 0.3 Hz of 60; otherwise, and without vsync, a free 60 Hz (a VRR
-// display follows that on its own). Logged when it changes.
+// set_retrace_rate), as host/pacing.hpp chooses it: the display's refresh, or
+// a whole fraction of it, when that is the console's 59.94 Hz to within half
+// a percent; otherwise, without vsync and on a variable-refresh display
+// (which follows the game on its own), the console's own 59.94 Hz by the
+// clock. Logged when it changes.
 void match_retrace_to_display(qilin::host::Display& display) {
     namespace rt = qilin::rt;
     static uint64_t chosen = 0;  // num << 32 | den
-    uint32_t num = 60, den = 1;
-    double display_hz = 0;
-    bool matched = false;
-    if (display.picture().vsync && !display.picture().variable_refresh) {  // variable refresh follows the game's own 60 Hz
-        auto* window = static_cast<SDL_Window*>(display.sdl_window());
-        const SDL_DisplayMode* m = window ? SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)) : nullptr;
-        if (m) {
-            uint32_t n = static_cast<uint32_t>(m->refresh_rate_numerator), d = static_cast<uint32_t>(m->refresh_rate_denominator);
-            if (n == 0 || d == 0) n = static_cast<uint32_t>(std::lround(m->refresh_rate * 1000.0)), d = 1000;
-            display_hz = d ? double(n) / double(d) : 0;
-            for (uint32_t k = 1; k <= 4 && n && d; ++k)
-                if (std::fabs(display_hz / k - 60.0) <= 0.3) {
-                    num = n, den = d * k;
-                    matched = true;
-                    break;
-                }
-        }
+    uint32_t n = 0, d = 0;
+    auto* window = static_cast<SDL_Window*>(display.sdl_window());
+    if (const SDL_DisplayMode* m = window ? SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)) : nullptr) {
+        n = static_cast<uint32_t>(m->refresh_rate_numerator), d = static_cast<uint32_t>(m->refresh_rate_denominator);
+        if (n == 0 || d == 0) n = static_cast<uint32_t>(std::lround(m->refresh_rate * 1000.0)), d = 1000;
     }
-    g_display_locked = matched;
-    mkdd::g_display_hz.store(display_hz > 0 ? display_hz : 0, std::memory_order_relaxed);
-    const uint64_t key = uint64_t(num) << 32 | den;
+    const double display_hz = n && d ? double(n) / double(d) : 0;
+    const qilin::host::RetraceRate r = qilin::host::retrace_rate(n, d, display.picture().vsync, display.picture().variable_refresh);
+    g_display_locked = r.locked;
+    mkdd::g_display_hz.store(display_hz, std::memory_order_relaxed);
+    const uint64_t key = uint64_t(r.num) << 32 | r.den;
     if (key == chosen) return;
     chosen = key;
-    mkdd::set_retrace_rate(num, den);
-    if (num == 60 && den == 1)
-        rt::log("retraces at 60 Hz%s", display_hz > 0 ? " (the display's refresh isn't near a multiple of 60 Hz)" : "");
+    mkdd::set_retrace_rate(r.num, r.den);
+    if (r.locked)
+        rt::log("retraces at %.3f Hz, matching the display's %.3f Hz refresh (a frame every %u)", r.hz(), display_hz, r.every);
     else
-        rt::log("retraces at %.3f Hz, matching the display's %.3f Hz refresh", double(num) / double(den), display_hz);
+        rt::log("retraces at %.3f Hz, the console's own%s", r.hz(),
+                !display.picture().vsync              ? " (no vsync)"
+                : display.picture().variable_refresh ? " (variable refresh)"
+                : display_hz > 0                     ? " (the display's refresh isn't near a multiple of it: frames are uneven)"
+                                                     : "");
 }
 }  // namespace
 
@@ -442,6 +414,7 @@ int main(int argc, char** argv) {
         qilin::host::Display::Options o;
         o.title = "Mario Kart: Double Dash!!";
         o.headless = true;
+        o.width = 1280, o.height = 720;
         o.picture.scaling = qilin::host::Scaling::integer;  // a pixel for a pixel
         o.picture.smooth = false;
         qilin::host::Display display(o);
@@ -483,8 +456,11 @@ int main(int argc, char** argv) {
 
     const std::filesystem::path data = qilin::host::user_folder();
     mkdd::Settings settings = mkdd::load_settings(data);
-    mkdd::set_console(settings.language, settings.widescreen, settings.sound);
-    const float aspect = settings.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;  // as the console tells the game (sc.cpp)
+    // (The Wii's settings, until the os layer answers the GameCube's own from settings.language,
+    // settings.sound, settings.progressive and settings.eu_rgb60: English, 4:3.)
+    mkdd::set_console(1, false, settings.sound);
+    // The picture's shape: the game's own 4:3, until its cameras can be widened (enhance.hpp).
+    float aspect = 4.0f / 3.0f;
     std::unique_ptr<qilin::host::Display> display;
     std::unique_ptr<mkdd::Renderer> renderer;
     std::unique_ptr<mkdd::Menu> menu;
@@ -494,6 +470,7 @@ int main(int argc, char** argv) {
         qilin::host::Display::Options o;
         o.title = "Mario Kart: Double Dash!!";
         o.headless = offscreen;
+        if (offscreen) o.width = 1280, o.height = 960;  // what MKDD_DUMP saves: the picture at twice its size
         o.fullscreen = settings.fullscreen;
         o.monitor = settings.monitor;
         o.picture = mkdd::picture_of(settings);
@@ -502,16 +479,17 @@ int main(int argc, char** argv) {
         if (auto* w = static_cast<SDL_Window*>(display->sdl_window()))
             if (const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(w)))
                 rt::log("display: %dx%d at %.2f Hz%s", m->w, m->h, double(m->refresh_rate), settings.variable_refresh ? " (variable refresh)" : "");
-        unsigned scale = settings.scale;
-        if (scale == 0) {  // auto: the smallest whole multiple whose 480 picture lines fill the screen's height
-            int h = 0;
-            if (auto* w = static_cast<SDL_Window*>(display->sdl_window())) {
-                if (const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(w)))
-                    h = int(float(m->h) * (m->pixel_density > 0 ? m->pixel_density : 1.0f));
-            }
-            scale = h > 0 ? unsigned(std::clamp((h + 479) / 480, 1, 8)) : 3u;
-            rt::log("internal resolution auto: %ux for a screen %d pixels high", scale, h);
+        // The render resolution: auto is the smallest whole multiple whose 480 picture lines fill the
+        // window as it is now (full screen: the screen). The renderer keeps it for the run.
+        int window_w = 0, window_h = 0;
+        if (auto* w = static_cast<SDL_Window*>(display->sdl_window())) SDL_GetWindowSizeInPixels(w, &window_w, &window_h);
+        unsigned scale = mkdd::render_scale(settings, window_h);
+        if (settings.scale == 0) rt::log("render resolution auto: %ux for a window %d pixels high", scale, window_h);
+        if (mkdd::enhance::aspect_supported()) {
+            aspect = mkdd::aspect_ratio(settings, window_h > 0 ? float(window_w) / float(window_h) : 4.0f / 3.0f);
+            mkdd::enhance::set_aspect(aspect, settings.hud);
         }
+        if (mkdd::enhance::frame_rate_supported()) mkdd::enhance::set_frame_rate(settings.frame_rate, 0);
         if (const char* e = std::getenv("MKDD_SCALE")) scale = static_cast<unsigned>(std::clamp(std::atoi(e), 1, 8));
         renderer = std::make_unique<mkdd::Renderer>(display->gpu(), scale, settings.anisotropy);
         static mkdd::Renderer* saving = nullptr;  // what was compiled since the last save, kept for next time
@@ -532,33 +510,43 @@ int main(int argc, char** argv) {
     if ((!headless && !offscreen) || std::getenv("MKDD_AUDIO")) {
         // (With no window nothing reads SDL's events, so SDL mustn't turn Ctrl+C or a kill into one.)
         if (headless) SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
-        audio = std::make_unique<qilin::host::AudioOut>();
+        qilin::host::AudioOut::Options ao;
+        ao.device = settings.sound_device, ao.output = settings.sound_output;
+        audio = std::make_unique<qilin::host::AudioOut>(ao);
+        rt::log("sound: %s, %s", audio->device_name().c_str(), audio->surround() ? "5.1 from the game's Dolby Surround" : "stereo");
         mkdd::set_audio_sink([](const int16_t* lr, size_t frames, unsigned rate, void* out) {
             static_cast<qilin::host::AudioOut*>(out)->push(lr, frames, rate);
         }, audio.get());
     }
     mkdd::run_on_host_thread([](void*) { mkdd::start_game(); }, nullptr);
 
-    // The controls, with each key's name looked up once (again when the menu changes them).
-    struct Input {
-        mkdd::Binding::Kind kind;
-        uint32_t pad;
-        int key;
-    };
-    std::vector<Input> bindings[mkdd::kControlCount];
+    // Each port's controls, with each key's name looked up once (again when the menu changes them).
+    mkdd::BoundControls bound[mkdd::kPlayers];
     const auto look_up_controls = [&] {
-        for (unsigned c = 0; c < mkdd::kControlCount; ++c) {
-            bindings[c].clear();
-            for (const mkdd::Binding& b : settings.controls[c]) {
-                int key = -1;
-                if (b.kind == mkdd::Binding::kKey && display && (key = display->key_code(b.key.c_str())) < 0)
-                    rt::fatal(nullptr, "mkdd.ini: %s = key:%s, but there's no key called '%s'",
-                              mkdd::control_name(static_cast<mkdd::Control>(c)), b.key.c_str(), b.key.c_str());
-                bindings[c].push_back({b.kind, b.pad, key});
-            }
+        for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
+            bound[p] = {};
+            for (unsigned c = 0; c < mkdd::kControlCount; ++c)
+                for (const mkdd::Binding& b : settings.players[p].controls[c]) {
+                    int key = -1;
+                    if (b.kind == mkdd::Binding::kKey && display && display->sdl_window() && (key = display->key_code(b.key.c_str())) < 0)
+                        rt::fatal(nullptr, "mkdd.ini: [player%u] %s = key:%s, but there's no key called '%s'", p + 1,
+                                  mkdd::control_name(static_cast<mkdd::Control>(c)), b.key.c_str(), b.key.c_str());
+                    if (b.kind != mkdd::Binding::kPad) bound[p].has_keys = true;
+                    bound[p].controls[c].push_back({b.kind, b.pad, key});
+                }
         }
     };
     look_up_controls();
+    // MKDD_INPUT, MKDD_INPUT2 ... MKDD_INPUT4: a script for each port (input_map.hpp).
+    std::vector<mkdd::ScriptStep> scripts[mkdd::kPlayers];
+    bool scripted[mkdd::kPlayers] = {};
+    for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
+        const std::string variable = p ? "MKDD_INPUT" + std::to_string(p + 1) : std::string("MKDD_INPUT");
+        const char* text = std::getenv(variable.c_str());
+        std::string error;
+        scripted[p] = text != nullptr;
+        if (text && !mkdd::parse_input_script(text, scripts[p], error)) rt::fatal(nullptr, "%s: %s", variable.c_str(), error.c_str());
+    }
 
     const char* dump = offscreen ? std::getenv("MKDD_DUMP") : nullptr;
     std::ofstream dump_index;
@@ -570,53 +558,19 @@ int main(int argc, char** argv) {
     }
     const char* every_text = std::getenv("MKDD_DUMP_EVERY");
     const uint64_t every = every_text ? std::max<uint64_t>(1, std::strtoull(every_text, nullptr, 10)) : 60;
-    const std::vector<Press> presses = scripted_input(std::getenv("MKDD_INPUT"));
-    // MKDD_INPUT2: a second player's controller and its presses (the second Wii Remote is there from the start).
-    const bool scripted_player2 = std::getenv("MKDD_INPUT2") != nullptr;
-    const std::vector<Press> presses2 = scripted_input(std::getenv("MKDD_INPUT2"));
-    const auto t0 = std::chrono::steady_clock::now();
-    float cursor_x = 0, cursor_y = 0, cursor2_x = 0, cursor2_y = 0;  // the second player's: from the middle
-    struct Point {
-        double at;
-        float x, y;
-    };
-    // MKDD_POINTER's schedule, in time order, and MKDD_POINTER2's for the second player.
-    const auto pointer_script = [](const char* variable, float& start_x, float& start_y) {
-        std::vector<Point> points;
-        const char* p = std::getenv(variable);
-        if (!p) return points;
-        for (const char* at = p; *at;) {
-            Point pt{0, 0, 0};
-            int used = 0;
-            if (std::sscanf(at, "%f,%f%n", &pt.x, &pt.y, &used) != 2)
-                rt::fatal(nullptr, "%s: expected x,y at \"%s\"", variable, at);
-            at += used;
-            if (*at == '@') {
-                if (std::sscanf(at + 1, "%lf%n", &pt.at, &used) != 1) rt::fatal(nullptr, "%s: expected seconds after @", variable);
-                at += 1 + used;
-            }
-            if (!points.empty() && pt.at < points.back().at) rt::fatal(nullptr, "%s: times must increase", variable);
-            points.push_back(pt);
-            if (*at == ';') ++at;
-            else if (*at) rt::fatal(nullptr, "%s: unexpected \"%s\"", variable, at);
-        }
-        if (!points.empty()) start_x = points[0].x, start_y = points[0].y;
-        return points;
-    };
-    const std::vector<Point> points = pointer_script("MKDD_POINTER", cursor_x, cursor_y);
-    const std::vector<Point> points2 = pointer_script("MKDD_POINTER2", cursor2_x, cursor2_y);
-    auto last = t0;
+    const uint32_t dump_w = 1280, dump_h = 960;  // the offscreen target's size (above)
+    uint8_t trigger_clicks[mkdd::kPlayers] = {};
     bool wait_control_release = false;
     uint64_t sequence = 0, shown = 0;
     std::vector<uint8_t> rgba;
     if (display) start_watchdog();
     for (;;) {
         g_main_passes.fetch_add(1, std::memory_order_relaxed);
-        const unsigned player_mode = scripted_player2 ? 1 : settings.second_player;
         if (display) {
-            if (player_mode == 2) display->set_player_controllers(settings.controller2, "");
-            else display->set_player_controllers(settings.controller1, player_mode == 1 ? settings.controller2 : "");
-            display->set_input_thresholds(settings.stick_threshold, settings.trigger_threshold, settings.pointer_deadzone);
+            std::array<std::string, qilin::host::kPlayerPlaces> chosen;
+            for (unsigned p = 0; p < mkdd::kPlayers; ++p) chosen[p] = settings.players[p].controller;
+            display->set_player_controllers(chosen);
+            display->set_input_thresholds(settings.stick_threshold, settings.trigger_threshold);
             display->set_rumble_strength(settings.rumble_strength);
         }
         if (audio) audio->set_volume(settings.volume, settings.mute_unfocused && display && display->sdl_window() && !display->focused());
@@ -637,81 +591,47 @@ int main(int argc, char** argv) {
             if (menu->take_controls_changed()) look_up_controls();
             if (menu->is_open()) {  // the game is parked: the last picture, with the menu over it
                 wait_control_release = true;
-                mkdd::g_controls.store(0, std::memory_order_relaxed);
-                mkdd::g_controls2.store(0, std::memory_order_relaxed);
-                display->rumble(false);
+                // Every controller at rest (and still plugged in: the game mustn't see them go).
+                for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
+                    mkdd::GcPad rest = mkdd::gc_pad(int(p));
+                    rest = mkdd::GcPad{rest.connected, 0, 0, 0, 0, 0, 0, 0};
+                    mkdd::set_gc_pad(int(p), rest);
+                }
+                display->rumble_off();
                 display->present_again();
                 if (!settings.vsync) SDL_Delay(8);  // without vsync the menu needn't spin
-                last = std::chrono::steady_clock::now();
                 continue;
             }
         }
         if (renderer) renderer->set_anisotropy(settings.anisotropy);  // the menu's, once it's closed (unchanged: nothing to do)
         if (renderer) renderer->set_true_color(settings.true_color);
-        mkdd::g_speakers_on = settings.speaker;  // (read by the guest's sound thread: a bool, set from here alone)
-        {  // (without a display, --headless: the scripted presses and pointer alone)
-            // Whose controller is whose (settings.hpp, second_player): with one player every
-            // controller is theirs; with two, controllers go by the order each first had a
-            // button pressed, and the keyboard and mouse are always player one's.
-            const unsigned two = player_mode;
-            const int place1 = two == 0 ? (settings.controller1.empty() ? -1 : 0) : two == 1 ? 0 : -2, place2 = two == 1 ? 1 : two == 2 ? 0 : -2;  // -1 all, -2 none
-            const uint32_t all = display ? display->buttons() : 0;
-            uint32_t held = (place1 == -1 ? all : place1 >= 0 && display ? display->pad_buttons(place1) : 0) | (all & qilin::host::kPadClick);
-            uint32_t held2 = place2 >= 0 && display ? display->pad_buttons(place2) : 0;
-            const double now = mkdd::frame_count() / 60.0;  // game time: see the top
-            for (const Press& p : presses)
-                if (now >= p.at && now < p.at + 0.2) held |= p.button;
-            for (const Press& p : presses2)
-                if (now >= p.at && now < p.at + 0.2) held2 |= p.button;
-            uint32_t controls = 0, controls2 = 0;
-            for (unsigned c = 0; c < mkdd::kControlCount; ++c)
-                for (const Input& in : bindings[c]) {
-                    const bool on = in.kind == mkdd::Binding::kPad     ? (held & in.pad) != 0
-                                    : in.kind == mkdd::Binding::kMouse ? (held & qilin::host::kPadClick) != 0
-                                                                           : display && display->key_down(in.key);
-                    if (on) controls |= 1u << c;
-                    if (in.kind == mkdd::Binding::kPad && (held2 & in.pad)) controls2 |= 1u << c;  // the same pad buttons
-                }
-            if (wait_control_release) {
-                if (!(controls | controls2)) wait_control_release = false;
-                controls = controls2 = 0;
+        {  // (without a display, --headless: the scripts alone)
+            // The four controller ports (input.hpp), each from its player's bindings: the controller
+            // at its place (display.hpp: by name, or in the order the controllers joined), and the
+            // keyboard and mouse where the player has keys. The first port is always connected, as a
+            // console with a controller in it; the others while their controller is, or with keys or
+            // a script.
+            mkdd::KeySource keys;
+            if (display && display->sdl_window()) {
+                keys.key_down = [&](int code) { return display->key_down(code); };
+                keys.mouse = (display->buttons() & qilin::host::kPadClick) != 0;
             }
-            mkdd::g_controls.store(controls, std::memory_order_relaxed);
-            mkdd::g_controls2.store(controls2, std::memory_order_relaxed);
-            mkdd::g_player2.store(scripted_player2 || (place2 >= 0 && display && display->pad_connected(place2)), std::memory_order_relaxed);
-            // The pointer: the mouse where it moves, the right stick at a screen's width a second.
-            const auto tick = std::chrono::steady_clock::now();
-            const float dt = std::clamp(std::chrono::duration<float>(tick - last).count(), 0.0f, 0.05f);
-            last = tick;
-            float mx, my, sx = 0, sy = 0;
-            if (display && display->mouse_moved(mx, my)) cursor_x = mx, cursor_y = my;
-            for (const Point& p : points)
-                if (now >= p.at && now < p.at + 0.2) cursor_x = p.x, cursor_y = p.y;
-            // (With two players each controller's stick moves its own player's pointer; the mouse is player one's.)
-            if (display && place1 == -1) display->right_stick(sx, sy);
-            else if (display) display->pad_right_stick(place1, sx, sy);
-            cursor_x = std::clamp(cursor_x + sx * dt * 2.0f, -1.2f, 1.2f);
-            cursor_y = std::clamp(cursor_y + sy * dt * 2.0f, -1.2f, 1.2f);
-            mkdd::g_pointer_x.store(int32_t(cursor_x * 1000), std::memory_order_relaxed);
-            mkdd::g_pointer_y.store(int32_t(cursor_y * 1000), std::memory_order_relaxed);
-            float sx2 = 0, sy2 = 0;
-            if (display) display->pad_right_stick(place2, sx2, sy2);
-            for (const Point& p : points2)
-                if (now >= p.at && now < p.at + 0.2) cursor2_x = p.x, cursor2_y = p.y;
-            cursor2_x = std::clamp(cursor2_x + sx2 * dt * 2.0f, -1.0f, 1.0f);  // (kept on the screen: it has no mouse to bring it back)
-            cursor2_y = std::clamp(cursor2_y + sy2 * dt * 2.0f, -1.0f, 1.0f);
-            mkdd::g_pointer2_x.store(int32_t(cursor2_x * 1000), std::memory_order_relaxed);
-            mkdd::g_pointer2_y.store(int32_t(cursor2_y * 1000), std::memory_order_relaxed);
-            mkdd::g_pointer_on.store((!display || !display->sdl_window() || display->focused()) && std::fabs(cursor_x) <= 1.1f && std::fabs(cursor_y) <= 1.1f, std::memory_order_relaxed);
-            if (display) {
-                const bool r1 = settings.rumble && mkdd::g_rumble.load(std::memory_order_relaxed);
-                const bool r2 = settings.rumble && mkdd::g_rumble2.load(std::memory_order_relaxed);
-                if (place1 == -1) {
-                    display->rumble(r1);
-                } else {
-                    display->rumble_pad(place1, r1);  // (a place nobody has: nothing)
-                    display->rumble_pad(place2, r2);
-                }
+            const double now = mkdd::frame_count() / 60.0;  // game time: see the top
+            mkdd::GcPad pads[mkdd::kPlayers];
+            bool any = false;
+            for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
+                const qilin::host::PadState pad = display ? display->pad_state(int(p)) : qilin::host::PadState{};
+                pads[p] = mkdd::map_gc_pad(bound[p], pad, keys, settings.stick_deadzone, settings.trigger_threshold, trigger_clicks[p]);
+                pads[p].connected = p == 0 || pad.connected || bound[p].has_keys || scripted[p];
+                any = any || pads[p].buttons || pads[p].stick_x || pads[p].stick_y || pads[p].c_x || pads[p].c_y || pads[p].l || pads[p].r;
+            }
+            // After the menu: nothing reaches the game until everything is let go (the press that closed it).
+            if (wait_control_release && !any) wait_control_release = false;
+            for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
+                if (wait_control_release) pads[p] = mkdd::GcPad{pads[p].connected, 0, 0, 0, 0, 0, 0, 0};
+                mkdd::apply_input_script(scripts[p], now, pads[p]);
+                mkdd::set_gc_pad(int(p), pads[p]);
+                if (display) display->rumble_pad(int(p), settings.players[p].rumble && mkdd::gc_rumble_wanted(int(p)));
             }
         }
         if (!renderer) {  // headless: nothing shows the frames, so they're only waited for, not converted
@@ -739,7 +659,7 @@ int main(int argc, char** argv) {
                             std::string name = std::getenv("MKDD_DFF");
                             name = name.substr(0, name.rfind('@')) + ".ppm";
                             if (FILE* fp = std::fopen(name.c_str(), "wb")) {
-                                std::fprintf(fp, "P6\n1280 720\n255\n");
+                                std::fprintf(fp, "P6\n%u %u\n255\n", dump_w, dump_h);
                                 for (size_t k = 0; k + 3 < px.size(); k += 4) std::fwrite(&px[k], 1, 3, fp);
                                 std::fclose(fp);
                                 rt::log("MKDD_DFF: our picture of the frame: %s", name.c_str());
@@ -765,16 +685,20 @@ int main(int argc, char** argv) {
         if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {
             display->present_image(x->image, x->view, x->width, x->height, aspect, h);
             steer_to_vblank();
+            if (menu) menu->frame_shown();  // (F9: a capture takes it)
         } else {
             uint64_t s2 = sequence - 1;
-            if (mkdd::take_frame(&s2, 0, rgba, w, h)) display->present(w, h, rgba.data(), aspect, h);
+            if (mkdd::take_frame(&s2, 0, rgba, w, h)) {
+                display->present(w, h, rgba.data(), aspect, h);
+                if (menu) menu->frame_shown();
+            }
         }
         if (dump && ++shown % every == 0) {
             const std::vector<uint8_t> px = display->read_back();
             char name[512];
             std::snprintf(name, sizeof name, "%s/frame%05llu.ppm", dump, static_cast<unsigned long long>(shown / every));
             if (FILE* fp = std::fopen(name, "wb")) {
-                std::fprintf(fp, "P6\n1280 720\n255\n");
+                std::fprintf(fp, "P6\n%u %u\n255\n", dump_w, dump_h);
                 for (size_t i = 0; i + 3 < px.size(); i += 4) std::fwrite(&px[i], 1, 3, fp);
                 std::fclose(fp);
                 dump_index << std::filesystem::path(name).filename().string() << ',' << sequence << '\n';

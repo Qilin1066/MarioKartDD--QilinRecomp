@@ -11,8 +11,7 @@ namespace qilin::host {
 // qilin/mkdd in the platform's per-user application data (Windows:
 // %LOCALAPPDATA%; macOS: ~/Library/Application Support; elsewhere
 // $XDG_DATA_HOME or ~/.local/share), or MKDD_SAVE_DIR if set. Created
-// if missing. Up to v0.17.0 it was SDL's folder for Qilin/MarioKartDD-QilinComp:
-// what's there moves here once.
+// if missing.
 std::filesystem::path user_folder();
 
 }  // namespace qilin::host

@@ -1,10 +1,11 @@
 // The window and presentation (display.hpp).
 //
 // Each present draws into the window's image (or, headless, the target)
-// with dynamic rendering: black, then the picture through its look in the
-// rectangle the scaling gives, then the overlay. One present is in flight at
-// a time (the fence is waited for before the next is recorded), so the one
-// descriptor set is rewritten for each.
+// with dynamic rendering: first the passes the settings ask for on the
+// picture itself (post.hpp: SMAA, FSR 1), then black, the picture through its
+// look in the rectangle the scaling gives, and the overlay. One present is in
+// flight at a time (the fence is waited for before the next is recorded), so
+// the one descriptor set is rewritten for each.
 #include "qilin/host/display.hpp"
 #include "qilin/host/analog.hpp"
 #include <array>
@@ -20,7 +21,9 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "qilin/host/pacing.hpp"
 #include "qilin/host/vulkan.hpp"
+#include "post.hpp"
 #include "shaders.inc"
 
 namespace qilin::host {
@@ -131,14 +134,13 @@ struct Display::Impl {
         std::string key;
         uint32_t analog_held = 0;
         uint64_t rumble_until = 0;
-        uint32_t buttons = 0;
-        float stick_x = 0, stick_y = 0;
+        PadState state;
         bool rumbling = false;
         bool pressed = false;  // a button seen since it was opened (said once; it has joined)
     };
     std::vector<Pad> pads;                // every controller, as opened
-    unsigned stick_threshold = 50, trigger_threshold = 50, pointer_deadzone = 25, rumble_strength = 100;
-    std::array<std::string, 2> selected;
+    unsigned stick_threshold = 50, trigger_threshold = 50, rumble_strength = 100;
+    std::array<std::string, kPlayerPlaces> selected;
     std::vector<std::string> joined;   // in the order each first had a button pressed
     bool log_input = false;    // MKDD_INPUT_LOG: every change of the buttons
     uint32_t logged = 0;
@@ -191,14 +193,18 @@ struct Display::Impl {
             SDL_free(ids);
         }
     }
+    // The controller at a place (display.hpp, set_player_controllers).
     Pad* pad_at(int place) {
-        if (place < 0 || place > 1) return nullptr;
+        if (place < 0 || place >= kPlayerPlaces) return nullptr;
         std::string key = selected[static_cast<size_t>(place)];
+        if (key == "none") return nullptr;
         if (key.empty()) {
-            int automatic = place == 1 && selected[0].empty() ? 1 : 0;
+            // The automatic places before this one take the first to have joined.
+            int automatic = 0;
+            for (int before = 0; before < place; ++before)
+                if (selected[static_cast<size_t>(before)].empty()) ++automatic;
             for (const std::string& joined_key : joined) {
-                if ((!selected[0].empty() && joined_key == selected[0]) ||
-                    (!selected[1].empty() && joined_key == selected[1])) continue;
+                if (std::find(selected.begin(), selected.end(), joined_key) != selected.end()) continue;  // somebody's by name
                 if (automatic-- == 0) { key = joined_key; break; }
             }
         }
@@ -207,9 +213,6 @@ struct Display::Impl {
         return nullptr;
     }
 
-    float stick_x = 0, stick_y = 0;
-    bool moved = false;
-    float mouse_x = 0, mouse_y = 0;  // window pixels
     float pic_x = 0, pic_y = 0, pic_w = 1, pic_h = 1;  // the picture's place, last present
     std::function<bool(const void*)> hook;
     std::function<void(VkCommandBuffer)> overlay;
@@ -223,12 +226,16 @@ struct Display::Impl {
     VkSampler linear = VK_NULL_HANDLE, nearest = VK_NULL_HANDLE;
     VkFormat pipeline_format = VK_FORMAT_UNDEFINED;
     VkPipeline pipelines[2] = {};  // by Look
+    // The passes before the look, and a capture's own target (RGBA8 whatever the window's format) with its pipelines.
+    Post post;
+    Image shot;
+    VkPipeline shot_pipelines[2] = {};
 
     // What was shown last, for present_again.
     VkImage last_image = VK_NULL_HANDLE;  // null: the uploaded frame
     VkImageView last_view = VK_NULL_HANDLE;
     uint32_t last_w = 0, last_h = 0, last_lines = 0;
-    float last_aspect = 16.0f / 9.0f;
+    float last_aspect = 4.0f / 3.0f;
     bool shown_any = false;
     FrameTimes times;
     std::string mode_note;  // what fullscreen chose, and why (even_mode)
@@ -277,18 +284,21 @@ struct Display::Impl {
         check(vkCreateSampler(gpu.device, &sci, nullptr, &nearest), "vkCreateSampler");
     }
 
-    void destroy_pipelines() {
-        for (VkPipeline& p : pipelines) {
-            if (p) vkDestroyPipeline(gpu.device, p, nullptr);
-            p = VK_NULL_HANDLE;
+    void destroy_pipelines(VkPipeline* two) {
+        for (int i = 0; i < 2; ++i) {
+            if (two[i]) vkDestroyPipeline(gpu.device, two[i], nullptr);
+            two[i] = VK_NULL_HANDLE;
         }
     }
 
     // The two looks' pipelines, for the format drawn into.
     void make_pipelines(VkFormat format) {
         if (format == pipeline_format) return;
-        destroy_pipelines();
+        destroy_pipelines(pipelines);
         pipeline_format = format;
+        build_pipelines(format, pipelines);
+    }
+    void build_pipelines(VkFormat format, VkPipeline* out) {
         VkPipelineShaderStageCreateInfo stages[2]{{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
                                                   {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -332,7 +342,7 @@ struct Display::Impl {
         const VkShaderModule frags[2] = {plain, crt};
         for (int i = 0; i < 2; ++i) {
             stages[1].module = frags[i];
-            check(vkCreateGraphicsPipelines(gpu.device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipelines[i]), "vkCreateGraphicsPipelines");
+            check(vkCreateGraphicsPipelines(gpu.device, VK_NULL_HANDLE, 1, &pci, nullptr, &out[i]), "vkCreateGraphicsPipelines");
         }
     }
 
@@ -428,10 +438,27 @@ struct Display::Impl {
         return {{x, y}, {uint32_t(std::lround(w)), uint32_t(std::lround(h))}};
     }
 
+    // Before a frame's commands, with nothing in flight: the passes before the
+    // look made ready for this picture and size, and the look's source set.
+    void prepare(VkImageView view, uint32_t sw, uint32_t sh, VkExtent2D dst_size, float aspect, uint32_t lines) {
+        const VkRect2D r = place(dst_size, aspect, lines);
+        // FSR where the picture is shown larger than it is: at whole multiples its pixels are the point.
+        const bool fsr = picture.fsr && picture.scaling != Scaling::integer && (r.extent.width > sw || r.extent.height > sh);
+        const Post::Result shown = post.prepare(view, sw, sh, picture.smaa, fsr, r.extent.width, r.extent.height, picture.sharpness);
+        VkDescriptorImageInfo ii{picture.smooth || picture.look == Look::crt ? linear : nearest, shown.view,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wr.dstSet = set;
+        wr.descriptorCount = 1;
+        wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr.pImageInfo = &ii;
+        vkUpdateDescriptorSets(gpu.device, 1, &wr, 0, nullptr);
+    }
+
     // Record: the source ready to sample (uploading the frame if it's ours),
-    // then the drawing into dst, left in final_layout.
+    // the passes on it, then the drawing into dst, left in final_layout.
     void record(VkImage dst, VkImageView dst_view, VkExtent2D dst_size, VkImageLayout final_layout, float aspect, uint32_t lines,
-                VkImage src) {
+                VkImage src, const VkPipeline* looks, bool with_overlay) {
         if (src == VK_NULL_HANDLE) {
             transition(cmd, frame.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             VkBufferImageCopy region{};
@@ -442,6 +469,7 @@ struct Display::Impl {
         } else {  // drawn by the caller: wait for it
             transition(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
+        post.record(cmd);
         transition(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         color.imageView = dst_view;
@@ -461,12 +489,12 @@ struct Display::Impl {
         const VkRect2D whole{{0, 0}, dst_size};
         vkCmdSetViewport(cmd, 0, 1, &vp);
         vkCmdSetScissor(cmd, 0, 1, &whole);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines[picture.look == Look::crt ? 1 : 0]);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, looks[picture.look == Look::crt ? 1 : 0]);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
         const Push p{{lines ? float(std::lround(lines * aspect)) : pic_w, lines ? float(lines) : pic_h}, picture.scanlines, picture.mask};
         vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof p, &p);
         vkCmdDraw(cmd, 3, 1, 0, 0);
-        if (overlay) {
+        if (overlay && with_overlay) {
             const VkViewport full{0, 0, float(dst_size.width), float(dst_size.height), 0, 1};
             vkCmdSetViewport(cmd, 0, 1, &full);
             overlay(cmd);
@@ -516,6 +544,7 @@ Display::Display(const Options& options) : impl_(std::make_unique<Impl>()) {
     need_format(d.gpu, kFrameFormat, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
                 "frames");
     d.make_drawing();
+    d.post.create(d.gpu);
     if (d.window) d.build_swapchain();
     else d.make_pipelines(kFrameFormat);
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -542,7 +571,10 @@ Display::~Display() {
         d.staging.destroy(d.gpu);
         d.frame.destroy(d.gpu);
         d.target.destroy(d.gpu);
-        d.destroy_pipelines();
+        d.shot.destroy(d.gpu);
+        d.post.destroy();
+        d.destroy_pipelines(d.pipelines);
+        d.destroy_pipelines(d.shot_pipelines);
         vkDestroySampler(d.gpu.device, d.linear, nullptr);
         vkDestroySampler(d.gpu.device, d.nearest, nullptr);
         vkDestroyDescriptorPool(d.gpu.device, d.dpool, nullptr);
@@ -571,7 +603,6 @@ bool Display::poll() {
     Impl& d = *impl_;
     if (!d.window) return true;
     SDL_Event e;
-    d.moved = false;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) return false;
         if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) d.need_rebuild = true;
@@ -585,21 +616,14 @@ bool Display::poll() {
             continue;
         }
         if (d.hook && d.hook(&e)) continue;
-        if (e.type == SDL_EVENT_MOUSE_MOTION) {
-            const float density = SDL_GetWindowPixelDensity(d.window);
-            d.mouse_x = e.motion.x * density;
-            d.mouse_y = e.motion.y * density;
-            d.moved = true;
-        }
     }
-    if (!focused()) {
-        d.buttons = 0; d.stick_x = d.stick_y = 0; d.moved = false;
-        for (Impl::Pad& pad : d.pads) { pad.buttons = pad.analog_held = 0; pad.stick_x = pad.stick_y = 0; }
-        rumble(false);
+    if (!focused()) {  // nothing is held while another window has the focus
+        d.buttons = 0;
+        for (Impl::Pad& pad : d.pads) pad.analog_held = 0, pad.state = PadState{true, 0, 0, 0, 0, 0, 0, 0};
+        rumble_off();
         return true;
     }
     uint32_t b = 0;
-    d.stick_x = d.stick_y = 0;
     for (Impl::Pad& pad : d.pads) {
         SDL_Gamepad* p = pad.pad;
         struct Map {
@@ -625,17 +649,21 @@ bool Display::poll() {
         };
         axis_button(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER), d.trigger_threshold, kPadLT);
         axis_button(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER), d.trigger_threshold, kPadRT);
-        const int x = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY);
-        axis_button(-x, d.stick_threshold, kPadLeft); axis_button(x, d.stick_threshold, kPadRight);
-        axis_button(-y, d.stick_threshold, kPadUp); axis_button(y, d.stick_threshold, kPadDown);
+        // Each stick's directions as buttons too (SDL's y runs down).
+        const int lx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX), ly = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY);
+        const int rx = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX), ry = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY);
+        axis_button(-lx, d.stick_threshold, kPadLSLeft); axis_button(lx, d.stick_threshold, kPadLSRight);
+        axis_button(-ly, d.stick_threshold, kPadLSUp); axis_button(ly, d.stick_threshold, kPadLSDown);
+        axis_button(-rx, d.stick_threshold, kPadRSLeft); axis_button(rx, d.stick_threshold, kPadRSRight);
+        axis_button(-ry, d.stick_threshold, kPadRSUp); axis_button(ry, d.stick_threshold, kPadRSDown);
         pad.analog_held = analog;
         held |= analog;
-        pad.stick_x = pointer_axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX), d.pointer_deadzone);
-        pad.stick_y = -pointer_axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY), d.pointer_deadzone);
-        // The right stick is whichever controller's is pushed furthest.
-        if (pad.stick_x * pad.stick_x + pad.stick_y * pad.stick_y > d.stick_x * d.stick_x + d.stick_y * d.stick_y)
-            d.stick_x = pad.stick_x, d.stick_y = pad.stick_y;
-        pad.buttons = held;
+        const auto unit = [](int v) { return std::clamp(float(v) / 32767.0f, -1.0f, 1.0f); };
+        pad.state.connected = true;
+        pad.state.buttons = held;
+        pad.state.lx = unit(lx), pad.state.ly = -unit(ly), pad.state.rx = unit(rx), pad.state.ry = -unit(ry);
+        pad.state.lt = std::max(unit(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)), 0.0f);
+        pad.state.rt = std::max(unit(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)), 0.0f);
         b |= held;
         if (!pad.pressed && held) {
             pad.pressed = true;
@@ -661,18 +689,6 @@ bool Display::key_down(int code) const {
     const bool* k = SDL_GetKeyboardState(&n);
     return code < n && k[code];
 }
-void Display::right_stick(float& x, float& y) const {
-    x = impl_->stick_x;
-    y = impl_->stick_y;
-}
-bool Display::mouse_moved(float& x, float& y) const {
-    const Impl& d = *impl_;
-    if (!d.moved) return false;
-    x = (d.mouse_x - d.pic_x) / d.pic_w * 2.0f - 1.0f;
-    y = 1.0f - (d.mouse_y - d.pic_y) / d.pic_h * 2.0f;
-    return true;
-}
-
 int Display::joined_pads() const { return static_cast<int>(std::count_if(impl_->pads.begin(), impl_->pads.end(), [](const Impl::Pad& pad) { return pad.pressed; })); }
 bool Display::focused() const { return impl_->window && (SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_INPUT_FOCUS); }
 std::vector<Display::Controller> Display::controllers() const {
@@ -683,50 +699,33 @@ std::vector<Display::Controller> Display::controllers() const {
     }
     return out;
 }
-void Display::set_player_controllers(const std::string& first, const std::string& second) {
-    if (impl_->selected[0] == first && impl_->selected[1] == second) return;
-    rumble(false);
-    impl_->selected = {first, second};
+void Display::set_player_controllers(const std::array<std::string, kPlayerPlaces>& identities) {
+    if (impl_->selected == identities) return;
+    rumble_off();
+    impl_->selected = identities;
 }
-void Display::reset_player_order() { rumble(false); impl_->joined.clear(); for (auto& pad : impl_->pads) pad.pressed = false; }
+void Display::reset_player_order() { rumble_off(); impl_->joined.clear(); for (auto& pad : impl_->pads) pad.pressed = false; }
 bool Display::pad_connected(int place) const { return impl_->pad_at(place) != nullptr; }
 std::string Display::player_controller_name(int place) const {
     const Impl::Pad* pad = impl_->pad_at(place);
     const char* name = pad ? SDL_GetGamepadName(pad->pad) : nullptr;
     return name ? name : "Disconnected";
 }
-void Display::set_input_thresholds(unsigned stick, unsigned trigger, unsigned pointer) {
+void Display::set_input_thresholds(unsigned stick, unsigned trigger) {
     impl_->stick_threshold = std::clamp(stick, 5u, 95u);
     impl_->trigger_threshold = std::clamp(trigger, 5u, 95u);
-    impl_->pointer_deadzone = std::min(pointer, 95u);
 }
 void Display::set_rumble_strength(unsigned percent) {
     percent = std::min(percent, 100u);
-    if (percent != impl_->rumble_strength) { rumble(false); impl_->rumble_strength = percent; }
+    if (percent != impl_->rumble_strength) { rumble_off(); impl_->rumble_strength = percent; }
 }
-uint32_t Display::pad_buttons(int place) const {
+PadState Display::pad_state(int place) const {
     const Impl::Pad* p = impl_->pad_at(place);
-    return p ? p->buttons : 0;
+    return p ? p->state : PadState{};
 }
 
-void Display::pad_right_stick(int place, float& x, float& y) const {
-    const Impl::Pad* p = impl_->pad_at(place);
-    x = p ? p->stick_x : 0.0f;
-    y = p ? p->stick_y : 0.0f;
-}
-
-void Display::rumble(bool on) {
-    for (size_t i = 0; i < impl_->pads.size(); ++i) {
-        auto& pad = impl_->pads[i];
-        const bool active = on && focused() && impl_->rumble_strength != 0;
-        const uint64_t now = SDL_GetTicks();
-        if (active == pad.rumbling && (!active || now < pad.rumble_until)) continue;
-        const auto strength = static_cast<Uint16>(65535u * impl_->rumble_strength / 100u);
-        if (SDL_RumbleGamepad(pad.pad, active ? strength : 0, active ? strength : 0, active ? 250 : 0)) {
-            pad.rumbling = active; pad.rumble_until = now + 100;
-        }
-    }
-}
+// SDL's rumble runs for a set time: each call asks for a quarter of a second,
+// renewed every 100 ms while it's on, so a program that stops stops the rumble.
 void Display::rumble_pad(int place, bool on) {
     auto* pad = impl_->pad_at(place);
     if (!pad) return;
@@ -737,6 +736,10 @@ void Display::rumble_pad(int place, bool on) {
     if (SDL_RumbleGamepad(pad->pad, active ? strength : 0, active ? strength : 0, active ? 250 : 0)) {
         pad->rumbling = active; pad->rumble_until = now + 100;
     }
+}
+void Display::rumble_off() {
+    for (auto& pad : impl_->pads)
+        if (pad.rumbling && SDL_RumbleGamepad(pad.pad, 0, 0, 0)) pad.rumbling = false;
 }
 
 void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh, float aspect, uint32_t lines) {
@@ -750,7 +753,7 @@ void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh
         if (d.need_rebuild || d.vsync_built != d.picture.vsync) d.build_swapchain();
         if (d.extent.width == 0) return;  // minimised
         const auto waited_from = std::chrono::steady_clock::now();
-        if (d.gpu.present_wait && d.vsync_built && d.waitable_id) {
+        if (d.gpu.present_wait && d.vsync_built && d.picture.low_latency && d.waitable_id) {
             // Bounded: a display that stops refreshing (asleep, covered) only costs 50 ms.
             const VkResult w = vkWaitForPresentKHR(d.gpu.device, d.swapchain, d.waitable_id, 50'000'000);
             if (w == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -775,16 +778,9 @@ void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh
         dst_view = d.target.view;
         dst_size = {d.target.width, d.target.height};
     }
-    // The source, through the sampler the settings ask for (the fence was
-    // waited for: the set isn't in use).
-    VkDescriptorImageInfo ii{d.picture.smooth || d.picture.look == Look::crt ? d.linear : d.nearest,
-                             src ? view : d.frame.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    wr.dstSet = d.set;
-    wr.descriptorCount = 1;
-    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    wr.pImageInfo = &ii;
-    vkUpdateDescriptorSets(d.gpu.device, 1, &wr, 0, nullptr);
+    // The source, through the passes and the sampler the settings ask for
+    // (the fence was waited for: the sets aren't in use).
+    d.prepare(src ? view : d.frame.view, sw, sh, dst_size, aspect, lines);
 
     check(vkResetFences(d.gpu.device, 1, &d.done), "vkResetFences");
     check(vkResetCommandBuffer(d.cmd, 0), "vkResetCommandBuffer");
@@ -792,7 +788,7 @@ void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check(vkBeginCommandBuffer(d.cmd, &bi), "vkBeginCommandBuffer");
     d.record(dst, dst_view, dst_size, d.window ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, aspect,
-             lines, src);
+             lines, src, d.pipelines, true);
     check(vkEndCommandBuffer(d.cmd), "vkEndCommandBuffer");
 
     VkCommandBufferSubmitInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
@@ -868,7 +864,7 @@ void Display::present_again() {
     check(vkWaitForFences(d.gpu.device, 1, &d.done, VK_TRUE, UINT64_MAX), "vkWaitForFences");
     if (!d.shown_any) {  // nothing yet: black
         static const uint8_t black[4] = {0, 0, 0, 255};
-        present(1, 1, black, 16.0f / 9.0f, 0);
+        present(1, 1, black, 4.0f / 3.0f, 0);
         return;
     }
     d.show(d.last_image, d.last_view, d.last_w, d.last_h, d.last_aspect, d.last_lines);
@@ -876,19 +872,58 @@ void Display::present_again() {
 
 Gpu& Display::gpu() { return impl_->gpu; }
 
+// An image of ours (in TRANSFER_SRC_OPTIMAL layout, nothing in flight) as RGBA8 bytes.
+static std::vector<uint8_t> read_image(const Gpu& gpu, VkCommandBuffer cmd, VkFence done, const Image& image) {
+    Buffer out = Buffer::host_visible(gpu, VkDeviceSize{image.width} * image.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    check(vkResetFences(gpu.device, 1, &done), "vkResetFences");
+    check(vkResetCommandBuffer(cmd, 0), "vkResetCommandBuffer");
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    check(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer");
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {image.width, image.height, 1};
+    vkCmdCopyImageToBuffer(cmd, image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, out.buffer, 1, &region);
+    check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
+    VkCommandBufferSubmitInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    cbi.commandBuffer = cmd;
+    VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    si.commandBufferInfoCount = 1;
+    si.pCommandBufferInfos = &cbi;
+    check(vkQueueSubmit2(gpu.queue, 1, &si, done), "vkQueueSubmit2");
+    check(vkWaitForFences(gpu.device, 1, &done, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+    const auto* p = static_cast<const uint8_t*>(out.mapped);
+    std::vector<uint8_t> pixels(p, p + out.size);
+    out.destroy(gpu);
+    return pixels;
+}
+
 std::vector<uint8_t> Display::read_back() {
     Impl& d = *impl_;
     if (d.window) die("read_back is for headless displays");
     check(vkWaitForFences(d.gpu.device, 1, &d.done, VK_TRUE, UINT64_MAX), "vkWaitForFences");
-    Buffer out = Buffer::host_visible(d.gpu, VkDeviceSize{d.target.width} * d.target.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    return read_image(d.gpu, d.cmd, d.done, d.target);
+}
+
+std::vector<uint8_t> Display::capture(uint32_t& width, uint32_t& height) {
+    Impl& d = *impl_;
+    const VkExtent2D size = d.window ? d.extent : VkExtent2D{d.target.width, d.target.height};
+    width = size.width, height = size.height;
+    if (!d.shown_any || size.width == 0 || size.height == 0) return {};
+    check(vkWaitForFences(d.gpu.device, 1, &d.done, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+    if (d.shot.width != size.width || d.shot.height != size.height) {
+        d.shot.destroy(d.gpu);
+        d.shot = Image::create(d.gpu, size.width, size.height, kFrameFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    }
+    if (!d.shot_pipelines[0]) d.build_pipelines(kFrameFormat, d.shot_pipelines);
+    // The last picture again, as show() draws it, into the capture's own image.
+    d.prepare(d.last_image ? d.last_view : d.frame.view, d.last_w, d.last_h, size, d.last_aspect, d.last_lines);
     check(vkResetFences(d.gpu.device, 1, &d.done), "vkResetFences");
     check(vkResetCommandBuffer(d.cmd, 0), "vkResetCommandBuffer");
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check(vkBeginCommandBuffer(d.cmd, &bi), "vkBeginCommandBuffer");
-    VkBufferImageCopy region{};
-    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {d.target.width, d.target.height, 1};
-    vkCmdCopyImageToBuffer(d.cmd, d.target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, out.buffer, 1, &region);
+    d.record(d.shot.image, d.shot.view, size, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, d.last_aspect, d.last_lines, d.last_image,
+             d.shot_pipelines, false);
     check(vkEndCommandBuffer(d.cmd), "vkEndCommandBuffer");
     VkCommandBufferSubmitInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
     cbi.commandBuffer = d.cmd;
@@ -897,11 +932,10 @@ std::vector<uint8_t> Display::read_back() {
     si.pCommandBufferInfos = &cbi;
     check(vkQueueSubmit2(d.gpu.queue, 1, &si, d.done), "vkQueueSubmit2");
     check(vkWaitForFences(d.gpu.device, 1, &d.done, VK_TRUE, UINT64_MAX), "vkWaitForFences");
-    const auto* p = static_cast<const uint8_t*>(out.mapped);
-    std::vector<uint8_t> pixels(p, p + out.size);
-    out.destroy(d.gpu);
-    return pixels;
+    return read_image(d.gpu, d.cmd, d.done, d.shot);
 }
+
+bool Display::fsr_available() const { return impl_->post.fsr_available(); }
 
 const std::string& Display::device_name() const { return impl_->gpu.name; }
 
@@ -910,18 +944,16 @@ const Picture& Display::picture() const { return impl_->picture; }
 
 bool Display::fullscreen() const { return impl_->window && (SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_FULLSCREEN) != 0; }
 // The fullscreen mode for even frames: the desktop's (borderless) when its
-// refresh is a whole multiple of 60 Hz (or of 59.94) within 0.5%, or with
-// variable refresh; else the highest mode at the same size that is, if any.
+// refresh is a whole multiple of the console's 59.94 Hz (or of 60) within
+// half a percent (pacing.hpp), or with variable refresh; else the highest
+// mode at the same size that is, if any.
 static const SDL_DisplayMode* even_mode(SDL_Window* w, const Picture& p, std::string& why) {
     const SDL_DisplayID id = SDL_GetDisplayForWindow(w);
     const SDL_DisplayMode* desk = SDL_GetDesktopDisplayMode(id);
     if (!desk || p.variable_refresh || !p.match_refresh || !p.vsync) return nullptr;
     const auto even = [](const SDL_DisplayMode& m) {
-        const double hz = m.refresh_rate_numerator && m.refresh_rate_denominator
-                              ? double(m.refresh_rate_numerator) / double(m.refresh_rate_denominator) : double(m.refresh_rate);
-        for (int k = 1; k <= 8; ++k)
-            if (std::fabs(hz / k - 60.0) <= 0.3 || std::fabs(hz / k - 59.94) <= 0.3) return true;
-        return false;
+        return even_refresh(m.refresh_rate_numerator && m.refresh_rate_denominator
+                                ? double(m.refresh_rate_numerator) / double(m.refresh_rate_denominator) : double(m.refresh_rate));
     };
     if (even(*desk)) return nullptr;
     int n = 0;

@@ -55,7 +55,10 @@ class TimingTest(unittest.TestCase):
             timing.compare(data, data, self.checks)
 
     def test_video_edges_and_occurrence(self):
-        from PIL import Image
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow is not installed')
         frames = self.root / "frames"
         frames.mkdir()
         for index in range(12):
@@ -69,7 +72,10 @@ class TimingTest(unittest.TestCase):
             timing.video_event(data, probe)
 
     def test_missing_frame_index_rejected(self):
-        from PIL import Image
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow is not installed')
         frames = self.root / "indexed"
         frames.mkdir()
         for index in range(3):

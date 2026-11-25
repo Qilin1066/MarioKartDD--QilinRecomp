@@ -1,6 +1,8 @@
-// FrameTimes (averages, lows, the rolling window) and the sound queue's steering.
+// FrameTimes (averages, lows, the rolling window), the sound queue's steering,
+// the surround decoder, and the retrace rate chosen for a display.
 #include "qilin/host/frame_times.hpp"
 #include "qilin/host/audio.hpp"
+#include "qilin/host/pacing.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -92,6 +94,78 @@ int main() {
         for (int i = 0; i < 20; ++i) dropped += q.push(in.data(), 5);
         check(q.size() <= 80 && dropped > 0 && q.pull(out.data(), 5, dry) == 5, "a catching-up burst is cut to the target");
         (void)got;
+    }
+
+    // The retrace rate for a display (pacing.hpp): the console's own 59.94 Hz unless the display's
+    // refresh is a whole multiple of it to within half a percent, when the display's is followed.
+    {
+        using qilin::host::retrace_rate;
+        const auto free_running = [](const qilin::host::RetraceRate& x) { return !x.locked && x.num == 60000 && x.den == 1001; };
+        check(near(retrace_rate(0, 0, true, false).hz(), 59.94005994), "no display known: 59.94 Hz by the clock");
+        check(free_running(retrace_rate(0, 0, true, false)), "and not locked");
+        auto rr = retrace_rate(60000, 1001, true, false);
+        check(rr.locked && rr.every == 1 && rr.num == 60000 && rr.den == 1001, "a 59.94 Hz display: one frame a refresh");
+        rr = retrace_rate(60, 1, true, false);
+        check(rr.locked && rr.every == 1 && near(rr.hz(), 60.0), "a 60 Hz display: followed, a thousandth fast");
+        rr = retrace_rate(59951, 1000, true, false);
+        check(rr.locked && rr.every == 1 && near(rr.hz(), 59.951), "a display a little off its nominal rate is followed exactly");
+        rr = retrace_rate(120000, 1001, true, false);
+        check(rr.locked && rr.every == 2 && near(rr.hz(), 59.94005994), "119.88 Hz: every second refresh");
+        rr = retrace_rate(120, 1, true, false);
+        check(rr.locked && rr.every == 2 && near(rr.hz(), 60.0), "120 Hz: every second refresh");
+        rr = retrace_rate(180, 1, true, false);
+        check(rr.locked && rr.every == 3, "180 Hz: every third");
+        rr = retrace_rate(240, 1, true, false);
+        check(rr.locked && rr.every == 4 && near(rr.hz(), 60.0), "240 Hz: every fourth");
+        rr = retrace_rate(239760, 1000, true, false);
+        check(rr.locked && rr.every == 4 && near(rr.hz(), 59.94), "239.76 Hz: every fourth");
+        check(retrace_rate(360, 1, true, false).every == 6 && retrace_rate(480, 1, true, false).every == 8, "360 and 480 Hz");
+        // Not multiples: the game keeps its own rate (frames land unevenly; fullscreen looks for a mode that is one).
+        for (uint32_t hz : {50u, 72u, 75u, 85u, 90u, 100u, 144u, 165u, 170u, 200u, 250u, 500u})
+            check(free_running(retrace_rate(hz, 1, true, false)), "a refresh that isn't a multiple of 59.94 Hz: the console's own rate");
+        check(free_running(retrace_rate(59500, 1000, true, false)) && free_running(retrace_rate(60400, 1000, true, false)),
+              "more than half a percent off isn't followed (the game's speed would show)");
+        check(retrace_rate(59700, 1000, true, false).locked && retrace_rate(60250, 1000, true, false).locked, "within it is");
+        check(free_running(retrace_rate(60, 1, false, false)) && free_running(retrace_rate(120, 1, false, false)), "without vsync: the console's own rate");
+        check(free_running(retrace_rate(144, 1, true, true)) && free_running(retrace_rate(60, 1, true, true)),
+              "a variable-refresh display follows the game: the console's own rate");
+        check(free_running(retrace_rate(60, 0, true, false)), "a refresh with no denominator is no refresh");
+        using qilin::host::even_refresh;
+        check(even_refresh(59.94) && even_refresh(60.0) && even_refresh(119.88) && even_refresh(120.0) && even_refresh(240.0) &&
+                  !even_refresh(144.0) && !even_refresh(165.0) && !even_refresh(75.0) && !even_refresh(50.0) && !even_refresh(30.0),
+              "the modes fullscreen counts as even");
+    }
+
+    // The surround decoder (audio.hpp): what is alike in both channels is the centre's, what is
+    // opposite the rear's (late and band-limited), and left and right pass as they are.
+    {
+        qilin::host::SurroundDecoder dec;
+        dec.set_rate(32000);
+        const size_t n = 3200;  // a tenth of a second
+        std::vector<int16_t> in(n * 2), out(n * 6);
+        const auto tone = [](size_t i) { return static_cast<int16_t>(std::lround(8000.0 * std::sin(2.0 * 3.14159265358979 * 400.0 * double(i) / 32000.0))); };
+        const auto peak = [&](size_t channel, size_t from) {
+            int most = 0;
+            for (size_t i = from; i < n; ++i) most = std::max(most, std::abs(int(out[i * 6 + channel])));
+            return most;
+        };
+        for (size_t i = 0; i < n; ++i) in[2 * i] = in[2 * i + 1] = tone(i);  // the same in both
+        dec.decode(in.data(), n, out.data());
+        check(out[6 * 100] == in[2 * 100] && out[6 * 100 + 1] == in[2 * 100 + 1], "surround: left and right pass unchanged");
+        check(std::abs(peak(2, 0) - 11314) < 40 && peak(4, 0) == 0 && peak(5, 0) == 0 && peak(3, 0) == 0,
+              "surround: a sound alike in both is the centre's alone, 3 dB up on either");
+        dec.set_rate(32000);
+        for (size_t i = 0; i < n; ++i) in[2 * i] = tone(i), in[2 * i + 1] = static_cast<int16_t>(-tone(i));  // opposite
+        dec.decode(in.data(), n, out.data());
+        check(peak(2, 0) == 0 && peak(4, 640) > 7000 && peak(4, 640) < 8100 && peak(4, 640) == peak(5, 640),
+              "surround: a sound opposite in the two is the rear's, in both rear speakers");
+        bool silent = true;
+        for (size_t i = 0; i < 320; ++i) silent = silent && out[i * 6 + 4] == 0;
+        check(silent && out[(320 + 40) * 6 + 4] != 0, "surround: the rear is 10 ms late");
+        for (size_t i = 0; i < n; ++i) in[2 * i] = tone(i), in[2 * i + 1] = 0;  // left only
+        dec.set_rate(48000);
+        dec.decode(in.data(), n, out.data());
+        check(peak(0, 0) == 8000 && peak(1, 0) == 0 && peak(2, 0) > 5000 && peak(4, 960) > 3000, "surround: one side alone leaks to centre and rear, as the matrix does");
     }
 
     if (failures) return EXIT_FAILURE;
