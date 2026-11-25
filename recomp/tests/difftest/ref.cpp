@@ -14,13 +14,22 @@ namespace {
 uint32_t bits(uint32_t w, unsigned from, unsigned to) { return (w >> (31 - to)) & ((1u << (to - from + 1)) - 1); }
 int32_t exts16(uint32_t v) { return static_cast<int32_t>(static_cast<int16_t>(static_cast<uint16_t>(v))); }
 
-uint32_t load(const State& s, uint32_t a, unsigned n) {
+// Is [a, a + n) memory? (Always, unless the state has bounds: ref.hpp.)
+bool backed(State& s, uint32_t a, unsigned n) {
+    if (s.hi == 0 || (a >= s.lo && a <= s.hi - n)) return true;
+    s.fault = true;
+    return false;
+}
+uint32_t load(State& s, uint32_t a, unsigned n) {
+    if (!backed(s, a, n)) return 0;
     uint32_t v = 0;
     for (unsigned k = 0; k < n; ++k) v = (v << 8) | s.mem[a + k];
     return v;
 }
 void store(State& s, uint32_t a, uint32_t v, unsigned n) {
+    if (!backed(s, a, n)) return;
     for (unsigned k = 0; k < n; ++k) s.mem[a + k] = static_cast<uint8_t>(v >> (8 * (n - 1 - k)));
+    if (s.dirty) s.dirty[(a - s.lo) >> 12] = s.dirty[(a + n - 1 - s.lo) >> 12] = 1;
 }
 
 uint32_t so(const State& s) { return s.xer >> 31; }
@@ -369,7 +378,7 @@ bool step(State& s, const ppc::Insn& in, uint32_t pc) {
         s.reserve = false;
         return true;
     }
-    case Op::dcbz: { const uint32_t ea = ea_x & ~31u; for (unsigned k = 0; k < 32; ++k) s.mem[ea + k] = 0; return true; }
+    case Op::dcbz: { const uint32_t ea = ea_x & ~31u; for (unsigned k = 0; k < 32; k += 4) store(s, ea + k, 0, 4); return true; }
     case Op::dcbf: case Op::dcbst: case Op::dcbt: case Op::dcbtst: case Op::icbi:
     case Op::sync: case Op::isync: case Op::eieio: return true;
     // Condition register.

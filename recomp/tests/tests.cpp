@@ -813,7 +813,7 @@ void test_fp_single_mode() {
     // fadds f1,f1,f2; blr: f1 and f2 are read first, so the double version stays behind a check.
     const Lifted args = fn({0xEC21102Au, 0x4E800020u});
     CHECK(args.ok && args.code.contains("static void fn_80003000_d(Cpu& c)") && args.code.contains("fp::single(fp::add(f1, f2))"));
-    CHECK(args.code.contains("if (!(fp::to_f_exact(c.ps0[1], f1) & fp::to_f_exact(c.ps0[2], f2))) [[unlikely]] { fn_80003000_d(c); return; }"));
+    CHECK(args.code.contains("if (!(int(fp::to_f_exact(c.ps0[1], f1)) & int(fp::to_f_exact(c.ps0[2], f2)))) [[unlikely]] { fn_80003000_d(c); return; }"));
     CHECK(args.code.contains("fp::add_s(f1, f2)") && !args.code.contains("c.ps0[2] = fp::to_d(f2)"));  // f2 is only read: left alone
     // cmpwi r3,0; beqlr; lfs f1,0(r4); blr: the early way out writes nothing back, the other f1.
     const Lifted early = fn({0x2C030000u, 0x4D820020u, 0xC0240000u, 0x4E800020u});
@@ -825,6 +825,12 @@ void test_fp_single_mode() {
     // fadd f1,f1,f2 (double arithmetic); blr: no single mode.
     const Lifted dbl = fn({0xFC21102Au, 0x4E800020u});
     CHECK(dbl.ok && dbl.code.contains("double f1 = c.ps0[1];") && !dbl.code.contains("float"));
+    // The output compiles without a warning: a lone blr leaves its parameter unnamed, and a
+    // "written" flag exists only where some way out reads it.
+    CHECK(fn({0x4E800020u}).code.contains("void fn_80003000(Cpu&) {"));
+    // cmpwi r3,0; beq +8; lfs f1,0(r4); lfs f1,4(r4); blr: f1 is written on every path to the one way out.
+    const Lifted every = fn({0x2C030000u, 0x41820008u, 0xC0240000u, 0xC0240004u, 0x4E800020u});
+    CHECK(every.ok && every.code.contains("float f1") && !every.code.contains("bool w"));
     // lfs f1,0(r3); bl elsewhere; blr: a call, no single mode.
     LiftInput call;
     call.start = 0x80003000;

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <format>
 #include <map>
+#include <string_view>
 
 namespace qilin {
 
@@ -309,7 +310,7 @@ private:
                 std::string all;
                 for (unsigned h = 0; h < 64; ++h)
                     if (single_->live_in & (uint64_t{1} << h))
-                        all += std::format("{}fp::to_f_exact(c.ps{}[{}], {})", all.empty() ? "" : " & ", h < 32 ? 0 : 1, h & 31, half(h));
+                        all += std::format("{}int(fp::to_f_exact(c.ps{}[{}], {}))", all.empty() ? "" : " & ", h < 32 ? 0 : 1, h & 31, half(h));
                 p += std::format("    if (!({})) [[unlikely]] {{ {}_d(c); return; }}\n", all, name_);
             }
         } else {
@@ -336,6 +337,7 @@ private:
             if (!(single_->may[cur_] & bit)) continue;
             (h < 32 ? fprs_ : ps1s_).insert(h & 31);
             const std::string store = std::format("c.ps{}[{}] = fp::to_d({}); ", h < 32 ? 0 : 1, h & 31, half(h));
+            if (!(single_->must[cur_] & bit)) flags_read_ |= bit;
             s += (single_->must[cur_] & bit) ? store : std::format("if (w{}) {}", half(h), store);
         }
         return s;
@@ -351,6 +353,9 @@ private:
     std::string sync_in() { return "@IN@"; }
 
 public:
+    // Single mode: the "written" flags some way out reads (the others needn't exist).
+    uint64_t flags_read() const { return flags_read_; }
+
     std::string expand(const std::string& code) const {
         std::string out_s, in_s;
         for (unsigned n : gprs_) {
@@ -390,6 +395,12 @@ public:
         std::string r = code;
         for (auto [ph, with] : {std::pair{std::string("@OUT@"), out_s}, std::pair{std::string("@IN@"), in_s}})
             for (size_t p; (p = r.find(ph)) != std::string::npos;) r.replace(p, ph.size(), with);
+        // A function that touches no state (a lone blr) leaves its parameter unnamed.
+        static constexpr std::string_view kParam = "(Cpu& c) {\n";
+        if (const size_t p = r.find(kParam); p != std::string::npos) {
+            const std::string_view rest = std::string_view(r).substr(p + kParam.size());
+            if (!rest.contains("c.") && !rest.contains("(c")) r.replace(p, kParam.size(), "(Cpu&) {\n");
+        }
         return r;
     }
 
@@ -982,6 +993,7 @@ private:
     std::map<uint32_t, const JumpTable*> tables_;
     std::set<unsigned> gprs_, crs_, fprs_, ps1s_;
     std::set<std::string> specials_;
+    uint64_t flags_read_ = 0;
     std::string error_;
 };
 
@@ -995,8 +1007,15 @@ Lifted lift(const LiftInput& f) {
     // Single mode, where the function's floating point allows it (and nothing in it waits for
     // interrupts: that reads the registers back). With halves read before they're written, the
     // double version stays, for when they don't hold single-precision values.
-    const SingleInfo info = analyse_single(f);
+    SingleInfo info = analyse_single(f);
     if (!info.ok) return out;
+    uint64_t read = 0;
+    {
+        Emitter first(f, &info);  // finds which "written" flags the ways out read
+        if (!first.run().ok) return out;
+        read = first.flags_read();
+    }
+    info.flags = read;
     Emitter s(f, &info);
     Lifted single = s.run();
     if (!single.ok || single.code.contains("@IN@")) return out;
