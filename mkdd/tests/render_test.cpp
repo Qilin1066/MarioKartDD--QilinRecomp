@@ -8,6 +8,7 @@
 // their one-pixel fallbacks), Z textures (late and early Z), EFB copies of
 // depth, and the RG8/GB8 copy formats. Exit 77 (skipped) without a Vulkan 1.3
 // device.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -15,15 +16,33 @@
 #include <string>
 #include <vector>
 
+#include "gpu.hpp"
 #include "gx.hpp"
+#include "hw.hpp"
+#include "os.hpp"
 #include "recorder.hpp"
 #include "renderer.hpp"
+#include "video.hpp"
 #include "qilin/host/vulkan.hpp"
 #include "qilin/rt/system.hpp"
 
 namespace rt = qilin::rt;
 namespace host = qilin::host;
 namespace gx = mkdd::gx;
+
+// The command decoder (gpu.cpp) is linked in whole, for the scenarios that go
+// through it; what it asks of the OS and the hardware layer isn't there. Its
+// registers are never mapped here and its GPU thread never started, so these
+// only have to exist; the draw-done and token events it queues go nowhere.
+namespace mkdd {
+uint64_t time_base() { return 0; }
+void wake_idle() {}
+void raise_interrupt(uint32_t) {}
+void add_timer_source(std::function<void()>, std::function<uint64_t()>) {}
+void on_wpar_write(void (*)()) {}
+void map_mmio(const MmioRange&) {}
+uint32_t frame_count() { return 0; }
+}  // namespace mkdd
 
 namespace {
 
@@ -413,11 +432,213 @@ void rg8_gb8(Target& t, Gx& g) {
     }
 }
 
+// ---- through the command decoder (gpu.cpp): commands as bytes, as the game's
+// GX and J3D write them to the pipe.
+struct Stream {
+    std::vector<uint8_t> b;
+    void u8(uint8_t v) { b.push_back(v); }
+    void u16(uint32_t v) { b.push_back(uint8_t(v >> 8)), b.push_back(uint8_t(v)); }
+    void u32(uint32_t v) { put_be32(b, v); }
+    void bp(uint32_t reg, uint32_t v) { u8(0x61), u32((reg << 24) | (v & 0xFFFFFFu)); }
+    void cp(uint32_t reg, uint32_t v) { u8(0x08), u8(uint8_t(reg)), u32(v); }
+    void xf(uint32_t address, std::initializer_list<uint32_t> words) {
+        u8(0x10), u32((uint32_t(words.size() - 1) << 16) | address);
+        for (uint32_t w : words) u32(w);
+    }
+    void xff(uint32_t address, std::initializer_list<float> words) {
+        u8(0x10), u32((uint32_t(words.size() - 1) << 16) | address);
+        for (float w : words) u32(f2u(w));
+    }
+    void call(uint32_t physical, uint32_t bytes) { u8(0x40), u32(physical), u32(bytes); }
+    // The viewport and scissor of a w x h rectangle at (x, y), with an orthographic projection over it in pixels.
+    void port(float x, float y, float w, float h) {
+        xff(0x101A, {w / 2, -h / 2, 16777215.0f, 342.0f + x + w / 2, 342.0f + y + h / 2, 16777215.0f});
+        xff(0x1020, {2.0f / w, -1.0f, 2.0f / -h, 1.0f, -1.0f, -1.0f});
+        xf(0x1026, {1});
+        bp(0x20, (342u + uint32_t(y)) | ((342u + uint32_t(x)) << 12));
+        bp(0x21, (342u + uint32_t(y + h) - 1) | ((342u + uint32_t(x + w) - 1) << 12));
+        bp(0x59, (342u >> 1) | ((342u >> 1) << 10));
+    }
+    // Gx::setup's state, as commands.
+    void setup() {
+        bp(0x00, 1u << 4);
+        port(0, 0, 640, 528);
+        xff(0x0000, {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0});            // position matrix 0: identity
+        xff(30 * 4, {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0});            // texture matrix 30: identity
+        cp(0x30, 30u << 6), cp(0x40, 0);
+        xf(0x1009, {1}), xf(0x100E, {1}), xf(0x1010, {1}), xf(0x103F, {0});
+        bp(0x28, 0);
+        bp(0xC0, 10u | (15u << 4) | (15u << 8) | (15u << 12) | (1u << 19));
+        bp(0xC1, (5u << 4) | (7u << 7) | (7u << 10) | (7u << 13) | (1u << 19));
+        for (uint32_t s = 0; s < 4; ++s) bp(0xF6 + 2 * s, 0 | (1u << 2)), bp(0xF7 + 2 * s, 2 | (3u << 2));
+        bp(0xF3, (7u << 16) | (7u << 19));
+        bp(0x40, 1u | (3u << 1) | (1u << 4));
+        bp(0x41, 1u << 3);
+        bp(0x43, 0);
+        bp(0x53, 0x595000), bp(0x54, 0x15);
+        bp(0x22, 6u | (6u << 8));
+    }
+    // Texture map 0 on stage 0 from texture coordinate 0, colour = texture x rasterised.
+    void texture(uint32_t address, uint32_t w, uint32_t h, uint32_t format) {
+        bp(0x80, 0), bp(0x84, 0);
+        bp(0x88, (w - 1) | ((h - 1) << 10) | (format << 20));
+        bp(0x94, address >> 5);
+        bp(0x30, w - 1), bp(0x31, h - 1);
+        xf(0x103F, {1}), xf(0x1040, {5u << 7});
+        bp(0x28, 1u << 6);
+        bp(0xC0, 15u | (8u << 4) | (10u << 8) | (15u << 12) | (1u << 19));   // a 0, b texc, c rasc, d 0
+    }
+    // The copy of the w x h EFB to the frame buffer, clearing: the frame's end.
+    void end_frame(uint32_t w = 640, uint32_t h = 528) {
+        bp(0x4F, 0), bp(0x50, 0), bp(0x51, 0xFFFFFF);
+        bp(0x49, 0), bp(0x4A, (w - 1) | ((h - 1) << 10));
+        bp(0x4B, kXfb >> 5), bp(0x4D, w / 16), bp(0x4E, 256);
+        bp(0x52, (1u << 14) | (1u << 11));
+    }
+    void send() {
+        mkdd::decode_commands(b.data(), b.size());
+        b.clear();
+    }
+};
+
+// A frame shaped like one of this game's races, from what its models hold (the
+// disc's course and kart models: every attribute by a 16-bit index, positions
+// as floats, normals and texture coordinates as 16-bit fractions, triangle
+// strips of five vertices on average, a display list a shape): per player a
+// course of 20 shapes and 25,000 vertices and 48 kart and object shapes of
+// 300, each shape with its own material and matrices.
+struct RaceFrame {
+    static constexpr uint32_t kLists = 0x00800000u, kPos = 0x00A00000u, kNrm = 0x00A40000u, kCol = 0x00A80000u, kUv = 0x00AC0000u,
+                              kTex = 0x00B00000u;
+    static constexpr uint32_t kElements = 4096, kTextures = 16;
+    struct List {
+        uint32_t at, bytes;
+    };
+    std::vector<List> course, karts;
+    uint32_t next = kLists;
+    uint8_t* mem(uint32_t physical) { return rt::guest_ptr(0x80000000u | physical); }
+    void be32(uint32_t physical, uint32_t v) {
+        uint8_t* p = mem(physical);
+        p[0] = uint8_t(v >> 24), p[1] = uint8_t(v >> 16), p[2] = uint8_t(v >> 8), p[3] = uint8_t(v);
+    }
+    // A display list of `strips` strips of `each` vertices, three 16-bit indices a vertex.
+    List list(uint32_t strips, uint32_t each, uint32_t seed) {
+        const uint32_t at = next;
+        uint8_t* p = mem(at);
+        uint32_t n = 0, x = seed * 2654435761u + 1;
+        for (uint32_t s = 0; s < strips; ++s) {
+            p[n++] = 0x98, p[n++] = uint8_t(each >> 8), p[n++] = uint8_t(each);
+            x = x * 1664525u + 1013904223u;
+            const uint32_t base = (x >> 8) % (kElements - 2 * each);
+            for (uint32_t v = 0; v < each; ++v)
+                for (int a = 0; a < 3; ++a) p[n++] = uint8_t((base + v) >> 8), p[n++] = uint8_t(base + v);
+        }
+        while (n % 32) p[n++] = 0;
+        next += n;
+        return {at, n};
+    }
+    explicit RaceFrame(uint32_t each = 5) {
+        // The arrays: positions in a grid of small triangles over the picture, so strips cover a few pixels each.
+        for (uint32_t i = 0; i < kElements; ++i) {
+            const float x = float((i * 37u) % 600u) + ((i & 1) ? 6.0f : 0.0f), y = float((i * 91u) % 440u) + ((i & 2) ? 6.0f : 0.0f);
+            be32(kPos + 12 * i, f2u(x)), be32(kPos + 12 * i + 4, f2u(y)), be32(kPos + 12 * i + 8, f2u(-0.5f - float(i % 100) / 400.0f));
+            uint8_t* nr = mem(kNrm + 6 * i);
+            nr[0] = 0, nr[1] = 0, nr[2] = 0, nr[3] = 0, nr[4] = 0x40, nr[5] = 0;
+            be32(kCol + 4 * i, 0x80C0FFFFu ^ (i * 0x01010100u));
+            uint8_t* uv = mem(kUv + 4 * i);
+            uv[0] = uint8_t(i >> 4), uv[1] = uint8_t(i << 4), uv[2] = uint8_t(i >> 6), uv[3] = uint8_t(i << 2);
+        }
+        for (uint32_t t = 0; t < kTextures; ++t)
+            for (uint32_t i = 0; i < 64 * 64; ++i) mem(kTex + t * 4096)[i] = uint8_t(i * (t + 3) + (i >> 6) * 5);
+        for (uint32_t s = 0; s < 20; ++s) course.push_back(list(1250 / each, each, s));
+        for (uint32_t s = 0; s < 48; ++s) karts.push_back(list(300 / each, each, 100 + s));
+    }
+    // One player's view into `rect` (x, y, w, h).
+    void view(Stream& st, const float rect[4], uint32_t frame) {
+        st.port(rect[0], rect[1], rect[2], rect[3]);
+        st.cp(0xA0, kPos), st.cp(0xB0, 12), st.cp(0xA1, kNrm), st.cp(0xB1, 6), st.cp(0xA2, kCol), st.cp(0xB2, 4);
+        st.cp(0xA4, kUv), st.cp(0xB4, 4);
+        const float sx = rect[2] / 608.0f, sy = rect[3] / 448.0f;
+        uint32_t material = 0;
+        const auto shape = [&](const List& l, bool lit) {
+            // The material: its texture, a konstant and a TEV colour; then the shape's matrices and format.
+            st.texture(kTex + (material % kTextures) * 4096, 64, 64, 1);
+            st.bp(0xE0, (material * 7) & 0xFF), st.bp(0xE1, (material * 13) & 0xFF);
+            st.bp(0xF3, (7u << 16) | (7u << 19) | (material & 0xFF));
+            st.xff(0x0000, {sx, 0, 0, float(material % 8 + frame % 4), 0, sy, 0, float(material % 5), 0, 0, 1, 0});
+            st.xff(0x0400, {1, 0, 0, 0, 1, 0, 0, 0, 1});
+            st.cp(0x50, lit ? (3u << 9) | (3u << 11) : (3u << 9) | (3u << 13));
+            st.cp(0x60, 3u);
+            st.cp(0x70, 1u | (4u << 1) | (3u << 10) | (1u << 13) | (5u << 14) | (1u << 21) | (3u << 22) | (8u << 25));
+            st.call(l.at, l.bytes);
+            ++material;
+        };
+        for (const List& l : course) shape(l, false);
+        for (const List& l : karts) shape(l, true);
+    }
+    void frame(Stream& st, unsigned players, uint32_t n) {
+        static constexpr float kRects[3][4][4] = {{{0, 0, 608, 448}},
+                                                  {{0, 0, 608, 224}, {0, 224, 608, 224}},
+                                                  {{0, 0, 304, 224}, {304, 0, 304, 224}, {0, 224, 304, 224}, {304, 224, 304, 224}}};
+        const unsigned layout = players == 1 ? 0 : players == 2 ? 1 : 2;
+        st.bp(0x66, 0);  // GXInvalidateTexAll, as the game's frames begin
+        for (unsigned p = 0; p < players; ++p) view(st, kRects[layout][p], n);
+        st.end_frame(608, 448);
+    }
+};
+
+double median(std::vector<double> v) {
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+}
+
+// mkdd_render_test --bench [players] [frames] [vertices a strip]: what such a frame costs to decode and record,
+// and to draw (the renderer's own time on the CPU, and the GPU's where it has timestamps).
+int bench(host::Gpu& gpu, unsigned players, unsigned frames, unsigned strip) {
+    Target t(gpu);
+    RaceFrame race(strip);
+    Stream st;
+    st.setup();
+    st.bp(0x43, 1), st.bp(0x41, (1u << 3) | (1u << 4));  // RGBA6_Z24, colour and alpha updates
+    st.send();
+    std::vector<double> record_ms, render_ms;
+    size_t draws = 0, vertices = 0, states = 0, bytes = 0;
+    auto& stats = gx::recorder_stats();
+    uint64_t gpu0 = 0, timed0 = 0;
+    for (unsigned n = 0; n < frames + 10; ++n) {
+        if (n == 10) gpu0 = stats.gpu_ns.load(), timed0 = stats.gpu_timed.load();  // ten to warm up (pipelines, caches)
+        race.frame(st, players, n);
+        bytes = st.b.size();
+        const uint64_t t0 = gx::now_ns();
+        st.send();
+        const uint64_t t1 = gx::now_ns();
+        double drawn = 0;
+        while (auto f = gx::next_frame(0)) {
+            draws = f->draws.size(), vertices = f->vertices.size() + f->small.size(), states = f->states.size();
+            const uint64_t r0 = gx::now_ns();
+            t.renderer.render(*f);
+            drawn += double(gx::now_ns() - r0) / 1e6;
+            gx::recycle_frame(std::move(f));
+        }
+        if (n >= 10) record_ms.push_back(double(t1 - t0) / 1e6), render_ms.push_back(drawn);
+    }
+    vkDeviceWaitIdle(gpu.device);
+    const uint64_t timed = stats.gpu_timed.load() - timed0;
+    std::printf("bench: %u player%s, %u frames on %s: %llu bytes of commands a frame; %llu draws, %llu vertices, %llu states\n"
+                "  decoding and recording %.3f ms a frame (median; fastest %.3f), drawing %.3f ms on the CPU (fastest %.3f), %.3f ms on the GPU\n",
+                players, players == 1 ? "" : "s", frames, gpu.name.c_str(), static_cast<unsigned long long>(bytes),
+                static_cast<unsigned long long>(draws), static_cast<unsigned long long>(vertices),
+                static_cast<unsigned long long>(states), median(record_ms), *std::min_element(record_ms.begin(), record_ms.end()), median(render_ms),
+                *std::min_element(render_ms.begin(), render_ms.end()),
+                timed ? double(stats.gpu_ns.load() - gpu0) / 1e6 / double(timed) : 0.0);
+    return 0;
+}
+
 const rt::FunctionEntry kNoFunctions[] = {{0x80004000u, [](rt::Cpu&) {}}};
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     if (!vulkan_13_device()) {
         std::puts("render_test: no Vulkan 1.3 device here: skipped");
         return std::getenv("QILIN_REQUIRE_GRAPHICS") ? 1 : 77;
@@ -427,6 +648,12 @@ int main() {
     std::printf("device: %s (logic ops %s, wide lines %s, large points %s)\n", gpu.name.c_str(), gpu.logic_op ? "yes" : "no",
                 gpu.wide_lines ? "yes" : "no", gpu.large_points ? "yes" : "no");
     gx::set_rendering(true);
+    if (argc >= 2 && std::strcmp(argv[1], "--bench") == 0) {
+        const int code = bench(gpu, argc >= 3 ? unsigned(std::atoi(argv[2])) : 1, argc >= 4 ? unsigned(std::atoi(argv[3])) : 200,
+                               argc >= 5 ? unsigned(std::atoi(argv[4])) : 5);
+        gpu.destroy();
+        return code;
+    }
     {
         Target t(gpu);
         Gx g;

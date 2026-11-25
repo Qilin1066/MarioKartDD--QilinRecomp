@@ -18,9 +18,12 @@ struct Registers {
 // A primitive: opcode 0x80-0xBF (type in bits 3-5, vertex format in 0-2),
 // `count` vertices of raw data at `data`.
 void record_primitive(const Registers& r, uint8_t opcode, const uint8_t* data, uint32_t count);
-// State changed (all of it, as far as the recorder knows): the next draw
-// snapshots it again.
+// State changed (all of it, as far as the recorder knows, the CP's registers
+// too): the next draw snapshots it again.
 void state_changed();
+// A CP register changed (vertex descriptors, attribute tables, array bases
+// and strides, matrix indices): the next primitive reads its format again.
+void cp_changed();
 // XF memory or registers [address, address + count) changed: the next draw
 // snapshots what that affects.
 void xf_changed(uint32_t address, uint32_t count);
@@ -40,7 +43,7 @@ void record_tlut_load(const Registers& r, uint32_t command);
 // images_made; the guest's thread the rest.
 struct RecorderStats {
     std::atomic<uint64_t> frames{0};
-    std::atomic<uint64_t> record_ns{0};    // the guest's thread recording (wait_ns not included)
+    std::atomic<uint64_t> record_ns{0};    // decoding commands and recording them (wait_ns not included)
     std::atomic<uint64_t> wait_ns{0};      // ... waiting for the main thread to take a frame
     std::atomic<uint64_t> texture_lookups{0}, hash_ns{0};  // textures bound, and checking them for changes
     std::atomic<uint64_t> hashed_bytes{0};                 // ... the bytes read to check them

@@ -17,6 +17,16 @@
 
 namespace mkdd::gx {
 
+// The memory the GPU can be pointed at: the GameCube's 24 MB of MEM1, from
+// physical address 0 (there is no MEM2). GX hands the GPU physical addresses
+// (display lists, vertex arrays, textures, palettes, copy destinations, the
+// FIFO); callers mask a virtual one down first, as the hardware ignores the
+// top bits.
+constexpr uint32_t kMem1Size = 0x01800000u;
+constexpr bool in_memory(uint32_t physical, uint32_t bytes) { return physical <= kMem1Size && bytes <= kMem1Size - physical; }
+static_assert(in_memory(0, kMem1Size) && in_memory(kMem1Size - 32, 32) && !in_memory(kMem1Size - 31, 32) && !in_memory(0x10000000u, 4) &&
+              !in_memory(0x100, 0xFFFFFF00u));
+
 // One vertex, every attribute GX can send, decoded to floats (the formats
 // and fixed-point scales are the vertex attribute table's). What the vertex
 // didn't have is filled as Dolphin's vertex loader fills it.
