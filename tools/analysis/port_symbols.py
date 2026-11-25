@@ -33,12 +33,20 @@ So the port works per object:
      (the release build inlined it), skipping anything else costs.
   4. Call graph: the map's link tree says who first referenced each symbol.
      If a function's referrer is matched, the function should be among the
-     retail referrer's call targets; the alignment is repeated with that as a
-     bonus, twice.
-  5. Confidence per name (the last column):
-       A  equal size, and the sandwich or the call graph agrees too
+     retail referrer's call targets (or the addresses it builds); the
+     alignment is repeated with that as a bonus, and as a penalty elsewhere.
+     Unanchored objects left with under a third of their functions matched
+     and no confirmation from the call graph are judged absent (the stripped
+     debugging tools) and taken out, and the alignment is repeated.
+  5. Weak functions the release build emitted in another object: leftover
+     retail functions are compared with every object's unmatched weak
+     functions, and named only on equal sizes or the call graph's word.
+  6. Confidence per name (the last column):
+       A  equal size, and the neighbours in the object or the call graph agree
        B  equal size alone, or unequal size confirmed by the call graph
-       C  unequal size, placed by order between neighbours that are matched
+       C  placed by order between matched neighbours; or equal size with a
+          doubt (the call graph contradicts, or a skipped debug function of
+          the same size is next to it and nothing says which survived)
        D  a guess: nothing but order and a rough size
      A and B are reliable enough to act on; confirm C and D by reading code.
 
@@ -46,10 +54,13 @@ With --pal, the PAL retail symbol list of the doldecomp/mkdd decompilation
 (third_party/mkdd, CC0) is used as an independent check: a name present in
 both must sit at a constant distance from its PAL address within a
 translation unit. The disagreements are counted per confidence class, and
-with --pal-fix a name that disagrees is demoted to D.
+with --pal-fix a name that disagrees is demoted to D. With --pal-slices, the
+PAL build's order of translation units places an unanchored object where the
+debug order cannot (step 2).
 
   port_symbols.py --map <disc>/files/debugInfoS.MAP --dol <disc>/sys/main.dol --qilin <qilin>
                   [-o symbols.txt] [--pal third_party/mkdd/Release_eu/symbols.yml]
+                  [--pal-slices third_party/mkdd/Release_eu/dol_slices.yml] [--pal-fix]
 
 The output is derived from the game: keep it out of git.
 """
