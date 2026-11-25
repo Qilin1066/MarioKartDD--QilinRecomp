@@ -39,6 +39,8 @@ std::vector<std::string> AudioOut::playback_devices() {
     return out;
 }
 
+AudioOut::AudioOut() : AudioOut(Options{}) {}
+
 AudioOut::AudioOut(const Options& options) {
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) die("SDL audio can't start");
     // The device asked for, if it's there; else the system's default, which SDL

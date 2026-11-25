@@ -155,7 +155,8 @@ public:
     // sound in pieces too large for that (twice a piece and 10 ms). The cap is twice the target.
     static constexpr double kTargetMs = 40.0;
 
-    explicit AudioOut(const Options& options = {});  // fails loudly if there's no playback device
+    AudioOut();  // the system's default device, stereo
+    explicit AudioOut(const Options& options);  // fails loudly if there's no playback device
     ~AudioOut();
     AudioOut(const AudioOut&) = delete;
     AudioOut& operator=(const AudioOut&) = delete;
