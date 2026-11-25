@@ -125,6 +125,11 @@ target_link_libraries(qilin PRIVATE qilin_core qilin_warnings)
 qilin_tool(qilin)
 target_compile_definitions(qilin PRIVATE QILIN_VERSION="${PROJECT_VERSION}")
 
+# The DSP microcode's recompiler (docs/audio.md): the game's sound program, from the player's DOL, as C++.
+add_executable(qilin-dsp recomp/src/dsp/dsplift.cpp)
+target_link_libraries(qilin-dsp PRIVATE qilin_dol qilin_warnings)
+qilin_tool(qilin-dsp)
+
 # ---- Runtime (what players run: no std::format) ----
 add_library(qilin_rt STATIC runtime/src/memory.cpp runtime/src/system.cpp runtime/src/report.cpp)
 target_include_directories(qilin_rt PUBLIC runtime/include)
@@ -365,7 +370,7 @@ if(Python3_FOUND)
 endif()
 
 # The game's runtime: everything in mkdd but the code lifted from main.dol.
-set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
+set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
 list(APPEND mkdd_runtime_sources mkdd/src/input.cpp)  # the controller ports (input.hpp)
 
 # ---- The game: built only from the player's own main.dol ----
@@ -403,7 +408,6 @@ if(QILIN_GAME_DOL)
         target_link_libraries(mkdd PRIVATE winmm)  # timeBeginPeriod (main.cpp)
     endif()
     target_compile_definitions(mkdd PRIVATE MKDD_VERSION="${PROJECT_VERSION}")
-    target_compile_definitions(mkdd PRIVATE MKDD_DEVICES_STANDALONE)  # until the merge, as for mkdd_runtime_check below
     # Our own sources get the warning set; the lifter's output doesn't (unused labels and locals).
     set_source_files_properties(mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/settings.cpp
         PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/W4;/permissive-,-Wall;-Wextra;-Wpedantic;-Wshadow>")
@@ -421,6 +425,20 @@ if(QILIN_GAME_DOL)
             set_source_files_properties(${gen_sources} PROPERTIES COMPILE_OPTIONS "-w")
         endif()
     endif()
+    # The DSP microcode, lifted beside the game's code (never into the source tree).
+    add_custom_command(
+        OUTPUT ${gen}/dsp_ucode.cpp
+        COMMAND qilin-dsp lift ${QILIN_GAME_DOL} -o ${gen}/dsp_ucode.cpp
+        DEPENDS qilin-dsp ${QILIN_GAME_DOL}
+        COMMENT "Lifting the DSP microcode in main.dol to C++")
+    target_sources(mkdd PRIVATE ${gen}/dsp_ucode.cpp)
+    set_source_files_properties(${gen}/dsp_ucode.cpp PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/w,-w>")
+    set_source_files_properties(mkdd/src/dsp_core.cpp PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/W4;/permissive-,-Wall;-Wextra;-Wpedantic;-Wshadow>")
+    # The microcode driven without the game (docs/audio.md): run by hand, it needs the disc's files.
+    add_executable(mkdd_dsp_check mkdd/tests/dsp_game_check.cpp mkdd/src/dsp_core.cpp ${gen}/dsp_ucode.cpp)
+    target_include_directories(mkdd_dsp_check PRIVATE mkdd/src)
+    target_link_libraries(mkdd_dsp_check PRIVATE qilin_dol)
+    qilin_tool(mkdd_dsp_check)
 endif()
 
 # ---- The player kit: everything mkdd needs but the code lifted from main.dol ----
@@ -481,11 +499,11 @@ endif()
 # Compile/link the complete runtime without distributing or requiring game data.
 if(QILIN_HOST AND NOT QILIN_GAME_DOL AND NOT QILIN_PLAYER_KIT)
     add_executable(mkdd_runtime_check ${mkdd_runtime_sources} tools/player-kit/link_check.cpp)
+    target_sources(mkdd_runtime_check PRIVATE mkdd/src/dsp_no_ucode.cpp)
     target_include_directories(mkdd_runtime_check PRIVATE mkdd/src)
     target_link_libraries(mkdd_runtime_check PRIVATE qilin_rt qilin_dol qilin_host qilin_imgui SDL3::SDL3-static qilin_warnings)
     target_compile_definitions(mkdd_runtime_check PRIVATE MKDD_VERSION="${PROJECT_VERSION}")
     # Until the host's input layer and the audio layer's ARAM are merged: pad.cpp and ar.cpp bring stand-ins.
-    target_compile_definitions(mkdd_runtime_check PRIVATE MKDD_DEVICES_STANDALONE)
     if(WIN32)
         target_link_libraries(mkdd_runtime_check PRIVATE winmm)
     endif()
@@ -493,6 +511,20 @@ if(QILIN_HOST AND NOT QILIN_GAME_DOL AND NOT QILIN_PLAYER_KIT)
         set_source_files_properties(mkdd/src/renderer.cpp mkdd/src/menu.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
     endif()
 endif()
+
+# The DSP core and the microcode lifter: a program written for the test, lifted at build time.
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/dsp_test/dsp_synth.cpp
+    COMMAND qilin-dsp lift --words ${CMAKE_CURRENT_SOURCE_DIR}/mkdd/tests/dsp_synth.txt --roots 00e8,00ea
+            -o ${CMAKE_CURRENT_BINARY_DIR}/dsp_test/dsp_synth.cpp
+    DEPENDS qilin-dsp ${CMAKE_CURRENT_SOURCE_DIR}/mkdd/tests/dsp_synth.txt
+    COMMENT "Lifting the DSP test program")
+add_executable(mkdd_dsp_test mkdd/tests/dsp_test.cpp mkdd/src/dsp_core.cpp ${CMAKE_CURRENT_BINARY_DIR}/dsp_test/dsp_synth.cpp)
+target_include_directories(mkdd_dsp_test PRIVATE mkdd/src)
+target_link_libraries(mkdd_dsp_test PRIVATE qilin_warnings)
+set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/dsp_test/dsp_synth.cpp PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/w,-w>")
+qilin_tool(mkdd_dsp_test)
+add_test(NAME mkdd_dsp_test COMMAND mkdd_dsp_test)
 
 add_executable(mkdd_save_history_test mkdd/tests/save_history_test.cpp mkdd/src/save_history.cpp)
 target_include_directories(mkdd_save_history_test PRIVATE mkdd/src)

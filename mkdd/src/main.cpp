@@ -46,7 +46,6 @@
 #include "profile.hpp"
 #include "settings.hpp"
 #include "save_history.hpp"
-#include "speaker.hpp"
 #include "build.hpp"
 #include "qilin/host/paths.hpp"
 #include "qilin/rt/report.hpp"
@@ -263,67 +262,6 @@ static void report_timing(qilin::host::Display* display, mkdd::Menu* menu, qilin
     }
 }
 
-// --check-speaker: the remote speaker's decoder (speaker.hpp) against the encoder in the game's
-// own code (the SDK's WENC, lifted: (state, 0 first or 1 going on, samples, count, bytes out)).
-// The encoder keeps the signal as the remote will decode it, and its step, in its state: after
-// every block of every test signal both must be exactly the decoder's, and they are looked for
-// there (wherever the SDK keeps them). No game runs: only that one function.
-static int check_speaker_decoder() {
-    namespace rt = qilin::rt;
-    constexpr uint32_t kEncode = 0x802166B4u, kState = 0x80F00000u, kPcm = 0x80F00100u, kOut = 0x80F00200u;
-    rt::Cpu c = rt::new_cpu();
-    rt::set_thread_cpu(&c);
-    unsigned blocks = 0, exact = 0;
-    double worst = 0;
-    int where_signal = -1, where_step = -1;
-    for (int signal = 0; signal < 5; ++signal) {
-        mkdd::SpeakerDecoder d;
-        std::memset(rt::guest_ptr(kState), 0, 0x100);
-        uint32_t noise = 12345;
-        for (int block = 0; block < 400; ++block) {
-            int16_t pcm[40];
-            for (int i = 0; i < 40; ++i) {
-                const double t = (block * 40 + i) / 6000.0;
-                noise = noise * 1664525u + 1013904223u;
-                const double v = signal == 0   ? 20000 * std::sin(6.283185307179586 * 440 * t)
-                                 : signal == 1 ? 32767 * std::sin(6.283185307179586 * (100 + 2000 * t) * t)
-                                 : signal == 2 ? (int32_t(noise >> 16) - 32768) * 0.9
-                                 : signal == 3 ? ((block / 3) % 2 ? 32767.0 : -32768.0)
-                                               : 0.0;
-                pcm[i] = static_cast<int16_t>(std::clamp(v, -32768.0, 32767.0));
-                rt::poke16(kPcm + 2 * uint32_t(i), static_cast<uint16_t>(pcm[i]));
-            }
-            c.r[1] = mkdd::build::kStackTop - 0x100, c.r[2] = mkdd::build::kSdaBase2, c.r[13] = mkdd::build::kSdaBase;
-            c.r[3] = kState, c.r[4] = block == 0 ? 0 : 1, c.r[5] = kPcm, c.r[6] = 40, c.r[7] = kOut;
-            rt::call(c, kEncode);
-            int16_t out[40];
-            d.decode(rt::guest_ptr(kOut), 20, out);
-            for (int i = 0; i < 40; ++i) worst = std::max(worst, std::fabs(double(out[i]) - pcm[i]));
-            // The decoder's signal and step, somewhere in the encoder's state (32-bit words).
-            ++blocks;
-            bool has_signal = false, has_step = false;
-            for (int at = 0; at < 0x40; at += 4) {
-                const auto word = static_cast<int32_t>(rt::peek32(kState + uint32_t(at)));
-                if (word == d.signal && (where_signal < 0 || where_signal == at) && !has_signal) {
-                    if (d.signal != 0) where_signal = at;
-                    has_signal = true;
-                }
-                if (word == d.step && (where_step < 0 || where_step == at)) where_step = at, has_step = true;
-            }
-            if (has_signal && has_step) ++exact;
-            else if (blocks - exact <= 3)
-                std::printf("  signal %d, block %d: the decoder has signal %d and step %d; the encoder's state: %08X %08X %08X %08X %08X %08X %08X %08X\n",
-                            signal, block, d.signal, d.step, rt::peek32(kState), rt::peek32(kState + 4), rt::peek32(kState + 8),
-                            rt::peek32(kState + 12), rt::peek32(kState + 16), rt::peek32(kState + 20), rt::peek32(kState + 24), rt::peek32(kState + 28));
-        }
-    }
-    std::printf("the speaker's decoder against the game's encoder: %u blocks of 40 samples, %u with the encoder's signal and step exactly the "
-                "decoder's (kept at +%d and +%d of its state); the codec's own largest error, on a full-scale square wave: %.0f\n",
-                blocks, exact, where_signal, where_step, worst);
-    std::fflush(nullptr);
-    return blocks == exact ? 0 : 1;
-}
-
 int main(int argc, char** argv) {
     namespace rt = qilin::rt;
     mkdd::set_command_line(argc, argv);  // for the game's reset
@@ -357,19 +295,15 @@ int main(int argc, char** argv) {
         folder = argv[2];
         argc = 1;
     }
-    // --check-speaker <disc>: the Wii Remote speaker's decoder against the game's own encoder (below).
-    bool check_speaker = false;
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--check-speaker") == 0) check_speaker = headless = true;
-        else if (std::strcmp(argv[i], "--headless") == 0) headless = true;
+        if (std::strcmp(argv[i], "--headless") == 0) headless = true;
         else if (std::strcmp(argv[i], "--offscreen") == 0) offscreen = true;
         else if (!folder) folder = argv[i];
         else folder = nullptr, i = argc;  // too many: usage
     }
     if (!folder) {
         std::fprintf(stderr, "usage: mkdd [--headless | --offscreen] <folder with the extracted disc: sys/main.dol, sys/boot.bin, files/>\n"
-                             "       mkdd --bench-record <file.dff> [times] | --render-dff <file.dff> <out.ppm> [loops]\n"
-                             "       mkdd --check-speaker <folder>\n");
+                             "       mkdd --bench-record <file.dff> [times] | --render-dff <file.dff> <out.ppm> [loops]\n");
         return 2;
     }
     // The log, beside the settings: mkdd.log for this run, mkdd.old.log
@@ -452,7 +386,6 @@ int main(int argc, char** argv) {
     if (!mkdd::apply_save_restore(qilin::host::user_folder(), restore_error))
         rt::fatal(nullptr, "save recovery: %s (the restore request is restore-save.txt in the save folder)", restore_error.c_str());
     mkdd::load_game(folder);
-    if (check_speaker) std::_Exit(check_speaker_decoder());
 
     const std::filesystem::path data = qilin::host::user_folder();
     mkdd::Settings settings = mkdd::load_settings(data);
