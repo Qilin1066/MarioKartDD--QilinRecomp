@@ -126,8 +126,8 @@ Nothing we cannot supply. It never reads the coefficient ROM (`0x1000`-`0x17FF`:
 The base imitates AX at a high level (`ax.cpp`, gone here). For this microcode the choice went the other way:
 
 - It is small (2,443 reached instructions) and self-contained: no ROM code, no ROM data, no accelerator decoding. Everything hard about emulating a DSP at a low level (ROM dumps, the accelerator's formats, cycle timing) is absent; what is left is arithmetic.
-- It is intricate where an imitation must be exact to sound right and to keep JAudio's bookkeeping in step: two software ADPCMs with loop history, a polyphase resampler with its own state layout, three filters, ramps, an "auto mixer", effect lines through main memory, a surround matrix, a dozen oscillators, all in the DSP's 40-bit arithmetic with its two extension modes, unsigned multiplies and wrapping address registers. A rewrite by hand is a few thousand lines to get bit-exact; the lifter is 700 and gets the behaviour by construction.
-- Cost, measured (`mkdd_dsp_check`, one x86-64 core of the development PC, MSVC Release): see "Cost" below. It is well inside what a Raspberry Pi 4 core can spare, and the DSP's work runs only when the CPU hands it a sub-frame.
+- It is intricate where an imitation must be exact to sound right and to keep JAudio's bookkeeping in step: two software ADPCMs with loop history, a polyphase resampler with its own state layout, three filters, ramps, an "auto mixer", effect lines through main memory, a surround matrix, a dozen oscillators, all in the DSP's 40-bit arithmetic with its two extension modes, unsigned multiplies and wrapping address registers. A rewrite by hand is a few thousand lines to get bit-exact; the lifter is 800 and gets the behaviour by construction.
+- Cost, measured: see "Cost" below. A full load of 64 voices takes 9% of one desktop core; the DSP's work runs only when the CPU hands it a sub-frame.
 
 So: static recompilation, structured so hot paths can later be replaced by hand-written code and checked against the lifted code (the mixing loop and the ADPCM decoder are where the time goes).
 
@@ -137,7 +137,7 @@ So: static recompilation, structured so hot paths can later be replaced by hand-
 
 Details that matter (`dsp_core.hpp`):
 - Accumulators are 40 bits kept sign-extended in 64; the product is one 40-bit value (no microcode this knows reads its parts; one that did would fail to lift, as would reading the stack registers).
-- Flags are computed as documented; logic instructions on `acX.m` set them from the 16 bits; the "sticky overflow" too.
+- Flags are computed as documented, where anything can read them (see "Cost"); logic instructions on `acX.m` set them from the 16 bits.
 - 40-bit mode (`SET40`): loads to `acX.m` sign-extend and clear, stores from it saturate.
 - Multiplies double unless `M0`; with `SET15`, an `ax?.l` operand of the `MULX` family is unsigned.
 - `MOVPZ`, `MULxMVZ`, `ADDPAXZ` round the product to even.
@@ -153,15 +153,22 @@ So the CPU's busy-waits on the mailbox end on their first poll, a sub-frame is m
 
 ### Cost
 
-Measured with `mkdd_dsp_check` (one core of the development PC, an x86-64 desktop; MSVC Release). Seven sub-frames a frame; percentages are DSP time against the sound's duration.
+Measured with `mkdd_dsp_check` on one core of the development PC (an x86-64 desktop, MSVC 17.14 Release; Clang is a quarter faster). Seven sub-frames a frame; the share is DSP time against the sound's duration. The voices' pitches are spread from 1 to 2, which is heavier than a race's.
 
 | load | share of real time |
 |---|---|
-| idle (no voice; four effect lines off) | see the report's numbers |
-| 64 oscillator voices | see the report's numbers |
-| 64 ADPCM voices | see the report's numbers |
+| no voice (buses, effect lines off, output) | 0.5% |
+| 64 oscillator voices | 4.8% |
+| 24 4-bit ADPCM voices | 4.1% |
+| 64 4-bit ADPCM voices | 8.9% |
 
-A Raspberry Pi 4 core is roughly four to six times slower on this kind of code; a full 64-voice load would then take a large part of one core, a typical race (some 20-30 voices) a fraction of that. If that proves too much on the Pi: the flags are computed after every arithmetic instruction though the microcode tests only zero, sign, overflow and "logic zero", and only after a few of them; a liveness pass in the lifter removes most of that work.
+A Raspberry Pi 4 core is roughly four to six times slower on this kind of code (an estimate: nothing was run on one), so a race's 20 to 30 voices would take about a fifth of a core and the worst case about half of one.
+
+Two things in the lifter bought this (the first version, with the registers in the core and every flag computed, took three times as long, with the same output bit for bit):
+- **Registers in locals.** The generated function copies the registers into a local structure and writes them back where it leaves; with them in the core, every store to data memory forced the compiler to reload them.
+- **Flags only where wanted.** A backward data-flow pass over the lifted code finds the status flags wanted after each instruction; of 571 instructions that set flags, 97 have theirs computed.
+
+What would buy more, if the Pi needs it: hand-written replacements for the ADPCM frame decoder (`07EB`) and the mixing loop (`0CA9`), checked against the lifted code with `mkdd_dsp_check`'s outputs; then a host thread for the DSP.
 
 ## The hardware under it (`dsp.cpp`)
 

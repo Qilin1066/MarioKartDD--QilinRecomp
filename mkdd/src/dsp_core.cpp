@@ -42,8 +42,10 @@ void Core::bad_pc() const {
 
 void Core::boot(const Program* p, uint16_t start) {
     r = Regs{};
-    r.sr = IE | EIE;
+    r.sr = kIE | kEIE;
     r.config = 0x04;
+    std::memset(stack, 0, sizeof stack);
+    std::memset(sp, 0, sizeof sp);
     std::memset(dram, 0, sizeof dram);
     std::memset(ifx, 0, sizeof ifx);
     acc_start = acc_end = acc_current = 0;
@@ -64,8 +66,8 @@ void Core::run() {
             if (!rom(user, *this, pc)) return;
             continue;
         }
-        if (int_due()) {
-            take_int(pc);
+        if (int_due(r.sr)) {
+            r.sr = take_int(r.sr, pc);
             pc = 0x000E;
         }
         program->run(*this);
@@ -78,8 +80,10 @@ void Core::run() {
 }
 
 bool Core::idle_slow() {
-    if (idle_seen && r == idle_regs) return true;
+    if (idle_seen && r == idle_regs && !std::memcmp(sp, idle_sp, sizeof sp) && !std::memcmp(stack, idle_stack, sizeof stack)) return true;
     idle_regs = r;
+    std::memcpy(idle_sp, sp, sizeof sp);
+    std::memcpy(idle_stack, stack, sizeof stack);
     idle_seen = true;
     return false;
 }

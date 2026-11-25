@@ -222,8 +222,8 @@ bool rom_entry(void*, dsp::Core& core, uint16_t address) {
     }
     if (address != 0x80B5) rt::fatal(nullptr, "the DSP microcode jumped to %04X in the DSP's ROM: only the loader's entries are known", address);
     const dsp::Regs& r = core.r;
-    const uint32_t image = (uint32_t(r.ix[0]) << 16) | r.ix[1], length = r.ix[3];
-    if (r.ix[2]) rt::fatal(nullptr, "a DSP task loads at %04X in instruction memory: not handled", r.ix[2]);
+    const uint32_t image = (uint32_t(r.ix0) << 16) | r.ix1, length = r.ix3;
+    if (r.ix2) rt::fatal(nullptr, "a DSP task loads at %04X in instruction memory: not handled", r.ix2);
     uint32_t hash = 0;
     const dsp::Program* p = find_program(nullptr, image, length, &hash);
     g_stats.ucode_crc = hash;
@@ -231,14 +231,14 @@ bool rom_entry(void*, dsp::Core& core, uint16_t address) {
         rt::fatal(nullptr, "the DSP was switched to a microcode that was not lifted into this build (hash %08X, %u bytes at %08X)", hash, length,
                   image);
     load_image(nullptr, p, image);
-    const uint32_t data = (uint32_t(r.axh[0]) << 16) | r.axl[0], data_words = r.axl[1] / 2u, at = r.axh[1];
+    const uint32_t data = (uint32_t(r.axh0) << 16) | r.axl0, data_words = r.axl1 / 2u, at = r.axh1;
     if (data_words) {
         if (at + data_words > 0x1000) rt::fatal(nullptr, "a DSP task's saved data memory (%u words at %04X) doesn't fit", data_words, at);
         const uint8_t* d = dsp::physical(nullptr, data, data_words * 2);
         for (uint32_t i = 0; i < data_words; ++i) core.dram[at + i] = static_cast<uint16_t>((d[2 * i] << 8) | d[2 * i + 1]);
     }
     core.program = p;
-    core.pc = r.ar[0];
+    core.pc = r.ar0;
     return true;
 }
 

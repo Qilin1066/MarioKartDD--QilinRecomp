@@ -37,127 +37,120 @@ int g_failed = 0;
     } while (0)
 
 void arithmetic() {
-    Core c;
+    using namespace mkdd::dsp;
+    uint16_t sr = 0;
     const int64_t max40 = (int64_t(1) << 39) - 1, min40 = -(int64_t(1) << 39);
     // Add: carry when the unsigned 40-bit sum wraps, overflow when the signed one does.
-    CHECK_EQ(c.add(1, 2), 3);
-    CHECK_EQ(c.r.sr & 0x3F, Core::TB);
-    CHECK_EQ(c.add(-1, 1), 0);
-    CHECK_EQ(c.r.sr & 0x3F, Core::C | Core::Z | Core::TB);
-    CHECK_EQ(c.add(max40, 1), min40);
-    CHECK_EQ(c.r.sr & 0xBF, Core::O | Core::OS | Core::S | Core::AS | Core::TB);
-    c.add(1, 1);
-    CHECK_EQ(c.r.sr & 0xBF, Core::OS | Core::TB);  // the sticky overflow stays
-    c.r.sr = 0;
+    CHECK_EQ(add(sr, 1, 2), 3);
+    CHECK_EQ(sr & 0x3F, kTB);
+    CHECK_EQ(add(sr, -1, 1), 0);
+    CHECK_EQ(sr & 0x3F, kC | kZ | kTB);
+    CHECK_EQ(add(sr, max40, 1), min40);
+    CHECK_EQ(sr & 0xBF, kO | kOS | kS | kAS | kTB);
+    add(sr, 1, 1);
+    CHECK_EQ(sr & 0xBF, kOS | kTB);  // the sticky overflow stays
+    CHECK_EQ(add(max40, 1), min40);  // the forms without flags give the same values
+    sr = 0;
     // Subtract and compare: carry is "no borrow".
-    CHECK_EQ(c.sub(5, 5), 0);
-    CHECK_EQ(c.r.sr & 0x3F, Core::C | Core::Z | Core::TB);
-    CHECK_EQ(c.sub(3, 5), -2);
-    CHECK_EQ(c.r.sr & 0x3F, Core::S | Core::TB);
-    CHECK_EQ(c.sub(min40, 1), max40);
-    CHECK_EQ(c.r.sr & 0x3F, Core::C | Core::O | Core::AS | Core::TB);
-    c.r.sr = 0;
-    CHECK_EQ(c.neg(0), 0);
-    CHECK_EQ(c.r.sr & 0x3F, Core::C | Core::Z | Core::TB);
-    CHECK_EQ(c.neg(min40), min40);
-    CHECK(c.r.sr & Core::O);
-    c.r.sr = 0;
+    CHECK_EQ(sub(sr, 5, 5), 0);
+    CHECK_EQ(sr & 0x3F, kC | kZ | kTB);
+    CHECK_EQ(sub(sr, 3, 5), -2);
+    CHECK_EQ(sr & 0x3F, kS | kTB);
+    CHECK_EQ(sub(sr, min40, 1), max40);
+    CHECK_EQ(sr & 0x3F, kC | kO | kAS | kTB);
+    CHECK_EQ(sub(min40, 1), max40);
+    sr = 0;
+    CHECK_EQ(neg(sr, 0), 0);
+    CHECK_EQ(sr & 0x3F, kC | kZ | kTB);
+    CHECK_EQ(neg(sr, min40), min40);
+    CHECK(sr & kO);
+    sr = 0;
     // "Top two bits equal" and "above 32 bits" of a result.
-    c.flags64(0x40000000);
-    CHECK_EQ(c.r.sr & 0x3F, 0);
-    c.flags64(0x100000000ll);
-    CHECK_EQ(c.r.sr & 0x3F, Core::AS | Core::TB);
-    c.flags16(0x4000, false);
-    CHECK_EQ(c.r.sr & 0x3F, 0);
-    c.flags16(0xC000, true);
-    CHECK_EQ(c.r.sr & 0x3F, Core::S | Core::AS | Core::TB);
+    flags64(sr, 0x40000000);
+    CHECK_EQ(sr & 0x3F, 0);
+    flags64(sr, 0x100000000ll);
+    CHECK_EQ(sr & 0x3F, kAS | kTB);
+    flags16(sr, 0x4000, false);
+    CHECK_EQ(sr & 0x3F, 0);
+    flags16(sr, 0xC000, true);
+    CHECK_EQ(sr & 0x3F, kS | kAS | kTB);
     // Shifts on the 40 bits.
-    CHECK_EQ(c.lsr(-1, 4), 0x0FFFFFFFFFll);
-    CHECK_EQ(c.asr(-256, 4), -16);
-    CHECK_EQ(c.lsl(max40, 1), -2);
-    CHECK_EQ(c.lsrn(0x100, 0x7C), 0x10);  // bit 6: right by 64 - 60
-    CHECK_EQ(c.lsrn(0x100, 0x04), 0x1000);
-    CHECK_EQ(c.asrn(-0x100, 0x7C), -0x10);
-    CHECK_EQ(c.lsrn(0x100, 0x40), 0x100);
+    CHECK_EQ(lsr(sr, -1, 4), 0x0FFFFFFFFFll);
+    CHECK_EQ(lsr(-1, 4), 0x0FFFFFFFFFll);
+    CHECK_EQ(asr(sr, -256, 4), -16);
+    CHECK_EQ(lsl(sr, max40, 1), -2);
+    CHECK_EQ(lsl(max40, 1), -2);
+    CHECK_EQ(lsrn(sr, 0x100, 0x7C), 0x10);  // bit 6: right by 64 - 60
+    CHECK_EQ(lsrn(sr, 0x100, 0x04), 0x1000);
+    CHECK_EQ(asrn(sr, -0x100, 0x7C), -0x10);
+    CHECK_EQ(asrn(-0x100, 0x7C), -0x10);
+    CHECK_EQ(lsrn(sr, 0x100, 0x40), 0x100);
 
     // Accumulator parts and the two modes.
-    c.r.sr = 0;
-    c.r.ac[0] = 0;
-    c.set_ach(0, 0x12FF);
-    CHECK_EQ(c.r.ac[0], -(int64_t(1) << 32));
-    CHECK_EQ(c.ach(0), 0xFFFF);
-    c.set_acm(0, 0x8000);  // 16-bit mode: only the middle
-    CHECK_EQ(c.acm(0), 0x8000);
-    CHECK_EQ(c.ach(0), 0xFFFF);
-    c.set_acl(0, 0x1234);
-    c.r.sr = Core::SXM;
-    c.set_acm(0, 0x7000);  // 40-bit mode: the whole accumulator
-    CHECK_EQ(c.r.ac[0], 0x70000000);
-    c.r.ac[1] = 0x180000000ll;
-    CHECK_EQ(c.acm_sat(1), 0x7FFF);
-    c.r.ac[1] = -0x180000000ll;
-    CHECK_EQ(c.acm_sat(1), 0x8000);
-    c.r.sr = 0;
-    CHECK_EQ(c.acm_sat(1), 0x8000);  // (the plain middle word of -0x1_8000_0000)
-    c.r.ac[1] = 0x180001234ll;
-    CHECK_EQ(c.acm_sat(1), 0x8000);
-    c.r.ac[1] = 0x1ABCD1234ll;
-    CHECK_EQ(c.acm_sat(1), 0xABCD);
-    c.logic(1, 0);
-    CHECK_EQ(c.r.sr & 0x3F, Core::Z | Core::AS | Core::TB);  // zero is the middle word's; "above" the whole's
+    int64_t a = set_ach(0, 0x12FF);
+    CHECK_EQ(a, -(int64_t(1) << 32));
+    CHECK_EQ(ach(a), 0xFFFF);
+    a = set_acm(0, a, 0x8000);  // 16-bit mode: only the middle
+    CHECK_EQ(acm(a), 0x8000);
+    CHECK_EQ(ach(a), 0xFFFF);
+    a = set_acl(a, 0x1234);
+    CHECK_EQ(acl(a), 0x1234);
+    a = set_acm(kSXM, a, 0x7000);  // 40-bit mode: the whole accumulator
+    CHECK_EQ(a, 0x70000000);
+    CHECK_EQ(set_acm(kSXM, a, 0x8000), -0x80000000ll);
+    CHECK_EQ(acm_sat(kSXM, 0x180000000ll), 0x7FFF);
+    CHECK_EQ(acm_sat(kSXM, -0x180000000ll), 0x8000);
+    CHECK_EQ(acm_sat(0, 0x180001234ll), 0x8000);  // (16-bit mode: the plain middle word)
+    CHECK_EQ(acm_sat(kSXM, 0x1ABCD1234ll), 0x7FFF);
+    CHECK_EQ(acm_sat(0, 0x1ABCD1234ll), 0xABCD);
+    CHECK_EQ(acm_sat(kSXM, 0x12341234ll), 0x1234);
+    sr = 0;
+    a = logic(sr, 0x1ABCD1234ll, 0);
+    CHECK_EQ(a, 0x100001234ll);
+    CHECK_EQ(sr & 0x3F, kZ | kAS | kTB);  // zero is the middle word's; "above" the whole's
+    CHECK_EQ(ax(0xFFFF, 0x0001), -0xFFFF);
 
-    // The multiplier: doubled unless AM; unsigned operands only with SU and an .l operand.
-    c.r.sr = 0;
-    CHECK_EQ(c.mul(0x4000, 0x4000), 0x20000000);
-    c.r.sr = Core::AM;
-    CHECK_EQ(c.mul(0x4000, 0x4000), 0x10000000);
-    CHECK_EQ(c.mul(0xFFFF, 2), -2);
-    c.r.axl[0] = 0xFFFF, c.r.axl[1] = 0xFFFF, c.r.axh[0] = 0xFFFF, c.r.axh[1] = 2;
-    CHECK_EQ(c.mulx(0, 0), 1);
-    c.r.sr = Core::AM | Core::SU;
-    CHECK_EQ(c.mulx(0, 0), 0xFFFE0001ll);
-    CHECK_EQ(c.mulx(0, 1), 0x1FFFE);    // ax0.l unsigned, ax1.h signed
-    CHECK_EQ(c.mulx(1, 0), -0xFFFF);    // ax1.l unsigned, ax0.h signed
-    CHECK_EQ(c.mulx(1, 1), -2);
-    c.set_prod((int64_t(1) << 39) + 5);
-    CHECK_EQ(c.r.prod, min40 + 5);
+    // The multiplier: doubled unless AM; unsigned operands only with SU and the mode that allows them.
+    CHECK_EQ(mul(0, 0x4000, 0x4000), 0x20000000);
+    CHECK_EQ(mul(kAM, 0x4000, 0x4000), 0x10000000);
+    CHECK_EQ(mul(kAM, 0xFFFF, 2), -2);
+    CHECK_EQ(mul(kAM, 0xFFFF, 0xFFFF, 1), 1);
+    CHECK_EQ(mul(kAM | kSU, 0xFFFF, 0xFFFF, 1), 0xFFFE0001ll);
+    CHECK_EQ(mul(kAM | kSU, 0xFFFF, 2, 2), 0x1FFFE);
+    CHECK_EQ(mul(kAM | kSU, 0xFFFF, 0xFFFF, 2), -0xFFFF);
+    CHECK_EQ(mul(kAM | kSU, 0xFFFF, 2, 0), -2);
+    CHECK_EQ(sx40((int64_t(1) << 39) + 5), min40 + 5);
     // Rounding the low word away, to even.
-    c.r.prod = 0x00018000;
-    CHECK_EQ(c.prod_rounded(), 0x00020000);
-    c.r.prod = 0x00028000;
-    CHECK_EQ(c.prod_rounded(), 0x00020000);
-    c.r.prod = 0x00028001;
-    CHECK_EQ(c.prod_rounded(), 0x00030000);
+    CHECK_EQ(round_low(0x00018000), 0x00020000);
+    CHECK_EQ(round_low(0x00028000), 0x00020000);
+    CHECK_EQ(round_low(0x00028001), 0x00030000);
 
     // Address registers. With wr = 2^k - 1 the low k bits wrap in place.
     for (unsigned k = 1; k <= 8; ++k) {
         const uint16_t w = static_cast<uint16_t>((1u << k) - 1);
-        c.r.wr[0] = w;
         for (uint16_t base : {uint16_t(0x0400), uint16_t(0x0F00)}) {
             for (unsigned low = 0; low <= w; ++low) {
-                c.r.ar[0] = static_cast<uint16_t>(base | low);
-                CHECK_EQ(c.ar_inc(0), base | ((low + 1) & w));
-                CHECK_EQ(c.ar_dec(0), base | ((low - 1) & w));
+                const uint16_t at = static_cast<uint16_t>(base | low);
+                CHECK_EQ(ar_inc(at, w), base | ((low + 1) & w));
+                CHECK_EQ(ar_dec(at, w), base | ((low - 1) & w));
                 for (int step : {1, 2, 3, -1, -2}) {
                     if (static_cast<unsigned>(step < 0 ? -step : step) > w) continue;
-                    CHECK_EQ(c.ar_add(0, static_cast<uint16_t>(step)), base | ((low + static_cast<unsigned>(step)) & w));
-                    CHECK_EQ(c.ar_sub(0, static_cast<uint16_t>(step)), base | ((low - static_cast<unsigned>(step)) & w));
+                    CHECK_EQ(ar_add(at, w, static_cast<uint16_t>(step)), base | ((low + static_cast<unsigned>(step)) & w));
+                    CHECK_EQ(ar_sub(at, w, static_cast<uint16_t>(step)), base | ((low - static_cast<unsigned>(step)) & w));
                 }
             }
         }
     }
-    c.r.wr[0] = 0xFFFF;
-    c.r.ar[0] = 0xFFFF;
-    CHECK_EQ(c.ar_inc(0), 0);
-    CHECK_EQ(c.ar_add(0, 0x8000), 0x7FFF);
-    c.r.ar[0] = 0;
-    CHECK_EQ(c.ar_dec(0), 0xFFFF);
+    CHECK_EQ(ar_inc(0xFFFF, 0xFFFF), 0);
+    CHECK_EQ(ar_add(0xFFFF, 0xFFFF, 0x8000), 0x7FFF);
+    CHECK_EQ(ar_dec(0, 0xFFFF), 0xFFFF);
 
     // Stacks and the block loop's bookkeeping.
+    Core c;
     c.loop_begin(0x0123, 0x0130, 2);
     CHECK(c.loop_hit(0x0130) && !c.loop_hit(0x0131));
     CHECK(c.loop_again() && c.loop_start() == 0x0123);
-    CHECK(!c.loop_again() && c.r.sp[0] == 0 && c.r.sp[2] == 0 && c.r.sp[3] == 0);
+    CHECK(!c.loop_again() && c.sp[0] == 0 && c.sp[2] == 0 && c.sp[3] == 0);
 
     // The raw port: bytes, words and nibbles of ARAM; the second of two loads on one page.
     std::vector<uint8_t> aram(mkdd::dsp::kAramSize);
@@ -241,7 +234,7 @@ void program() {
         CHECK_EQ(c.dram[0x200 + i], static_cast<uint16_t>(out[i]));
     }
     for (unsigned i = 0; i < 8; ++i) {
-        const int64_t v = Core::sx40((int64_t(x[i]) * 0x7FFF) << 3);
+        const int64_t v = mkdd::dsp::sx40((int64_t(x[i]) * 0x7FFF) << 3);
         const uint16_t expect = v != static_cast<int32_t>(v) ? (v > 0 ? 0x7FFF : 0x8000) : static_cast<uint16_t>(v >> 16);
         CHECK_EQ(c.dram[0x280 + i], expect);
     }
@@ -271,8 +264,8 @@ void program() {
     c.run();
     CHECK_EQ(take_mail(), 0x88880D0Du);
     CHECK(c.halted);
-    CHECK_EQ(c.r.sp[0], 0);
-    CHECK_EQ(c.r.sp[1], 0);
+    CHECK_EQ(c.sp[0], 0);
+    CHECK_EQ(c.sp[1], 0);
 }
 
 }  // namespace

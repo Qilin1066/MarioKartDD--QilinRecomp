@@ -8,7 +8,7 @@
 // mkdd/src/dsp_core.hpp: every instruction becomes a statement or two on the
 // DSP's state, jumps become gotos, and the function returns when the DSP
 // halts, jumps into its ROM or can only wait for the CPU (dsp_core.hpp says
-// how that is known). It is generated into the build tree and never kept: it
+// how that is known). Status flags nobody tests are not computed. It is generated into the build tree and never kept: it
 // is the game's code in another form.
 //
 // What is lifted is what is reached from the vectors (0x0000-0x0010, two
@@ -268,29 +268,32 @@ bool is(const Insn& in, std::initializer_list<const char*> names) {
 bool conditional(const Insn& in) { return in.f['c'] != 15; }
 
 // ---- emitting ----
+//
+// The generated function keeps the registers in a local `r` (dsp_core.hpp says why) and writes
+// them back to the core `s` wherever it leaves.
 
+// Conditions on the status register, by code.
 const char* kCond[16] = {
-    "!(((sr_ >> 1) ^ (sr_ >> 3)) & 1)",                     // GE: O == S
-    "(((sr_ >> 1) ^ (sr_ >> 3)) & 1)",                      // L
-    "(!(((sr_ >> 1) ^ (sr_ >> 3)) & 1) && !(sr_ & 4))",     // G
-    "((((sr_ >> 1) ^ (sr_ >> 3)) & 1) || (sr_ & 4))",       // LE
-    "!(sr_ & 4)",                                           // NZ
-    "(sr_ & 4)",                                            // Z
-    "!(sr_ & 1)",                                           // NC
-    "(sr_ & 1)",                                            // C
-    "!(sr_ & 0x10)",                                        // below s32
-    "(sr_ & 0x10)",                                         // above s32
-    "((sr_ & 0x30) && !(sr_ & 4))",
-    "(!(sr_ & 0x30) || (sr_ & 4))",
-    "!(sr_ & 0x40)",                                        // LNZ
-    "(sr_ & 0x40)",                                         // LZ
-    "(sr_ & 2)",                                            // O
+    "!(((r.sr >> 1) ^ (r.sr >> 3)) & 1)",                     // GE: O == S
+    "(((r.sr >> 1) ^ (r.sr >> 3)) & 1)",                      // L
+    "(!(((r.sr >> 1) ^ (r.sr >> 3)) & 1) && !(r.sr & 4))",    // G
+    "((((r.sr >> 1) ^ (r.sr >> 3)) & 1) || (r.sr & 4))",      // LE
+    "!(r.sr & 4)",                                            // NZ
+    "(r.sr & 4)",                                             // Z
+    "!(r.sr & 1)",                                            // NC
+    "(r.sr & 1)",                                             // C
+    "!(r.sr & 0x10)",                                         // below s32
+    "(r.sr & 0x10)",                                          // above s32
+    "((r.sr & 0x30) && !(r.sr & 4))",
+    "(!(r.sr & 0x30) || (r.sr & 4))",
+    "!(r.sr & 0x40)",                                         // LNZ
+    "(r.sr & 0x40)",                                          // LZ
+    "(r.sr & 2)",                                             // O
     "true",
 };
-std::string cond(int cc) {
-    if (cc == 15) return "true";
-    return "[&] { const unsigned sr_ = s.r.sr; return static_cast<bool>(" + std::string(kCond[cc]) + "); }()";
-}
+// The flags each condition reads.
+constexpr uint8_t kCondUses[16] = {0x0A, 0x0A, 0x0E, 0x0E, 0x04, 0x04, 0x01, 0x01, 0x10, 0x10, 0x34, 0x34, 0x40, 0x40, 0x02, 0x00};
+std::string cond(int cc) { return kCond[cc]; }
 
 struct Lifter {
     std::vector<uint16_t> words;
@@ -299,41 +302,53 @@ struct Lifter {
     std::set<uint16_t> looped;            // instructions repeated by a LOOP before them
     std::map<uint16_t, std::vector<uint16_t>> loop_ends;  // last word of a block loop's body -> its starts
     std::set<uint16_t> tails;             // instructions whose tail label is jumped to
+    std::map<uint16_t, uint8_t> live_in, live_out;        // status flags (bits 0-7) wanted before and after
     std::string where;                    // for messages
+    unsigned quiet = 0, flagged = 0;      // flag-setting instructions lifted without and with their flags
 
     [[noreturn]] void bad(const Insn& in, const std::string& what) const {
         fail(where + ": " + hex4(in.addr) + " (" + in.name + (in.ext.empty() ? "" : "'" + in.ext) + "): " + what);
     }
 
+    static std::string ac(int i) { return "r.ac" + num(i); }
+    static std::string ar(int i) { return "r.ar" + num(i); }
+    static std::string ix(int i) { return "r.ix" + num(i); }
+    static std::string wr(int i) { return "r.wr" + num(i); }
+    static std::string axl(int i) { return "r.axl" + num(i); }
+    static std::string axh(int i) { return "r.axh" + num(i); }
+    static std::string inc(int i) { return "ar_inc(" + ar(i) + ", " + wr(i) + ")"; }
+    static std::string dec(int i) { return "ar_dec(" + ar(i) + ", " + wr(i) + ")"; }
+    static std::string add_ix(int i, int j) { return "ar_add(" + ar(i) + ", " + wr(i) + ", " + ix(j) + ")"; }
+
     // Registers by number, as the generic moves and loads see them.
     std::string rread(const Insn& in, int n, bool saturate) const {
-        if (n < 4) return "s.r.ar[" + num(n) + "]";
-        if (n < 8) return "s.r.ix[" + num(n - 4) + "]";
-        if (n < 12) return "s.r.wr[" + num(n - 8) + "]";
+        if (n < 4) return ar(n);
+        if (n < 8) return ix(n - 4);
+        if (n < 12) return wr(n - 8);
         switch (n) {
-            case 0x10: case 0x11: return "s.ach(" + num(n - 0x10) + ")";
-            case 0x12: return "s.r.config";
-            case 0x13: return "s.r.sr";
-            case 0x18: case 0x19: return "s.r.axl[" + num(n - 0x18) + "]";
-            case 0x1A: case 0x1B: return "s.r.axh[" + num(n - 0x1A) + "]";
-            case 0x1C: case 0x1D: return "s.acl(" + num(n - 0x1C) + ")";
-            case 0x1E: case 0x1F: return std::string(saturate ? "s.acm_sat(" : "s.acm(") + num(n - 0x1E) + ")";
+            case 0x10: case 0x11: return "ach(" + ac(n - 0x10) + ")";
+            case 0x12: return "r.config";
+            case 0x13: return "r.sr";
+            case 0x18: case 0x19: return axl(n - 0x18);
+            case 0x1A: case 0x1B: return axh(n - 0x1A);
+            case 0x1C: case 0x1D: return "acl(" + ac(n - 0x1C) + ")";
+            case 0x1E: case 0x1F: return (saturate ? "acm_sat(r.sr, " : "acm(") + ac(n - 0x1E) + ")";
             default: bad(in, "reads register " + num(n) + " (a stack or a part of the product): not handled");
         }
     }
     std::string rwrite(const Insn& in, int n, const std::string& v) const {
         const std::string u = "static_cast<uint16_t>(" + v + ")";
-        if (n < 4) return "s.r.ar[" + num(n) + "] = " + u + ";";
-        if (n < 8) return "s.r.ix[" + num(n - 4) + "] = " + u + ";";
-        if (n < 12) return "s.r.wr[" + num(n - 8) + "] = " + u + ";";
+        if (n < 4) return ar(n) + " = " + u + ";";
+        if (n < 8) return ix(n - 4) + " = " + u + ";";
+        if (n < 12) return wr(n - 8) + " = " + u + ";";
         switch (n) {
-            case 0x10: case 0x11: return "s.set_ach(" + num(n - 0x10) + ", " + u + ");";
-            case 0x12: return "s.r.config = " + u + " & 0xFF;";
-            case 0x13: return "s.set_sr(" + u + ");";
-            case 0x18: case 0x19: return "s.r.axl[" + num(n - 0x18) + "] = " + u + ";";
-            case 0x1A: case 0x1B: return "s.r.axh[" + num(n - 0x1A) + "] = " + u + ";";
-            case 0x1C: case 0x1D: return "s.set_acl(" + num(n - 0x1C) + ", " + u + ");";
-            case 0x1E: case 0x1F: return "s.set_acm(" + num(n - 0x1E) + ", " + u + ");";
+            case 0x10: case 0x11: return ac(n - 0x10) + " = set_ach(" + ac(n - 0x10) + ", " + u + ");";
+            case 0x12: return "r.config = " + u + " & 0xFF;";
+            case 0x13: return "r.sr = " + u + " & ~0x0100;";
+            case 0x18: case 0x19: return axl(n - 0x18) + " = " + u + ";";
+            case 0x1A: case 0x1B: return axh(n - 0x1A) + " = " + u + ";";
+            case 0x1C: case 0x1D: return ac(n - 0x1C) + " = set_acl(" + ac(n - 0x1C) + ", " + u + ");";
+            case 0x1E: case 0x1F: return ac(n - 0x1E) + " = set_acm(r.sr, " + ac(n - 0x1E) + ", " + u + ");";
             default: bad(in, "writes register " + num(n) + " (a stack or a part of the product): not handled");
         }
     }
@@ -349,22 +364,37 @@ struct Lifter {
         return -1;
     }
 
+    // The status flags an instruction sets (all of them it sets, it sets whatever they were).
+    static uint8_t flag_defs(const Insn& in) {
+        static const char* arithmetic[] = {"addi", "xori", "andi", "ori", "cmpi", "addis", "cmpis", "lsl", "lsr", "asl", "asr", "lsrn",
+            "asrn", "cmp", "tstprod", "tstaxh", "tst", "cmpaxh"};
+        if (main_dest(in) >= 0) return 0x3F;
+        for (const char* a : arithmetic)
+            if (in.name == a) return 0x3F;
+        if (in.name == "andf" || in.name == "andcf") return 0x40;
+        if (is(in, {"lri", "lr", "lrr", "lrrd", "lrri", "lrrn", "mrr"}) && in.f['d'] == 0x13) return 0xFF;
+        return 0;
+    }
+    // The status flags an instruction reads.
+    static uint8_t flag_uses(const Insn& in) {
+        if (is(in, {"if", "j", "call", "ret", "rti", "jr", "callr"})) return kCondUses[in.f['c']];
+        if (is(in, {"mrr", "sr", "srr", "srrd", "srri", "srrn"}) && in.f['s'] == 0x13) return 0xFF;
+        if (is(in, {"loop", "bloop"}) && in.f['r'] == 0x13) return 0xFF;
+        return 0;
+    }
+
     // The extension: what it does before the instruction (loads, stores, new addresses, all from
     // the state as it was) and what it writes after.
     void extension(const Insn& in, std::string& pre, std::string& post) const {
         const std::string& x = in.ext;
         if (x.empty()) return;
         const Fields& e = in.e;
-        auto ar = [](int i) { return "s.r.ar[" + num(i) + "]"; };
-        auto step = [&](int i, bool by_index) {
-            return by_index ? "s.ar_add(" + num(i) + ", s.r.ix[" + num(i) + "])" : "s.ar_inc(" + num(i) + ")";
-        };
         auto set_ar = [&](int i, const std::string& name, bool by_index) {
-            pre += "const uint16_t " + name + " = " + step(i, by_index) + "; ";
+            pre += "const uint16_t " + name + " = " + (by_index ? add_ix(i, i) : inc(i)) + "; ";
             post += ar(i) + " = " + name + "; ";
         };
         if (x == "dr") {
-            pre += "const uint16_t a_ = s.ar_dec(" + num(e['r']) + "); ";
+            pre += "const uint16_t a_ = " + dec(e['r']) + "; ";
             post += ar(e['r']) + " = a_; ";
         } else if (x == "ir") {
             set_ar(e['r'], "a_", false);
@@ -384,12 +414,12 @@ struct Lifter {
             set_ar(e['s'], "a_", x == "ln");
             post += rwrite(in, dest, "v_") + " ";
         } else if (x == "ls" || x == "lsn" || x == "lsm" || x == "lsnm") {
-            pre += "s.wr(" + ar(3) + ", s.acm_sat(" + num(e['s']) + ")); const uint16_t v_ = s.rd(" + ar(0) + "); ";
+            pre += "s.wr(" + ar(3) + ", acm_sat(r.sr, " + ac(e['s']) + ")); const uint16_t v_ = s.rd(" + ar(0) + "); ";
             set_ar(3, "a3_", x == "lsm" || x == "lsnm");
             set_ar(0, "a0_", x == "lsn" || x == "lsnm");
             post += rwrite(in, 0x18 + e['d'], "v_") + " ";
         } else if (x == "sl" || x == "sln" || x == "slm" || x == "slnm") {
-            pre += "s.wr(" + ar(0) + ", s.acm_sat(" + num(e['s']) + ")); const uint16_t v_ = s.rd(" + ar(3) + "); ";
+            pre += "s.wr(" + ar(0) + ", acm_sat(r.sr, " + ac(e['s']) + ")); const uint16_t v_ = s.rd(" + ar(3) + "); ";
             set_ar(3, "a3_", x == "slm" || x == "slnm");
             set_ar(0, "a0_", x == "sln" || x == "slnm");
             post += rwrite(in, 0x18 + e['d'], "v_") + " ";
@@ -404,142 +434,149 @@ struct Lifter {
             pre += "const uint16_t v_ = s.rd(" + ar(src) + "); const uint16_t w_ = s.rd_second(" + ar(src) + ", " + ar(3) + "); ";
             set_ar(src, "a_", x == "ldaxn" || x == "ldaxnm");
             set_ar(3, "a3_", x == "ldaxm" || x == "ldaxnm");
-            post += "s.r.axh[" + num(e['r']) + "] = v_; s.r.axl[" + num(e['r']) + "] = w_; ";
+            post += axh(e['r']) + " = v_; " + axl(e['r']) + " = w_; ";
         } else {
             bad(in, "extension not handled");
         }
     }
 
-    // An instruction that is not a transfer of control, as statements.
-    std::string plain(const Insn& in) const {
+    // An instruction that is not a transfer of control, as statements. `live`: the flags wanted after it.
+    std::string plain(const Insn& in, uint8_t live) {
         const Fields& f = in.f;
         const std::string& n = in.name;
+        const uint8_t defs = flag_defs(in);
+        const bool flags = (defs & live) != 0;
+        if (defs && defs != 0xFF) ++(flags ? flagged : quiet);
+        const std::string F = flags ? "r.sr, " : "";  // the flag-setting form of a function, or the plain one
         const std::string d = num(f['d']), sx = num(f['s']), t = num(f['t']);
-        const std::string A = "s.r.ac[" + d + "]";
-        const std::string other = "s.r.ac[" + num(1 - f['d']) + "]";
+        const std::string A = ac(f['d']);
+        const std::string other = ac(1 - f['d']);
         auto s16 = [](const std::string& v) { return "(int64_t(static_cast<int16_t>(" + v + ")) << 16)"; };
         const std::string imm = num(f['i']);
         const std::string imm16 = "(int64_t(" + num(static_cast<int16_t>(f['i'])) + ") << 16)";
         const std::string imm8 = "(int64_t(" + num(static_cast<int8_t>(f['i'])) + ") << 16)";
-        const std::string short_address = "static_cast<uint16_t>((s.r.config << 8) | " + num(f['m']) + ")";
-        auto ar = [](int i) { return "s.r.ar[" + num(i) + "]"; };
+        const std::string short_address = "static_cast<uint16_t>((r.config << 8) | " + num(f['m']) + ")";
+        auto u16 = [](const std::string& v) { return "static_cast<uint16_t>(" + v + ")"; };
+        auto compare = [&](const std::string& a, const std::string& b) { return flags ? "(void)sub(r.sr, " + a + ", " + b + ");" : std::string(); };
         std::string m;  // the instruction itself
 
         if (n == "nop" || n == "nx") m = "";
-        else if (n == "dar") m = ar(f['d']) + " = s.ar_dec(" + d + ");";
-        else if (n == "iar") m = ar(f['d']) + " = s.ar_inc(" + d + ");";
-        else if (n == "subarn") m = ar(f['d']) + " = s.ar_sub(" + d + ", s.r.ix[" + d + "]);";
-        else if (n == "addarn") m = ar(f['d']) + " = s.ar_add(" + d + ", s.r.ix[" + sx + "]);";
+        else if (n == "dar") m = ar(f['d']) + " = " + dec(f['d']) + ";";
+        else if (n == "iar") m = ar(f['d']) + " = " + inc(f['d']) + ";";
+        else if (n == "subarn") m = ar(f['d']) + " = ar_sub(" + ar(f['d']) + ", " + wr(f['d']) + ", " + ix(f['d']) + ");";
+        else if (n == "addarn") m = ar(f['d']) + " = " + add_ix(f['d'], f['s']) + ";";
         else if (n == "lri") m = rwrite(in, f['d'], imm);
         else if (n == "lr") m = rwrite(in, f['d'], "s.rd(" + num(f['m']) + ")");
         else if (n == "sr") m = "s.wr(" + num(f['m']) + ", " + rread(in, f['s'], true) + ");";
-        else if (n == "addi") m = A + " = s.add(" + A + ", " + imm16 + ");";
-        else if (n == "xori") m = "s.logic(" + d + ", s.acm(" + d + ") ^ " + imm + ");";
-        else if (n == "andi") m = "s.logic(" + d + ", s.acm(" + d + ") & " + imm + ");";
-        else if (n == "ori") m = "s.logic(" + d + ", s.acm(" + d + ") | " + imm + ");";
-        else if (n == "cmpi") m = "(void)s.sub(" + A + ", " + imm16 + ");";
-        else if (n == "andf") m = "s.r.sr = (s.acm(" + d + ") & " + imm + ") == 0 ? (s.r.sr | 0x40) : (s.r.sr & ~0x40);";
+        else if (n == "addi") m = A + " = add(" + F + A + ", " + imm16 + ");";
+        else if (n == "xori") m = A + " = logic(" + F + A + ", " + u16("acm(" + A + ") ^ " + imm) + ");";
+        else if (n == "andi") m = A + " = logic(" + F + A + ", " + u16("acm(" + A + ") & " + imm) + ");";
+        else if (n == "ori") m = A + " = logic(" + F + A + ", " + u16("acm(" + A + ") | " + imm) + ");";
+        else if (n == "cmpi") m = compare(A, imm16);
+        else if (n == "andf") m = flags ? "r.sr = static_cast<uint16_t>((acm(" + A + ") & " + imm + ") == 0 ? (r.sr | 0x40) : (r.sr & ~0x40));" : "";
         else if (n == "andcf")
-            m = "s.r.sr = (s.acm(" + d + ") & " + imm + ") == " + imm + " ? (s.r.sr | 0x40) : (s.r.sr & ~0x40);";
+            m = flags ? "r.sr = static_cast<uint16_t>((acm(" + A + ") & " + imm + ") == " + imm + " ? (r.sr | 0x40) : (r.sr & ~0x40));" : "";
         else if (n == "ilrr" || n == "ilrrd" || n == "ilrri" || n == "ilrrn") {
-            const std::string step = n == "ilrrd" ? ar(f['s']) + " = s.ar_dec(" + sx + "); "
-                                   : n == "ilrri" ? ar(f['s']) + " = s.ar_inc(" + sx + "); "
-                                   : n == "ilrrn" ? ar(f['s']) + " = s.ar_add(" + sx + ", s.r.ix[" + sx + "]); " : "";
-            m = "{ const uint16_t i_ = s.irom(" + ar(f['s']) + "); s.set_acm(" + d + ", i_); " + step + "}";
-        } else if (n == "lsrn") m = "s.r.ac[0] = s.lsrn(s.r.ac[0], s.acm(1));";
-        else if (n == "asrn") m = "s.r.ac[0] = s.asrn(s.r.ac[0], s.acm(1));";
-        else if (n == "addis") m = A + " = s.add(" + A + ", " + imm8 + ");";
-        else if (n == "cmpis") m = "(void)s.sub(" + A + ", " + imm8 + ");";
+            const int a = f['s'];
+            const std::string step = n == "ilrrd" ? ar(a) + " = " + dec(a) + "; " : n == "ilrri" ? ar(a) + " = " + inc(a) + "; "
+                                   : n == "ilrrn" ? ar(a) + " = " + add_ix(a, a) + "; " : "";
+            m = "{ const uint16_t i_ = s.irom(" + ar(a) + "); " + A + " = set_acm(r.sr, " + A + ", i_); " + step + "}";
+        } else if (n == "lsrn") m = "r.ac0 = lsrn(" + F + "r.ac0, acm(r.ac1));";
+        else if (n == "asrn") m = "r.ac0 = asrn(" + F + "r.ac0, acm(r.ac1));";
+        else if (n == "addis") m = A + " = add(" + F + A + ", " + imm8 + ");";
+        else if (n == "cmpis") m = compare(A, imm8);
         else if (n == "lris") m = rwrite(in, 0x18 + f['d'], num(static_cast<uint16_t>(static_cast<int8_t>(f['i']))));
-        else if (n == "sbclr") m = "s.r.sr &= ~" + num(1ll << (f['i'] + 6)) + ";";
-        else if (n == "sbset") m = "s.r.sr |= " + num(1ll << (f['i'] + 6)) + ";";
-        else if (n == "lsl" || n == "asl") m = "s.r.ac[" + num(f['r']) + "] = s.lsl(s.r.ac[" + num(f['r']) + "], " + imm + ");";
-        else if (n == "lsr" || n == "asr") {
-            const std::string acc = "s.r.ac[" + num(f['r']) + "]";
-            m = acc + " = s." + n + "(" + acc + ", " + num(f['i'] ? 64 - f['i'] : 0) + ");";
-        } else if (n == "si") m = "s.hw_write(" + num(0xFF00 | f['m']) + ", " + imm + ");";
+        else if (n == "sbclr") m = "r.sr &= ~" + num(1ll << (f['i'] + 6)) + ";";
+        else if (n == "sbset") m = "r.sr |= " + num(1ll << (f['i'] + 6)) + ";";
+        else if (n == "lsl" || n == "asl") m = ac(f['r']) + " = lsl(" + F + ac(f['r']) + ", " + imm + ");";
+        else if (n == "lsr" || n == "asr") m = ac(f['r']) + " = " + n + "(" + F + ac(f['r']) + ", " + num(f['i'] ? 64 - f['i'] : 0) + ");";
+        else if (n == "si") m = "s.hw_write(" + num(0xFF00 | f['m']) + ", " + imm + ");";
         else if (n == "lrr" || n == "lrrd" || n == "lrri" || n == "lrrn") {
-            const std::string step = n == "lrrd" ? ar(f['s']) + " = s.ar_dec(" + sx + "); "
-                                   : n == "lrri" ? ar(f['s']) + " = s.ar_inc(" + sx + "); "
-                                   : n == "lrrn" ? ar(f['s']) + " = s.ar_add(" + sx + ", s.r.ix[" + sx + "]); " : "";
-            m = "{ const uint16_t v_ = s.rd(" + ar(f['s']) + "); " + rwrite(in, f['d'], "v_") + " " + step + "}";
+            const int a = f['s'];
+            const std::string step = n == "lrrd" ? ar(a) + " = " + dec(a) + "; " : n == "lrri" ? ar(a) + " = " + inc(a) + "; "
+                                   : n == "lrrn" ? ar(a) + " = " + add_ix(a, a) + "; " : "";
+            m = "{ const uint16_t v_ = s.rd(" + ar(a) + "); " + rwrite(in, f['d'], "v_") + " " + step + "}";
         } else if (n == "srr" || n == "srrd" || n == "srri" || n == "srrn") {
-            const std::string step = n == "srrd" ? ar(f['d']) + " = s.ar_dec(" + d + ");"
-                                   : n == "srri" ? ar(f['d']) + " = s.ar_inc(" + d + ");"
-                                   : n == "srrn" ? ar(f['d']) + " = s.ar_add(" + d + ", s.r.ix[" + d + "]);" : "";
-            m = "s.wr(" + ar(f['d']) + ", " + rread(in, f['s'], true) + "); " + step;
+            const int a = f['d'];
+            const std::string step = n == "srrd" ? ar(a) + " = " + dec(a) + ";" : n == "srri" ? ar(a) + " = " + inc(a) + ";"
+                                   : n == "srrn" ? ar(a) + " = " + add_ix(a, a) + ";" : "";
+            m = "s.wr(" + ar(a) + ", " + rread(in, f['s'], true) + "); " + step;
         } else if (n == "mrr") m = "{ const uint16_t v_ = " + rread(in, f['s'], true) + "; " + rwrite(in, f['d'], "v_") + " }";
         else if (n == "lrs") m = rwrite(in, 0x18 + f['d'], "s.rd(" + short_address + ")");
-        else if (n == "srsh") m = "s.wr(" + short_address + ", s.ach(" + sx + "));";
+        else if (n == "srsh") m = "s.wr(" + short_address + ", ach(" + ac(f['s']) + "));";
         else if (n == "srs") m = "s.wr(" + short_address + ", " + rread(in, 0x1C + f['s'], true) + ");";
-        else if (n == "xorr") m = "s.logic(" + d + ", s.acm(" + d + ") ^ s.r.axh[" + sx + "]);";
-        else if (n == "andr") m = "s.logic(" + d + ", s.acm(" + d + ") & s.r.axh[" + sx + "]);";
-        else if (n == "orr") m = "s.logic(" + d + ", s.acm(" + d + ") | s.r.axh[" + sx + "]);";
-        else if (n == "andc") m = "s.logic(" + d + ", s.acm(" + d + ") & s.acm(" + num(1 - f['d']) + "));";
-        else if (n == "orc") m = "s.logic(" + d + ", s.acm(" + d + ") | s.acm(" + num(1 - f['d']) + "));";
-        else if (n == "xorc") m = "s.logic(" + d + ", s.acm(" + d + ") ^ s.acm(" + num(1 - f['d']) + "));";
-        else if (n == "not") m = "s.logic(" + d + ", static_cast<uint16_t>(~s.acm(" + d + ")));";
-        else if (n == "lsrnrx") m = A + " = s.lsrn(" + A + ", s.r.axh[" + sx + "]);";
-        else if (n == "asrnrx") m = A + " = s.asrn(" + A + ", s.r.axh[" + sx + "]);";
-        else if (n == "lsrnr") m = A + " = s.lsrn(" + A + ", s.acm(" + num(1 - f['d']) + "));";
-        else if (n == "asrnr") m = A + " = s.asrn(" + A + ", s.acm(" + num(1 - f['d']) + "));";
-        else if (n == "addr") m = A + " = s.add(" + A + ", " + s16(rread(in, 0x18 + f['s'], false)) + ");";
-        else if (n == "addax") m = A + " = s.add(" + A + ", s.ax(" + sx + "));";
-        else if (n == "add") m = A + " = s.add(" + A + ", " + other + ");";
-        else if (n == "addp") m = A + " = s.add(" + A + ", s.r.prod);";
-        else if (n == "subr") m = A + " = s.sub(" + A + ", " + s16(rread(in, 0x18 + f['s'], false)) + ");";
-        else if (n == "subax") m = A + " = s.sub(" + A + ", s.ax(" + sx + "));";
-        else if (n == "sub") m = A + " = s.sub(" + A + ", " + other + ");";
-        else if (n == "subp") m = A + " = s.sub(" + A + ", s.r.prod);";
-        else if (n == "movr") m = A + " = s.mov(" + s16(rread(in, 0x18 + f['s'], false)) + ");";
-        else if (n == "movax") m = A + " = s.mov(s.ax(" + sx + "));";
-        else if (n == "mov") m = A + " = s.mov(" + other + ");";
-        else if (n == "movp") m = A + " = s.mov(s.r.prod);";
-        else if (n == "movnp") m = A + " = s.mov(-s.r.prod);";
-        else if (n == "movpz") m = A + " = s.mov(s.prod_rounded());";
-        else if (n == "addaxl") m = A + " = s.add(" + A + ", int64_t(s.r.axl[" + sx + "]));";
-        else if (n == "incm") m = A + " = s.add(" + A + ", 0x10000);";
-        else if (n == "inc") m = A + " = s.add(" + A + ", 1);";
-        else if (n == "decm") m = A + " = s.sub(" + A + ", 0x10000);";
-        else if (n == "dec") m = A + " = s.sub(" + A + ", 1);";
-        else if (n == "neg") m = A + " = s.neg(" + A + ");";
-        else if (n == "abs") m = "if (" + A + " < 0) " + A + " = mkdd::dsp::Core::sx40(-" + A + "); s.flags64(" + A + ");";
-        else if (n == "clr") m = A + " = s.mov(0);";
-        else if (n == "tst") m = "s.flags64(" + A + ");";
-        else if (n == "cmp") m = "(void)s.sub(s.r.ac[0], s.r.ac[1]);";
-        else if (n == "cmpaxh") m = "(void)s.sub(s.r.ac[" + sx + "], " + s16("s.r.axh[" + num(f['r']) + "]") + ");";
-        else if (n == "clrp") m = "s.r.prod = 0;";
-        else if (n == "tstprod") m = "s.flags64(s.r.prod);";
-        else if (n == "tstaxh") m = "s.flags16(s.r.axh[" + num(f['r']) + "], false);";
-        else if (n == "m2") m = "s.r.sr &= ~0x2000;";
-        else if (n == "m0") m = "s.r.sr |= 0x2000;";
-        else if (n == "clr15") m = "s.r.sr &= ~0x8000;";
-        else if (n == "set15") m = "s.r.sr |= 0x8000;";
-        else if (n == "set16") m = "s.r.sr &= ~0x4000;";
-        else if (n == "set40") m = "s.r.sr |= 0x4000;";
-        else if (n == "asr16") m = A + " = s.asr(" + A + ", 16);";
-        else if (n == "lsl16") m = A + " = s.lsl(" + A + ", 16);";
-        else if (n == "lsr16") m = A + " = s.lsr(" + A + ", 16);";
-        else if (n == "clrl")
-            m = A + " = s.mov(((" + A + " & 0x10000) ? " + A + " + 0x8000 : " + A + " + 0x7FFF) & ~int64_t(0xFFFF));";
-        else if (n == "addpaxz")
-            m = "{ const int64_t p_ = s.prod_rounded(); const int64_t r_ = mkdd::dsp::Core::sx40(p_ + " + s16("s.r.axh[" + sx + "]") +
-                "); s.flags64(r_, static_cast<uint64_t>(s.r.prod) > static_cast<uint64_t>(r_)); " + A + " = r_; }";
-        else {
+        else if (n == "xorr") m = A + " = logic(" + F + A + ", " + u16("acm(" + A + ") ^ " + axh(f['s'])) + ");";
+        else if (n == "andr") m = A + " = logic(" + F + A + ", " + u16("acm(" + A + ") & " + axh(f['s'])) + ");";
+        else if (n == "orr") m = A + " = logic(" + F + A + ", " + u16("acm(" + A + ") | " + axh(f['s'])) + ");";
+        else if (n == "andc") m = A + " = logic(" + F + A + ", " + u16("acm(" + A + ") & acm(" + other + ")") + ");";
+        else if (n == "orc") m = A + " = logic(" + F + A + ", " + u16("acm(" + A + ") | acm(" + other + ")") + ");";
+        else if (n == "xorc") m = A + " = logic(" + F + A + ", " + u16("acm(" + A + ") ^ acm(" + other + ")") + ");";
+        else if (n == "not") m = A + " = logic(" + F + A + ", " + u16("~acm(" + A + ")") + ");";
+        else if (n == "lsrnrx") m = A + " = lsrn(" + F + A + ", " + axh(f['s']) + ");";
+        else if (n == "asrnrx") m = A + " = asrn(" + F + A + ", " + axh(f['s']) + ");";
+        else if (n == "lsrnr") m = A + " = lsrn(" + F + A + ", acm(" + other + "));";
+        else if (n == "asrnr") m = A + " = asrn(" + F + A + ", acm(" + other + "));";
+        else if (n == "addr") m = A + " = add(" + F + A + ", " + s16(rread(in, 0x18 + f['s'], false)) + ");";
+        else if (n == "addax") m = A + " = add(" + F + A + ", ax(" + axh(f['s']) + ", " + axl(f['s']) + "));";
+        else if (n == "add") m = A + " = add(" + F + A + ", " + other + ");";
+        else if (n == "addp") m = A + " = add(" + F + A + ", r.prod);";
+        else if (n == "subr") m = A + " = sub(" + F + A + ", " + s16(rread(in, 0x18 + f['s'], false)) + ");";
+        else if (n == "subax") m = A + " = sub(" + F + A + ", ax(" + axh(f['s']) + ", " + axl(f['s']) + "));";
+        else if (n == "sub") m = A + " = sub(" + F + A + ", " + other + ");";
+        else if (n == "subp") m = A + " = sub(" + F + A + ", r.prod);";
+        else if (n == "movr") m = A + " = mov(" + F + s16(rread(in, 0x18 + f['s'], false)) + ");";
+        else if (n == "movax") m = A + " = mov(" + F + "ax(" + axh(f['s']) + ", " + axl(f['s']) + "));";
+        else if (n == "mov") m = A + " = mov(" + F + other + ");";
+        else if (n == "movp") m = A + " = mov(" + F + "r.prod);";
+        else if (n == "movnp") m = A + " = mov(" + F + "-r.prod);";
+        else if (n == "movpz") m = A + " = mov(" + F + "round_low(r.prod));";
+        else if (n == "addaxl") m = A + " = add(" + F + A + ", int64_t(" + axl(f['s']) + "));";
+        else if (n == "incm") m = A + " = add(" + F + A + ", 0x10000);";
+        else if (n == "inc") m = A + " = add(" + F + A + ", 1);";
+        else if (n == "decm") m = A + " = sub(" + F + A + ", 0x10000);";
+        else if (n == "dec") m = A + " = sub(" + F + A + ", 1);";
+        else if (n == "neg") m = A + " = neg(" + F + A + ");";
+        else if (n == "abs") m = "if (" + A + " < 0) " + A + " = sx40(-" + A + "); tst(" + F + A + ");";
+        else if (n == "clr") m = A + " = mov(" + F + "0);";
+        else if (n == "tst") m = flags ? "tst(r.sr, " + A + ");" : "";
+        else if (n == "cmp") m = compare("r.ac0", "r.ac1");
+        else if (n == "cmpaxh") m = compare(ac(f['s']), s16(axh(f['r'])));
+        else if (n == "clrp") m = "r.prod = 0;";
+        else if (n == "tstprod") m = flags ? "tst(r.sr, r.prod);" : "";
+        else if (n == "tstaxh") m = flags ? "flags16(r.sr, " + axh(f['r']) + ", false);" : "";
+        else if (n == "m2") m = "r.sr &= ~0x2000;";
+        else if (n == "m0") m = "r.sr |= 0x2000;";
+        else if (n == "clr15") m = "r.sr &= ~0x8000;";
+        else if (n == "set15") m = "r.sr |= 0x8000;";
+        else if (n == "set16") m = "r.sr &= ~0x4000;";
+        else if (n == "set40") m = "r.sr |= 0x4000;";
+        else if (n == "asr16") m = A + " = asr(" + F + A + ", 16);";
+        else if (n == "lsl16") m = A + " = lsl(" + F + A + ", 16);";
+        else if (n == "lsr16") m = A + " = lsr(" + F + A + ", 16);";
+        else if (n == "clrl") m = A + " = mov(" + F + "round_low(" + A + "));";
+        else if (n == "addpaxz") {
+            const std::string sum = "sx40(round_low(r.prod) + " + s16(axh(f['s'])) + ")";
+            if (flags) m = "{ const int64_t r_ = " + sum + "; flags64(r.sr, r_, static_cast<uint64_t>(r.prod) > static_cast<uint64_t>(r_)); " + A + " = r_; }";
+            else m = A + " = " + sum + ";";
+        } else {
             // The multiplier's family: what is multiplied, and what happens to the old product.
             std::string product;
-            std::string base = n;
-            if (n.starts_with("mulx") || n == "maddx" || n == "msubx") product = "s.mulx(" + sx + ", " + t + ")";
-            else if (n.starts_with("mulc") || n == "maddc" || n == "msubc") product = "s.mul(s.acm(" + sx + "), s.r.axh[" + t + "])";
-            else if (n == "mulaxh") product = "s.mul(s.r.axh[0], s.r.axh[0])";
-            else if (n.starts_with("mul") || n == "madd" || n == "msub") product = "s.mul(s.r.axl[" + sx + "], s.r.axh[" + sx + "])";
+            if (n.starts_with("mulx") || n == "maddx" || n == "msubx") {
+                const std::string a = f['s'] ? "r.axh0" : "r.axl0", b = f['t'] ? "r.axh1" : "r.axl1";
+                if (!f['s'] && !f['t']) product = "mul(r.sr, " + a + ", " + b + ", 1)";
+                else if (!f['s']) product = "mul(r.sr, " + a + ", " + b + ", 2)";
+                else if (!f['t']) product = "mul(r.sr, " + b + ", " + a + ", 2)";
+                else product = "mul(r.sr, " + a + ", " + b + ")";
+            } else if (n.starts_with("mulc") || n == "maddc" || n == "msubc") product = "mul(r.sr, acm(" + ac(f['s']) + "), " + axh(f['t']) + ")";
+            else if (n == "mulaxh") product = "mul(r.sr, r.axh0, r.axh0)";
+            else if (n.starts_with("mul") || n == "madd" || n == "msub") product = "mul(r.sr, " + axl(f['s']) + ", " + axh(f['s']) + ")";
             else bad(in, "instruction not handled");
-            if (n.starts_with("madd")) m = "s.set_prod(s.r.prod + " + product + ");";
-            else if (n.starts_with("msub")) m = "s.set_prod(s.r.prod - " + product + ");";
-            else if (n.ends_with("mvz")) m = "{ const int64_t p_ = s.prod_rounded(); s.set_prod(" + product + "); " + A + " = s.mov(p_); }";
-            else if (n.ends_with("mv")) m = "{ const int64_t p_ = s.r.prod; s.set_prod(" + product + "); " + A + " = s.mov(p_); }";
-            else if (n.ends_with("ac")) m = "{ const int64_t p_ = " + A + " + s.r.prod; s.set_prod(" + product + "); " + A + " = s.mov(p_); }";
-            else m = "s.set_prod(" + product + ");";
+            if (n.starts_with("madd")) m = "r.prod = sx40(r.prod + " + product + ");";
+            else if (n.starts_with("msub")) m = "r.prod = sx40(r.prod - " + product + ");";
+            else if (n.ends_with("mvz")) m = "{ const int64_t p_ = round_low(r.prod); r.prod = sx40(" + product + "); " + A + " = mov(" + F + "p_); }";
+            else if (n.ends_with("mv")) m = "{ const int64_t p_ = r.prod; r.prod = sx40(" + product + "); " + A + " = mov(" + F + "p_); }";
+            else if (n.ends_with("ac")) m = "{ const int64_t p_ = " + A + " + r.prod; r.prod = sx40(" + product + "); " + A + " = mov(" + F + "p_); }";
+            else m = "r.prod = sx40(" + product + ");";
         }
         std::string pre, post;
         extension(in, pre, post);
@@ -627,18 +664,84 @@ struct Lifter {
         }
     }
 
+    // ---- which flags are wanted where ----
+    //
+    // Most instructions set the status flags and almost none of those settings is ever tested.
+    // Backward data flow over the lifted code finds the flags wanted after each instruction; an
+    // instruction whose flags nobody wants is lifted without them. Where control leaves by a
+    // computed address (returns, JR, an interrupt), everything any entry point wants is wanted.
+
+    bool loop_unit(const Insn& in) const { return in.name == "loop" || in.name == "loopi"; }
+    unsigned unit_size(const Insn& in) const { return loop_unit(in) ? in.size + decode(words, static_cast<uint16_t>(in.addr + in.size)).size : in.size; }
+    uint8_t in_at(unsigned a) const {
+        auto it = live_in.find(static_cast<uint16_t>(a));
+        return it == live_in.end() ? 0 : it->second;
+    }
+    uint8_t out_at(unsigned a) const {
+        auto it = live_out.find(static_cast<uint16_t>(a));
+        return it == live_out.end() ? 0 : it->second;
+    }
+    void liveness() {
+        for (bool changed = true; changed;) {
+            changed = false;
+            uint8_t anywhere = 0;  // wanted at some entry point
+            for (uint16_t l : leaders) anywhere |= in_at(l);
+            for (auto it = code.rbegin(); it != code.rend(); ++it) {
+                const Insn& in = it->second;
+                const std::string& n = in.name;
+                const unsigned a = in.addr, after = a + unit_size(in), last = after - 1;
+                uint8_t out = 0, uses = flag_uses(in), defs = flag_defs(in);
+                bool falls = true;
+                if (n == "halt") out = anywhere, falls = false;
+                else if (n == "j") {
+                    if (in.f['a'] < 0x8000) out |= in_at(in.f['a']);
+                    if (in.f['a'] <= static_cast<int>(a)) out |= anywhere;  // (it may wait here, and be interrupted)
+                    falls = conditional(in);
+                } else if (n == "call") {
+                    if (in.f['a'] < 0x8000) out |= in_at(in.f['a']);
+                    falls = conditional(in);
+                } else if (n == "ret" || n == "rti" || n == "jr" || n == "callr") {
+                    out = anywhere;
+                    falls = conditional(in);
+                } else if (n == "if") {
+                    out = out_at(a + 1);  // the skipped instruction's own successors
+                } else if (loop_unit(in)) {
+                    const Insn body = decode(words, static_cast<uint16_t>(a + in.size));
+                    uses |= flag_uses(body);
+                    defs = 0;  // it may run no times
+                } else if (n == "bloop" || n == "bloopi") {
+                    out |= in_at(in.f['a'] + 1u);
+                } else if (may_enable_interrupt(in)) {
+                    out |= anywhere;
+                }
+                if (falls) out |= in_at(after);
+                if (auto le = loop_ends.find(static_cast<uint16_t>(last)); le != loop_ends.end()) {
+                    for (uint16_t start : le->second) out |= in_at(start);
+                    out |= in_at(after);
+                }
+                const uint8_t in_flags = static_cast<uint8_t>(uses | (out & ~defs));
+                if (out != out_at(a) || in_flags != in_at(a) || !live_in.contains(static_cast<uint16_t>(a))) {
+                    live_out[static_cast<uint16_t>(a)] = out;
+                    live_in[static_cast<uint16_t>(a)] = in_flags;
+                    changed = true;
+                }
+            }
+        }
+    }
+
     // ---- the function ----
 
     std::string label(unsigned a) const { return "L_" + hex4(a); }
     std::string go(unsigned target) const {
-        if (target >= 0x8000) return "{ s.pc = 0x" + hex4(target) + "; return; }";  // the ROM: run() hands it to the host
+        if (target >= 0x8000) return "{ s.pc = 0x" + hex4(target) + "; s.r = r; return; }";  // the ROM: run() hands it to the host
         if (!in_image(target) || !code.contains(static_cast<uint16_t>(target))) return "{ s.pc = 0x" + hex4(target) + "; s.bad_pc(); }";
         return "goto " + label(target) + ";";
     }
     // A jump as the instruction at `from` takes it: backward ones may be the DSP waiting.
     std::string jump(unsigned from, unsigned target) const {
         if (target <= from && target < 0x8000 && code.contains(static_cast<uint16_t>(target)))
-            return "{ if (s.idle(0x" + hex4(from) + ")) { s.pc = 0x" + hex4(target) + "; return; } goto " + label(target) + "; }";
+            return "{ if (s.maybe_idle(0x" + hex4(from) + ")) { s.r = r; if (s.idle_slow()) { s.pc = 0x" + hex4(target) + "; return; } } goto " +
+                   label(target) + "; }";
         return go(target);
     }
 
@@ -653,22 +756,25 @@ struct Lifter {
     }
 
     std::string emit_function(const std::string& fn) {
+        liveness();
+        const std::string interrupt = "if (s.int_due(r.sr)) { r.sr = s.take_int(r.sr, s.pc); s.pc = 0x000E; }";
         std::ostringstream o;
-        o << "void " << fn << "(mkdd::dsp::Core& s) {\n";
+        o << "void " << fn << "(Core& s) {\n    Regs r = s.r;\n";
         o << "dispatch:\n    switch (s.pc) {\n";
         for (uint16_t l : leaders)
             if (code.contains(l)) o << "        case 0x" << hex4(l) << ": goto " << label(l) << ";\n";
-        o << "        default: s.bad_pc();\n    }\n";
+        o << "        default: s.r = r; s.bad_pc();\n    }\n";
         for (auto it = code.begin(); it != code.end(); ++it) {
             const Insn& in = it->second;
             const unsigned a = in.addr, after = a + in.size;
             unsigned last = after - 1;      // the unit's last word
             unsigned unit_end = after;      // the address after the unit
             const std::string& n = in.name;
+            const uint8_t live = out_at(a);
             std::string body;
             bool falls = true;
             if (n == "halt") {
-                body = "s.halted = true; s.pc = 0x" + hex4(after) + "; return;";
+                body = "{ s.halted = true; s.pc = 0x" + hex4(after) + "; s.r = r; return; }";
                 falls = false;
             } else if (n == "j") {
                 if (conditional(in)) body = "if (" + cond(in.f['c']) + ") " + jump(a, in.f['a']);
@@ -682,7 +788,7 @@ struct Lifter {
                 if (conditional(in)) body = "if (" + cond(in.f['c']) + ") " + ret;
                 else body = ret, falls = false;
             } else if (n == "rti") {
-                const std::string rti = "{ s.set_sr(s.pop(1)); s.pc = s.pop(0); if (s.int_due()) { s.take_int(s.pc); s.pc = 0x000E; } goto dispatch; }";
+                const std::string rti = "{ r.sr = s.pop(1) & ~0x0100; s.pc = s.pop(0); " + interrupt + " goto dispatch; }";
                 if (conditional(in)) body = "if (" + cond(in.f['c']) + ") " + rti;
                 else body = rti, falls = false;
             } else if (n == "jr") {
@@ -698,7 +804,7 @@ struct Lifter {
             } else if (n == "loop" || n == "loopi") {
                 const Insn inner = decode(words, static_cast<uint16_t>(after));
                 const std::string count = n == "loop" ? rread(in, in.f['r'], true) : num(in.f['i']);
-                body = "for (unsigned n_ = " + count + "; n_; --n_) { " + plain(inner) + " }";
+                body = "for (unsigned n_ = " + count + "; n_; --n_) { " + plain(inner, live) + " }";
                 last = after + inner.size - 1;
                 unit_end = after + inner.size;
                 // If the repeated instruction is also lifted on its own, it follows here: step over it.
@@ -715,9 +821,9 @@ struct Lifter {
                 else none = "if (n_ == 0) s.die(\"a block loop of no rounds at %04X ends inside an instruction: what the DSP does is not known\", 0x" + hex4(a) + "); ";
                 body = "{ const uint16_t n_ = " + count + "; " + none + "s.loop_begin(0x" + hex4(after) + ", 0x" + hex4(end) + ", n_); }";
             } else {
-                body = plain(in);
+                body = plain(in, live);
                 if (may_enable_interrupt(in))
-                    body += " if (s.int_due()) { s.take_int(0x" + hex4(after) + "); s.pc = 0x000E; goto dispatch; }";
+                    body += " if (s.int_due(r.sr)) { r.sr = s.take_int(r.sr, 0x" + hex4(after) + "); goto " + label(0x000E) + "; }";
             }
             o << label(a) << ": ;\n";
             o << "    /* " << hex4(a) << " " << n << (in.ext.empty() ? "" : "'" + in.ext) << " */ " << body << "\n";
@@ -784,8 +890,11 @@ std::string lift_one(const std::vector<uint16_t>& words, const std::vector<uint1
         roots.push_back(r);
     }
     l.reach(roots);
-    if (summary) *summary = num(static_cast<long long>(l.code.size())) + " instructions lifted, " + num(static_cast<long long>(l.leaders.size())) + " entry points";
-    return l.emit_function(fn);
+    std::string text = l.emit_function(fn);
+    if (summary)
+        *summary = num(static_cast<long long>(l.code.size())) + " instructions lifted, " + num(static_cast<long long>(l.leaders.size())) +
+                   " entry points; flags computed for " + num(l.flagged) + " of " + num(l.flagged + l.quiet) + " instructions that set them";
+    return text;
 }
 
 std::vector<uint16_t> parse_words(const std::string& path) {
@@ -831,7 +940,7 @@ int main(int argc, char** argv) {
     std::ostringstream out;
     out << "// Generated by qilin-dsp from the player's own files: the game's DSP microcode as C++.\n"
            "// Never to be committed or distributed.\n"
-           "#include \"dsp_core.hpp\"\n\nnamespace {\n\n";
+           "#include \"dsp_core.hpp\"\n\nnamespace {\n\nusing namespace mkdd::dsp;\n\n";
     std::string table;
     if (raw) {
         const std::vector<uint16_t> words = parse_words(input);

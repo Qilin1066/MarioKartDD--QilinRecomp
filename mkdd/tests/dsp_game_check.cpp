@@ -223,7 +223,7 @@ found:
 
     std::vector<int16_t> out;
     out.reserve(size_t(frames) * subframes * 160);
-    const uint64_t jumps0 = g_core.instructions_hint;
+    const uint64_t jumps0 = g_core.back_jumps;
     const auto t0 = std::chrono::steady_clock::now();
     unsigned finished_at = 0;
     for (unsigned frame = 0; frame < frames; ++frame) {
@@ -274,7 +274,7 @@ found:
                 subframes, sound, voices, rms, peak, clipped);
     if (finished_at) std::printf("a voice finished in frame %u\n", finished_at);
     std::printf("DSP time %.1f ms: %.2f%% of real time on this machine; %llu backward jumps, %llu ARAM reads\n", seconds * 1000,
-                100 * seconds / sound, static_cast<unsigned long long>(g_core.instructions_hint - jumps0),
+                100 * seconds / sound, static_cast<unsigned long long>(g_core.back_jumps - jumps0),
                 static_cast<unsigned long long>(g_core.aram_reads));
 
     if (!wav_path.empty()) {
