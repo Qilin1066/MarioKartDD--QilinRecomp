@@ -1,0 +1,1739 @@
+src/kartLocale.cpp:
+    .text: [0x800056c0, 0x800057b4]
+    .rodata: [0x8032cbe0, 0x8032cbf0]
+    .data: [0x80346c20, 0x80346c58]
+    .sdata: [0x803d3240, 0x803d3258]
+    .sbss: [0x803d4980, 0x803d4988]
+    .sdata2: [0x803d63e0, 0x803d6408]
+
+#src/SystemArc.s:
+    #.BINARY: [0x802d8aa0, 0x8032cbc0]
+
+#src/buildTimeDat.s:
+    #.BINARY: [0x8032cbc0, 0x8032cbe0]
+
+libs/JSystem/J3DU/J3DUClipper.cpp:
+    .text: [0x8000a24c, 0x8000a540]
+    .rodata: [0x8032cd28, 0x8032cdd0]
+    .data: [0x80347ab8, 0x80347ac8]
+    .sdata2: [0x803d6450, 0x803d6460]
+
+libs/JSystem/JKernel/JKRAram.cpp:
+    .text: [0x8000a540, 0x8000b3b0]
+    .ctors: [0x802d84ac, 0x802d84b0]
+    .rodata: [0x8032cdd0, 0x8032ce00]
+    .data: [0x80347ac8, 0x80347b08]
+    .bss: [0x8036deb0, 0x8036ded8]
+    #.bss: [0x803ae920, 0x803ae92c]    
+    .sbss: [0x803d4998, 0x803d49d8]
+    .sdata: [0x803d3258, 0x803d3260]
+    .sdata2: [0x803d6460, 0x803d6468]
+
+libs/JSystem/JKernel/JKRAramArchive.cpp:
+    .text: [0x8000b3b0, 0x8000beac]
+    .data: [0x80347b08, 0x80347b78]
+    .rodata: [0x8032ce00, 0x8032ce28]
+    .sdata2: [0x803d6468, 0x803d6470]
+
+libs/JSystem/JKernel/JKRAramBlock.cpp:
+    .text: [0x8000beac, 0x8000c138]
+    .data: [0x80347b78, 0x80347b88]
+
+libs/JSystem/JKernel/JKRAramHeap.cpp:
+    .text: [0x8000c138, 0x8000c4b4]
+    .ctors: [0x802d84b0, 0x802d84b4]
+    .data: [0x80347b88, 0x80347b98]
+    .bss: [0x8036ded8, 0x8036dee8]
+    #.bss: [0x803ae92c, 0x803ae938]
+
+libs/JSystem/JKernel/JKRAramPiece.cpp:
+    .text: [0x8000c4b4, 0x8000c908]
+    .ctors: [0x802d84b4, 0x802d84b8]
+    .rodata: [0x8032ce28, 0x8032ce98]
+    .bss: [0x8036dee8, 0x8036def8]
+    #.bss: [0x803ae938, 0x803ae974]
+    .sdata2: [0x803d6470, 0x803d6478]
+
+libs/JSystem/JKernel/JKRAramStream.cpp:
+    .text: [0x8000c908, 0x8000ceb0]
+    .rodata: [0x8032ce98, 0x8032cec8]
+    .data: [0x80347b98, 0x80347bd8]
+    .sbss: [0x803d49d8, 0x803d49e8]
+    .sdata2: [0x803d6478, 0x803d6480]
+
+libs/JSystem/JKernel/JKRArchivePri.cpp:
+    .text: [0x8000ceb0, 0x8000db44]
+    .sbss: [0x803d49e8, 0x803d49f0]
+
+libs/JSystem/JKernel/JKRArchivePub.cpp:
+    .text: [0x8000db44, 0x8000e554]
+    .data: [0x80347bd8, 0x80347c28]
+
+libs/JSystem/JKernel/JKRCompArchive.cpp:
+   .text: [0x8000e554, 0x8000f2ec]
+   .rodata: [0x8032cec8, 0x8032cf08]
+   .data: [0x80347c28, 0x80347c78]
+   .sdata2: [0x803d6480, 0x803d6488]
+
+libs/JSystem/JKernel/JKRDecomp.cpp:
+    .text: [0x8000f2ec, 0x8000fa00]
+    .data: [0x80347c78, 0x80347cc8]
+    .sbss: [0x803d49f0, 0x803d49f8]
+
+libs/JSystem/JKernel/JKRDisposer.cpp:
+    .text: [0x8000fa00, 0x8000faec]
+    .data: [0x80347cc8, 0x80347cd8]
+
+libs/JSystem/JKernel/JKRDvdFile.cpp:
+    .text: [0x8000faec, 0x80010048]
+    .ctors: [0x802d84b8, 0x802d84bc]
+    .rodata: [0x8032cf08, 0x8032cf30]
+    .data: [0x80347cd8, 0x80347d00]
+    .bss: [0x8036def8, 0x8036df08]    
+    #.bss: [0x803ae974, 0x803ae980]
+    .sdata2: [0x803d6488, 0x803d6490]
+
+libs/JSystem/JKernel/JKRDvdAramRipper.cpp:
+    .text: [0x80010048, 0x80010e4c]
+    .ctors: [0x802d84bc, 0x802d84c0]
+    .bss: [0x8036df08, 0x8036df30]
+    #.bss: [0x803ae980, 0x803ae98c]
+    .sdata: [0x803d3260, 0x803d3268]
+    .sbss: [0x803d49f8, 0x803d4a40]
+
+libs/JSystem/JKernel/JKRDvdArchive.cpp:
+    .text: [0x80010e4c, 0x80011a44]
+    .rodata: [0x8032cf30, 0x8032cfa8]
+    .data: [0x80347d00, 0x80347d50]
+    .sdata2: [0x803d6490, 0x803d6498]
+
+libs/JSystem/JKernel/JKRDvdRipper.cpp:
+    .text: [0x80011a44, 0x80012728]
+    .ctors: [0x802d84c0, 0x802d84c4]
+    .rodata: [0x8032cfa8, 0x8032d008]
+    .bss: [0x8036df30, 0x8036df58]    
+    #.bss: [0x803ae98c, 0x803ae9b0] 
+    .sdata: [0x803d3268, 0x803d3270]
+    .sbss: [0x803d4a40, 0x803d4a80]
+    .sdata2: [0x803d6498, 0x803d64a0]
+    
+libs/JSystem/JKernel/JKRExpHeap.cpp:
+    .text: [0x80012728, 0x8001421c]
+    .rodata: [0x8032d008, 0x8032d380]
+    .data: [0x80347d50, 0x80347db0]
+    .sbss: [0x803d4a80, 0x803d4a98]
+    .sdata2: [0x803d64a0, 0x803d64d0]
+
+libs/JSystem/JKernel/JKRFileCache.cpp:
+    .text: [0x8001421c, 0x8001426c]
+    .data: [0x80347db0, 0x80347dc0]
+
+libs/JSystem/JKernel/JKRFileFinder.cpp:
+    .text: [0x8001426c, 0x80014410]
+    .data: [0x80347dc0, 0x80347dd0]
+
+libs/JSystem/JKernel/JKRFileLoader.cpp:
+    .text: [0x80014410, 0x8001482c]
+    .ctors: [0x802d84c4, 0x802d84c8]
+    .data: [0x80347dd0, 0x80347e10]
+    .bss: [0x8036df58, 0x8036df68]
+    #.bss: [0x803ae998, 0x803ae9a4] # common bss
+    .sdata: [0x803d3270, 0x803d3278]
+    .sbss: [0x803d4a98, 0x803d4aa0]
+    .sdata2: [0x803d64d0, 0x803d64d8]
+
+libs/JSystem/JKernel/JKRHeap.cpp:
+    .text: [0x8001482c, 0x80015818]
+    .rodata: [0x8032d380, 0x8032d390]
+    .data: [0x80347e10, 0x80347e70]
+    .sdata: [0x803d3278, 0x803d3280]
+    .sbss: [0x803d4aa0, 0x803d4ac8]
+    .sdata2: [0x803d64d8, 0x803d64e8]
+
+libs/JSystem/JKernel/JKRMemArchive.cpp:
+    .text: [0x80015818, 0x80015f40]
+    .rodata: [0x8032d390, 0x8032d3b8]
+    .data: [0x80347e70, 0x80347ec0]
+    .sdata2: [0x803d64e8, 0x803d64f0]
+
+libs/JSystem/JKernel/JKRSolidHeap.cpp:
+    .text: [0x80015f40, 0x80016890]
+    .rodata: [0x8032d3b8, 0x8032d500]
+    .data: [0x80347ec0, 0x80347f20]
+    .sdata2: [0x803d64f0, 0x803d6508]
+
+libs/JSystem/JKernel/JKRThread.cpp:
+    .text: [0x80016890, 0x80017254]
+    .ctors: [0x802d84c8, 0x802d84cc]
+    .data: [0x80347f20, 0x80347f40]
+    .bss: [0x8036df68, 0x8036df80]
+    #.bss: [0x803ae9a4, 0x803ae9e8] #common bss
+    .sbss: [0x803d4ac8, 0x803d4ad0]
+
+libs/JSystem/JKernel/JKRAssertHeap.cpp:
+    .text: [0x80017254, 0x800173e4]
+    .data: [0x80347f40, 0x80347fa0]
+
+libs/JSystem/JSupport/JSUOutputStream.cpp:
+    .text: [0x800173e4, 0x80017434]
+    .data: [0x80347fa0, 0x80347fb0]
+
+libs/JSystem/JSupport/JSUInputStream.cpp:
+    .text: [0x80017434, 0x800177b0]
+    .data: [0x80347fb0, 0x80347ff0]
+
+libs/JSystem/JSupport/JSUList.cpp:
+    .text: [0x800177b0, 0x80017d14]
+
+libs/JSystem/JSupport/JSUMemoryStream.cpp:
+    .text: [0x80017d14, 0x80017e94]
+    .data: [0x80347ff0, 0x80348018]
+
+libs/JSystem/JSupport/JSUFileStream.cpp:
+    .text: [0x80017e94, 0x800180b4]
+    .data: [0x80348018, 0x80348040]
+
+libs/JSystem/JGadget/hashcode.cpp:
+    .text: [0x800180b4, 0x8001811c]
+
+libs/JSystem/JGadget/linklist.cpp:
+    .text: [0x8001811c, 0x800182a0]
+
+libs/JSystem/JUtility/JUTAssert.cpp:
+    .text: [0x800182a0, 0x800185a0]
+    .bss: [0x8036df80, 0x8036e0c0]
+    .sdata: [0x803d3280, 0x803d3288]
+    .sbss: [0x803d4ad0, 0x803d4ad8]
+    .sdata2: [0x803d6508, 0x803d6520]
+
+libs/JSystem/JUtility/JUTConsole.cpp:
+    .text: [0x800185a0, 0x80019910]
+    .data: [0x80348040, 0x80348050]
+    .sbss: [0x803d4ad8, 0x803d4ae8]
+    .sdata2: [0x803d6520, 0x803d6558]
+
+libs/JSystem/JUtility/JUTDbPrint.cpp:
+    .text: [0x80019910, 0x80019d88]
+    .sbss: [0x803d4ae8, 0x803d4af0]
+    .sdata2: [0x803d6558, 0x803d6568]
+
+libs/JSystem/JUtility/JUTDirectFile.cpp:
+    .text: [0x80019d88, 0x8001a120]
+
+libs/JSystem/JUtility/JUTDirectPrint.cpp:
+    .text: [0x8001a120, 0x8001a830]
+    .data: [0x80348050, 0x80348318]
+    .sbss: [0x803d4af0, 0x803d4af8]
+    .sdata2: [0x803d6568, 0x803d65c8]
+
+libs/JSystem/JUtility/JUTException.cpp:
+    .text: [0x8001a830, 0x8001d410]
+    .ctors: [0x802d84cc, 0x802d84d0]
+    .rodata: [0x8032d500, 0x8032da38]
+    .data: [0x80348318, 0x803483b0]
+    .bss: [0x8036e0c0, 0x8036e3a8]
+    #.bss: [803ae9e8, 0x803ae9f4]
+    .sdata: [0x803d3288, 0x803d3290]
+    .sbss: [0x803d4af8, 0x803d4b18]
+    .sdata2: [0x803d65c8, 0x803d6610]
+
+libs/JSystem/JUtility/JUTFader.cpp:
+    .text: [0x8001d410, 0x8001d7bc]
+    .data: [0x803483b0, 0x803483c8]
+    .sdata2: [0x803d6610, 0x803d6618]
+
+libs/JSystem/JUtility/JUTFont.cpp:
+    .text: [0x8001d7bc, 0x8001dae0]
+    .data: [0x803483c8, 0x80348410]
+
+libs/JSystem/JUtility/JUTGamePad.cpp:
+    .text: [0x8001dae0, 0x8001f70c]
+    .ctors: [0x802d84d0, 0x802d84d4]
+    .data: [0x80348410, 0x80348440]
+    .bss: [0x8036e3a8, 0x8036e3c0]
+    #.bss: [0x803ae9f4, 0x803aed20]
+    .sdata: [0x803d3290, 0x803d32a8]
+    .sbss: [0x803d4b18, 0x803d4b50]
+    .sdata2: [0x803d6618, 0x803d6668]
+
+libs/JSystem/JUtility/JUTGraphFifo.cpp:
+    .text: [0x8001f70c, 0x8001f8b0]
+    .data: [0x80348440, 0x80348450]
+    .sbss: [0x803d4b50, 0x803d4b60]
+
+libs/JSystem/JUtility/JUTNameTab.cpp:
+    .text: [0x8001f8b0, 0x8001fab8]
+    .data: [0x80348450, 0x80348460]
+
+libs/JSystem/JUtility/JUTPalette.cpp:
+    .text: [0x8001fab8, 0x8001fbdc]
+    .rodata: [0x8032da38, 0x8032da68]
+
+libs/JSystem/JUtility/JUTProcBar.cpp:
+    .text: [0x8001fbdc, 0x80021d38]
+    .sdata: [0x803d32a8, 0x803d32b0]
+    .sbss: [0x803d4b60, 0x803d4b78]
+    .sdata2: [0x803d6668, 0x803d66b0]
+
+libs/JSystem/JUtility/JUTResFont.cpp:
+    .text: [0x80021d38, 0x80022f48]
+    .rodata: [0x8032da68, 0x8032db80]
+    .data: [0x80348460, 0x803484b0]
+    .sdata2: [0x803d66b0, 0x803d66c8]
+
+libs/JSystem/JUtility/JUTResource.cpp:
+    .text: [0x80022f48, 0x800230f4]
+
+libs/JSystem/JUtility/JUTTexture.cpp:
+    .text: [0x800230f4, 0x8002392c]
+    .sdata2: [0x803d66c8, 0x803d66e0]
+
+libs/JSystem/JUtility/JUTVideo.cpp:
+    .text: [0x8002392c, 0x80023eb0]
+    .data: [0x803484b0, 0x803484c0]
+    .sbss: [0x803d4b78, 0x803d4b90]
+
+libs/JSystem/JUtility/JUTXfb.cpp:
+    .text: [0x80023eb0, 0x800240b4]
+    .sbss: [0x803d4b90, 0x803d4b98]
+
+libs/JSystem/JUtility/JUTFontData_Ascfont_fix12.s:
+    .rodata: [0x8032db80, 0x80331ce0]
+
+libs/JSystem/JMath/JMath.cpp:
+    .text: [0x80026880, 0x80026ad8]
+    .sdata2: [0x803d66e0, 0x803d66e8]
+
+libs/JSystem/JMath/random.cpp:
+    .text: [0x80026ad8, 0x80026ae0]
+
+libs/JSystem/JMath/JMATrigonometric.cpp:
+    .text: [0x80026ae0, 0x80026f0c]
+    .ctors: [0x802d84d4, 0x802d84d8]
+    .sdata2: [0x803d66f0, 0x803d6738]
+
+libs/JSystem/J2DGraph/J2DOrthoGraph.cpp:
+    .text: [0x80026f0c, 0x80027638]
+    .data: [0x80348510, 0x80348538]
+    .sdata2: [0x803d6738, 0x803d6740]
+
+libs/JSystem/J2DGraph/J2DAnimation.cpp:
+    .text: [0x8004acc8, 0x8004d918]
+    .data: [0x803492d0, 0x80349390] # actual slice end: 0x803493a0
+    .sdata2: [0x803d6918, 0x803d6940]
+
+#libs/JSystem/J3D/GraphBase/J3DSys.cpp:
+    #.text: [0x8004d918, 0x8004eb80]
+    #.ctors: [0x802d84e0, 0x802d84e4]
+    #.rodata: [0x80332400, 0x80332540]
+    #.data: [0x803493a0, 0x803493f8]
+    ## .comm: [0x803b6db0, ]
+    #.sdata: [0x803d32b0, 0x803d32b8]
+    #.sbss: [, ]
+    #.sdata2: [0x803d6940, 0x803d6950]
+
+libs/JSystem/JFramework/JFWSystem.cpp:
+    .text: [0x8007a494, 0x8007a7e4]    
+    .sdata: [0x803d3328, 0x803d3358]
+    .sbss: [0x803d4c20, 0x803d4c40]
+    .sdata2: [0x803d6ad8, 0x803d6ae8]
+
+libs/JSystem/JFramework/JFWDisplay.cpp:
+    .text: [0x8007a7e4, 0x8007be38] 
+    .ctors: [0x802d84f0, 0x802d84f4]
+    .rodata: [0x803326e0, 0x803327b8]
+    .data: [0x8034af40, 0x8034afd8] # trimmed, end address is 0x8034afe0
+    .bss: [0x8036e4d8, 0x8036e508] 
+    #.bss: [0x803ef5c0, 0x803ef5cc]
+    .sbss: [0x803d4c40, 0x803d4c68]
+    .sdata2: [0x803d6ae8, 0x803d6b10]
+
+libs/JSystem/JParticle/JPAResourceManager.cpp:
+    .text: [0x800893f4, 0x800894d0]
+
+libs/JSystem/JParticle/JPAKeyBlock.cpp:
+    .text: [0x80084994, 0x80084a38]
+    .sdata2: [0x803d6be8, 0x803d6bf0]
+
+libs/JSystem/JParticle/JPATexture.cpp:
+    .text: [0x800894d0, 0x8008959c]
+    .data: [0x8034b4c8, 0x8034b4d8]
+
+libs/JSystem/JAudio/Interface/JAIAudience.cpp:
+    .text: [0x8008959c, 0x800899a8]
+    .ctors: [0x802d84f4, 0x802d84f8]
+    .data: [0x8034b4d8, 0x8034b4f8]
+    .bss: [0x8036e508, 0x8036e550]
+    #.bss: [0x803b9d0c, 0x803b9dcc]
+    .sbss: [0x803d4c68, 0x803d4c88]
+
+libs/JSystem/JAudio/Interface/JAISe.cpp:
+    .text: [0x800899a8, 0x8008a3e4]
+    .ctors: [0x802d84f8, 0x802d84fc]
+    .data: [0x8034b4f8, 0x8034b550]
+    .bss: [0x8036e550, 0x8036e580]
+    .sdata2: [0x803d6c40, 0x803d6c50]
+
+libs/JSystem/JAudio/Interface/JAISeMgr.cpp:
+    .text: [0x8008a3e4, 0x8008b99c]
+    .ctors: [0x802d84fc, 0x802d8500]
+    .rodata: [0x803327b8, 0x803327d0]
+    .data: [0x8034b550, 0x8034b578]
+    .bss: [0x8036e580, 0x8036e5b0]
+    .sbss: [0x803d4c88, 0x803d4c90]
+    .sdata2: [0x803d6c50, 0x803d6c60]
+
+libs/JSystem/JAudio/Interface/JAISeq.cpp:
+    .text: [0x8008b99c, 0x8008c9d4]
+    .ctors: [0x802d8500, 0x802d8504]
+    .data: [0x8034b578, 0x8034b5c8]
+    .bss: [0x8036e5b0, 0x8036e5f0]
+    #.bss: [0x803b9dbc, 0x803b9dcc]
+    .sbss: [0x803d4c90, 0x803d4c98]
+    .sdata2: [0x803d6c60, 0x803d6c70]
+
+libs/JSystem/JAudio/Interface/JAISeqDataMgr.cpp:
+    .text: [0x8008c9d4, 0x8008ca74]
+    .data: [0x8034b5c8, 0x8034b5f8]
+
+libs/JSystem/JAudio/Interface/JAISeqMgr.cpp:
+    .text: [0x8008ca74, 0x8008d354]
+    .ctors: [0x802d8504, 0x802d8508]
+    .data: [0x8034b5f8, 0x8034b610]
+    .bss: [0x8036e5f0, 0x8036e620]
+    .sdata2: [0x803d6c70, 0x803d6c80]
+
+libs/JSystem/JAudio/Interface/JAISound.cpp:
+    .text: [0x8008d354, 0x8008dd44]
+    .ctors: [0x802d8508, 0x802d850c]
+    .rodata: [0x803327d0, 0x80332810]
+    .data: [0x8034b610, 0x8034b640]
+    .bss: [0x8036e620, 0x8036e648]
+    .sdata2: [0x803d6c80, 0x803d6ca0]
+
+libs/JSystem/JAudio/Interface/JAISoundChild.cpp:
+    .text: [0x8008dd44, 0x8008e04c]
+    .ctors: [0x802d850c, 0x802d8510]
+    .bss: [0x8036e648, 0x8036e678]
+    .sdata2: [0x803d6ca0, 0x803d6cb0]
+
+libs/JSystem/JAudio/Interface/JAISoundHandles.cpp:
+    .text: [0x8008e04c, 0x8008e2e4]
+    .ctors: [0x802d8510, 0x802d8514]
+    .bss: [0x8036e678, 0x8036e6a0]
+
+libs/JSystem/JAudio/Interface/JAISoundInfo.cpp:
+    .text: [0x8008e2e4, 0x8008e370]
+    .data: [0x8034b640, 0x8034b668]
+
+libs/JSystem/JAudio/Interface/JAISoundParams.cpp:
+    .text: [0x8008e370, 0x8008e4d0]
+    .sdata2: [0x803d6cb0, 0x803d6cb8]
+
+libs/JSystem/JAudio/Interface/JAISoundStarter.cpp:
+    .text: [0x8008e4d0, 0x8008e63c]
+    .ctors: [0x802d8514, 0x802d8518]
+    .data: [0x8034b668, 0x8034b678]
+    .bss: [0x8036e6a0, 0x8036e6c8]
+
+libs/JSystem/JAudio/Interface/JAIStream.cpp:
+    .text: [0x8008e63c, 0x8008f104]
+    .ctors: [0x802d8518, 0x802d851c]
+    .data: [0x8034b678, 0x8034b6a8]
+    .bss: [0x8036e6c8, 0x8036e708]
+    .sbss: [0x803d4c98, 0x803d4ca0]
+    .sdata2: [0x803d6cb8, 0x803d6cc8]
+
+libs/JSystem/JAudio/Interface/JAIStreamDataMgr.cpp:
+    .text: [0x8008f104, 0x8008f1a4]
+    .data: [0x8034b6a8, 0x8034b6d0]
+
+libs/JSystem/JAudio/Interface/JAIStreamMgr.cpp:
+    .text: [0x8008f1a4, 0x8008f808]
+    .ctors: [0x802d851c, 0x802d8520]
+    .bss: [0x8036e708, 0x8036e738]
+    .sdata2: [0x803d6cc8, 0x803d6cd8]
+
+libs/JSystem/JAudio/Interface/JAIAudible.cpp:
+    .text: [0x8008f808, 0x8008f938]
+    .ctors: [0x802d8520, 0x802d8524]
+    .data: [0x8034b6d0, 0x8034b6e8]
+    .bss: [0x8036e738, 0x8036e760]
+
+libs/JSystem/JAudio/System/JASCalc.cpp:
+    .text: [0x8008f938, 0x800901c0]
+    .rodata: [0x80332810, 0x80332c28]
+    .sdata2: [0x803d6cd8, 0x803d6d08]
+
+libs/JSystem/JAudio/System/JASDvdThread.cpp:
+    .text: [0x800905c4, 0x8009067c]
+    .sbss: [0x803d4ca0, 0x803d4ca8]
+
+libs/JSystem/JAudio/System/JASReport.cpp:
+    .text: [0x80091270, 0x8009136c]
+    .bss: [0x8036e7c8, 0x8036e7e0]
+    .sbss: [0x803d4cb8, 0x803d4cc8]
+
+libs/JSystem/JAudio/System/JASSoundParams.cpp:
+    .text: [0x80096134, 0x80096190]
+    .sdata2: [0x803d6e10, 0x803d6e18]
+
+libs/JSystem/JAudio/System/JASWSParser.cpp:
+    .text: [0x80096190, 0x800966e8]
+    .sbss: [0x803d4d28, 0x803d4d30]
+
+libs/JSystem/JAudio/System/JASBNKParser.cpp:
+    .text: [0x80097764, 0x800980d4]
+    .ctors: [0x802d8548, 0x802d854c]
+    .data: [0x8034b890, 0x8034b8a0]
+    .bss: [0x8036eb38, 0x8036eb48]
+    .sbss: [0x803d4d30, 0x803d4d38]
+    .sdata2: [0x803d6e20, 0x803d6e40]
+
+libs/JSystem/JAudio/System/JASInstRand.cpp:
+    .text: [0x8009853c, 0x8009867c]
+    .data: [0x8034b8b8, 0x8034b8c8]
+    .sbss: [0x803d4d40, 0x803d4d48]
+    .sdata2: [0x803d6e50, 0x803d6e60]
+
+libs/JSystem/JAudio/Task/dspproc.c:
+    .text: [0x800a1a60, 0x800a1c00]
+    .sdata: [0x803d3380, 0x803d3388]
+    .sbss: [0x803d4d80, 0x803d4d88]
+    .sdata2: [0x803d6f20, 0x803d6f28]
+
+libs/JSystem/JAudio/Task/dsptask.c:
+    .text: [0x800a1c00, 0x800a1f20]
+    .data: [0x8034d4c0, 0x8034f1d0]
+    .bss: [0x8036ec40, 0x80370d20]
+    .sbss: [0x803d4d88, 0x803d4d90]
+
+libs/JSystem/JAudio/Task/osdsp.c:
+    .text: [0x800a1f20, 0x800a2000]
+    .rodata: [0x803334f8, 0x80333518]
+
+libs/JSystem/JAudio/Task/osdsp_task.c:
+    .text: [0x800a2000, 0x800a23ec]
+    .bss: [0x80370d20, 0x80370d28]
+    .sbss:  [0x803d4d90, 0x803d4da0]
+
+libs/JSystem/JAudio/Utility/JAUAudioArcInterpreter.cpp:
+    .text: [0x800a23ec, 0x800a28ac]
+    .data: [0x8034f1e0, 0x8034f220]
+
+libs/JSystem/JAudio/Utility/JAUAudioArcLoader.cpp:
+    .text: [0x800a28ac, 0x800a2d30]
+    .ctors: [0x802d8564, 0x802d8568]
+    .data: [0x8034f220, 0x8034f260]
+    .bss: [0x80370d30, 0x80370d60]
+    .sbss: [0x803d4da0, 0x803d4db0]
+
+libs/JSystem/JAudio/Utility/JAUInitializer.cpp:
+    .text: [0x800a32d4, 0x800a371c]
+    .ctors: [0x802d8570, 0x802d8574]
+    .bss: [0x80370de0, 0x80370e38]
+    .sdata2: [0x803d6f28, 0x803d6f30]
+
+libs/JSystem/JAudio/Utility/JAUBankTable.cpp:
+    .text: [0x800a3148, 0x800a318c]
+
+libs/JSystem/JAudio/Utility/JAUStreamFileTable.cpp:
+    .text: [0x800a5698, 0x800a57e4]
+    .data: [0x8034f2d0, 0x8034f2e0]
+
+libs/JSystem/JAudio/Utility/JAUSectionHeap.cpp:
+    .text: [0x800a6d7c, 0x800a8b9c]
+    .ctors: [0x802d8584, 0x802d8588]
+    .rodata: [0x80333518, 0x80333588]
+    .data: [0x8034f368, 0x8034f3e0]
+    .bss: [0x80370f60, 0x80370f90]
+    .sdata: [0x803d3388, 0x803d3390]
+
+libs/JSystem/JAudio/System/JASSeqReader.cpp:
+    .text: [0x8009deac, 0x8009e0f8]
+
+libs/dolphin/base/PPCArch.c:
+    .text: [0x800a9600, 0x800a9714]
+
+libs/dolphin/mtx/mtx44vec.c:
+    .text: [0x800aa380, 0x800aa3f8]
+
+libs/dolphin/mtx/vec.c:
+    .text: [0x800aa3f8, 0x800aa594]
+    .sdata2: [0x803d6fd8, 0x803d6fe0]
+
+libs/dolphin/dvd/dvdlow.c:
+    .text: [0x800aa6b8, 0x800ab534]
+    .bss: [0x80370fc0, 0x803710a0]
+    .sdata: [0x803d3398, 0x803d33a0]
+    .sbss: [0x803d4dc0, 0x803d4e08]
+
+libs/dolphin/dvd/dvdfs.c:
+    .text: [0x800ab534, 0x800abe10]
+    .data: [0x8034f418, 0x8034f580]
+    .sdata: [0x803d33a0, 0x803d33a8]
+    .sbss: [0x803d4e08, 0x803d4e28]
+
+libs/dolphin/dvd/dvd.c:
+    .text: [0x800abe10, 0x800ae544]
+    .data: [0x8034f580, 0x8034f700]
+    .bss: [0x803710a0, 0x80371138]
+    .sdata: [0x803d33a8, 0x803d33c0]
+    .sbss: [0x803d4e28, 0x803d4e70]
+
+libs/dolphin/dvd/dvdqueue.c:
+    .text: [0x800ae544, 0x800ae73c]
+    .bss: [0x80371138, 0x80371158]
+
+libs/dolphin/dvd/dvderror.c:
+    .text: [0x800ae73c, 0x800ae8d4]
+    .data: [0x8034f700, 0x8034f748]  
+
+libs/dolphin/dvd/dvdidutils.c:
+    .text: [0x800ae8d4, 0x800ae9cc]
+
+libs/dolphin/dvd/dvdFatal.c:
+    .text: [0x800ae9cc, 0x800ae9fc]
+    .sbss: [0x803d4e70, 0x803d4e78]
+
+libs/dolphin/dvd/emu_level2/fstload.c:
+    .text: [0x800ae9fc, 0x800aec3c]
+    .data: [0x8034f748, 0x8034f7b8]
+    .bss: [0x80371158, 0x803711c8]
+    .sdata: [0x803d33c0, 0x803d33d0]
+    .sbss: [0x803d4e78, 0x803d4e88]
+
+libs/dolphin/ai/ai.c:
+    .text: [0x800b0a64, 0x800b1348]
+    .data: [0x8034fb88, 0x8034fbd0]
+    .sdata: [0x803d33e0, 0x803d33e8]
+    .sbss: [0x803d4ee8, 0x803d4f28]
+
+libs/dolphin/ar/ar.c:
+    .text: [0x800b1348, 0x800b2e1c]
+    .data: [0x8034fbd0, 0x8034fc18]
+    .sdata: [0x803d33e8, 0x803d33f0]
+    .sbss: [0x803d4f28, 0x803d4f48]
+
+libs/dolphin/ar/arq.c:
+    .text: [0x800b2e1c, 0x800b31b8]
+    .data: [0x8034fc18, 0x8034fc60]
+    .sdata: [0x803d33f0, 0x803d33f8]
+    .sbss: [0x803d4f48, 0x803d4f70]
+
+libs/dolphin/dsp/dsp.c:
+    .text: [0x800b31b8, 0x800b3308]
+    .data: [0x8034fc60, 0x8034fce0]
+    .sdata: [0x803d33f8, 0x803d3400]
+    .sbss: [0x803d4f70, 0x803d4f78]
+
+libs/dolphin/dsp/dsp_debug.c:
+    .text: [0x800b3308, 0x800b3358]
+
+libs/dolphin/dsp/dsp_task.c:
+    .text: [0x800b3358, 0x800b37b8]
+    .data: [0x8034fce0, 0x8034fe20]
+    .sbss: [0x803d4f78, 0x803d4f88]
+
+libs/dolphin/card/CARDBios.c:
+    .text: [0x800b37b8, 0x800b4a6c]
+    .data: [0x8034fe20, 0x8034fe80]
+    .bss: [0x80371310, 0x80371550]
+    .sdata: [0x803d3400, 0x803d3408]
+    .sbss: [0x803d4f88, 0x803d4f90]
+
+libs/dolphin/card/CARDUnlock.c:
+    .text: [0x800b4a6c, 0x800b5ccc]
+    .data: [0x8034fe80, 0x8034ffe0]
+    .sdata: [0x803d3408, 0x803d3410]
+
+libs/dolphin/card/CARDRdwr.c:
+    .text: [0x800b5ccc, 0x800b5f4c]
+
+libs/dolphin/card/CARDBlock.c:
+    .text: [0x800b5f4c, 0x800b6350]
+
+libs/dolphin/card/CARDDir.c:
+    .text: [0x800b6350, 0x800b65b4]
+
+libs/dolphin/card/CARDCheck.c:
+    .text: [0x800b65b4, 0x800b751c]
+
+libs/dolphin/card/CARDMount.c:
+    .text: [0x800b751c, 0x800b7fdc]
+    .data: [0x8034ffe0, 0x80350020]
+
+libs/dolphin/card/CARDFormat.c:
+    .text: [0x800b7fdc, 0x800b87cc]
+
+libs/dolphin/card/CARDOpen.c:
+    .text: [0x800b87cc, 0x800b8ebc]
+
+libs/dolphin/card/CARDNet.c:
+    .sdata: [0x803d3410, 0x803d3418]
+
+libs/dolphin/card/CARDCreate.c:
+    .text: [0x800b8ebc, 0x800b9254]
+
+libs/dolphin/card/CARDRead.c:
+    .text: [0x800b9254, 0x800b96c8]
+
+libs/dolphin/card/CARDWrite.c:
+    .text: [0x800b96c8, 0x800b9a44]
+
+libs/dolphin/card/CARDDelete.c:
+    .text: [0x800b9a44, 0x800b9db4]
+
+libs/dolphin/card/CARDStat.c:
+    .text: [0x800b9db4, 0x800ba27c]
+
+libs/dolphin/card/CARDRename.c:
+    .text: [0x800ba27c, 0x800ba4c0]
+
+libs/dolphin/exi/EXIBios.c:
+    .text: [0x800c387c, 0x800c5370]
+    .data: [0x803509b8, 0x80350ac8]
+    .bss: [0x80371e08, 0x80371ec8]
+    .sdata: [0x803d3478, 0x803d3480]
+    .sbss: [0x803d5008, 0x803d5010]
+
+libs/dolphin/exi/EXIUart.c:
+    .text: [0x800c5370, 0x800c5944]
+    .sbss: [0x803d5010, 0x803d5020]
+
+libs/dolphin/os/OS.c:
+    .text: [0x800e589c, 0x800e6388]
+    .data: [0x80351808, 0x80351a00]
+    .bss: [0x8037f3a0, 0x8037f3f0]
+    .sdata: [0x803d34e0, 0x803d34f0]
+    .sbss: [0x803d5160, 0x803d51a0]
+
+libs/dolphin/os/OSAlarm.c:
+    .text: [0x800e6388, 0x800e6b60]
+    .data: [0x80351a00, 0x80351a10]
+    .sbss: [0x803d51a0, 0x803d51a8]
+
+libs/dolphin/os/OSAlloc.c:
+    .text: [0x800e6b60, 0x800e6d74]
+    .sdata: [0x803d34f0, 0x803d34f8]
+    .sbss: [0x803d51a8, 0x803d51b8]
+
+libs/dolphin/os/OSArena.c:
+    .text: [0x800e6d74, 0x800e6d94]
+    .sdata: [0x803d34f8, 0x803d3500]
+    .sbss: [0x803d51b8, 0x803d51c0]
+
+libs/dolphin/os/OSAudioSystem.c:
+    .text: [0x800e6d94, 0x800e7028]
+    .data: [0x80351a10, 0x80351a90]
+
+libs/dolphin/os/OSCache.c:
+    .text: [0x800e7028, 0x800e76a0]
+    .data: [0x80351a90, 0x80351cc0]
+
+#libs/dolphin/os/OSContext.c:
+    #.text: [0x800e76a0, 0x800e803c]
+    #.data: [0x80351cc0 , 0x80351e98]
+
+libs/dolphin/os/OSError.c:
+    .text: [0x800e803c, 0x800e86e8]
+    .data: [0x80351e98, 0x803521b8]
+    .bss: [0x8037f3f0, 0x8037f438] # actual end: 0x8037f440
+    .sdata: [0x803d3500, 0x803d3508]
+
+libs/dolphin/os/OSFont.c:
+    .text: [0x800e86e8, 0x800e8740]
+    .sdata: [0x803d3508, 0x803d3510]
+
+#libs/dolphin/os/OSInterrupt.c:
+    #.text: [0x800e8740, 0x800e8fac]
+    #.data: [0x803521b8, 0x803521e8]
+    #.sbss: [0x803d51c0, 0x803d51d8]
+
+libs/dolphin/os/OSLink.c:
+    .text: [0x800e8fac, 0x800e8fc4]
+
+libs/dolphin/os/OSMessage.c:
+    .text: [0x800e8fc4, 0x800e929c]
+
+libs/dolphin/os/OSMemory.c:
+    .text: [0x800e929c, 0x800e9644]
+    .data: [0x803521e8, 0x803521f8]
+
+libs/dolphin/os/OSMutex.c:
+    .text: [0x800e9644, 0x800e9890]
+
+#libs/dolphin/os/OSReboot.c:
+    #.text: [0x800e9890, 0x800e9bec]
+    #.bss: [0x8037f440, 0x8037f460]
+    #.sbss: [0x803d51d8, 0x803d51e8]
+
+libs/dolphin/os/OSReset.c:
+    .text: [0x800e9bec, 0x800ea010]
+    .sbss: [0x803d51e8, 0x803d51f8]
+
+libs/dolphin/os/OSResetSW.c:
+    .text: [0x800ea010, 0x800ea3bc]
+    .sbss: [0x803d51f8, 0x803d5218]
+
+libs/dolphin/os/OSRtc.c:
+    .text: [0x800ea3bc, 0x800eafb8]
+    .bss: [0x8037f460, 0x8037f4b8]
+
+libs/dolphin/os/OSSync.c:
+    .text: [0x800eafb8, 0x800eb03c]
+
+libs/dolphin/os/OSThread.c:
+    .text: [0x800eb03c, 0x800ec36c]
+    .bss: [0x8037f4b8, 0x8037feb0]
+    .sdata: [0x803d3510, 0x803d3518]
+    .sbss: [0x803d5218, 0x803d5228]
+
+libs/dolphin/os/OSTime.c:
+    .text: [0x800ec36c, 0x800ec7e8]
+    .data: [0x803521f8, 0x80352258]
+
+#libs/dolphin/os/init/__start.c:
+    #.init: [0x80003100, 0x80003400]
+    #.sbss: [0x803d5228, 0x803d5230]
+
+libs/dolphin/os/init/__ppc_eabi_init.cpp:
+    .init: [0x80003400, 0x80003458]
+    .text: [0x800ec7e8, 0x800ec87c]
+
+libs/dolphin/pad/Padclamp.c:
+    .text: [0x800ec87c, 0x800ecd74]
+    .rodata: [0x803335d0, 0x803335e0]
+    .sdata2: [0x803d7100, 0x803d7120]
+
+libs/dolphin/pad/Pad.c:
+    .text: [0x800ecd74, 0x800ee730]
+    .data: [0x80352258, 0x803522b0]
+    .bss: [0x8037feb0, 0x8037ff00]
+    .sdata: [0x803d3518, 0x803d3538]
+    .sbss: [0x803d5230, 0x803d5260]
+
+libs/dolphin/si/SIBios.c:
+    .text: [0x800ee730, 0x800eff90]
+    .data: [0x803522b0, 0x803523c8]
+    .bss: [0x8037ff00, 0x80380100]
+    .sdata: [0x803d3538, 0x803d3540]
+    .sbss: [0x803d5260, 0x803d5270]
+
+libs/dolphin/si/SISamplingRate.c:
+    .text: [0x800eff90, 0x800f0098]
+    .data: [0x803523c8, 0x80352460]
+    .sbss: [0x803d5270, 0x803d5278]
+
+libs/dolphin/db/db.c:
+    .text: [0x800f0744, 0x800f0830]
+    .data: [0x80352460, 0x80352478]
+    .sbss: [0x803d5288, 0x803d52a0]
+
+libs/dolphin/thp/THPDec.c:
+    .text: [0x800f0830, 0x800f7d98]
+    .rodata: [0x803335e0, 0x80333670]
+    .data: [0x80352478, 0x803524b8]
+    .bss: [0x803801a0, 0x803802d0]
+    .sdata: [0x803d3540, 0x803d3548]
+    .sbss: [0x803d52a0, 0x803d53b8]
+    .sdata2: [0x803d7120, 0x803d7140]
+
+libs/dolphin/thp/THPAudio.c:
+    .text: [0x800f7d98, 0x800f82c8]
+
+libs/PowerPC_EABI_Support/src/Runtime/__mem.c:
+    .init: [0x80003458, 0x80003590]
+
+libs/PowerPC_EABI_Support/src/Runtime/__va_arg.c:
+    .text: [0x800fefd0, 0x800ff098]
+
+libs/PowerPC_EABI_Support/src/Runtime/CPlusLibPPC.cp:
+    .text: [0x800ff0f8, 0x800ff128]
+
+libs/PowerPC_EABI_Support/src/Runtime/ptmf.c:
+    .text: [0x800ff4d4, 0x800ff554]
+    .rodata: [0x80333a20, 0x80333a30]
+
+libs/PowerPC_EABI_Support/src/Runtime/runtime.c:
+    .text: [0x800ff554, 0x800ffc30]
+    .rodata: [0x80333a30, 0x80333a48]
+
+#libs/PowerPC_EABI_Support/src/Runtime/GCN_mem_alloc.c:
+    #.text: [0x800ffd14, 0x800ffdcc]
+    #.rodata: [0x80333a48, 0x80333ac0]
+
+#libs/PowerPC_EABI_Support/src/MSL_C/PPC_EABI/abort_exit.c:
+    #.text: [0x800ffdcc, 0x800fff24]
+    #.bss: [0x80385cf8, 0x80385df8]
+    #.sbss: [0x803d5418, 0x803d5428]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/alloc.c:
+    .text: [0x800fff24, 0x8010059c]
+    .rodata: [0x80333ac0, 0x80333ad8]
+    .bss: [0x80385df8, 0x80385E30]
+    .sbss: [0x803d5428, 0x803d5430]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/ansi_files.c:
+    .text: [0x8010059c, 0x801006b8]
+    .data: [0x80352ae8, 0x80352c28]
+    .bss: [0x80385E30, 0x80386130]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/ansi_fp.c:
+    .text: [0x801006b8, 0x80102200]
+    .rodata: [0x80333ad8, 0x80333bb8]
+    .data: [0x80352c28, 0x80352d90]
+    .sdata2: [0x803d7170, 0x803d71a0]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/arith.c:
+    .text: [0x80102200, 0x80102210]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/bsearch.c:
+    .text: [0x80102210, 0x8010230c]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/buffer_io.c:
+    .text: [0x8010230c, 0x80102410]
+
+libs/PowerPC_EABI_Support/src/MSL_C/PPC_EABI/critical_regions.gamecube.c:
+    .text: [0x80102410, 0x8010241c]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/ctype.c:
+    .text: [0x8010241c, 0x80102520]
+    .data: [0x80352d90, 0x80353090]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/direct_io.c:
+    .text: [0x80102520, 0x801028bc]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/errno.c:
+    .sbss: [0x803d5430, 0x803d5438]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/file_io.c:
+    .text: [0x801028bc, 0x80102b7c]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/FILE_POS.C:
+    .text: [0x80102b7c, 0x80102ed0]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/locale.c:
+    .rodata: [0x80333bb8, 0x80333bc0]
+    .data: [0x80353090, 0x803530C8]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/mbstring.c:
+    .text: [0x80102ed0, 0x801032e4]
+    .sdata2: [0x803d71a0, 0x803d71a8]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/mem.c:
+    .text: [0x801032e4, 0x8010351c]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/mem_funcs.c:
+    .text: [0x8010351c, 0x8010382c]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/misc_io.c:
+    .text: [0x8010382c, 0x8010383c]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/printf.c:
+    .text: [0x8010383c, 0x80105a20]
+    .rodata: [0x80333bc0, 0x80333be8]
+    .data: [0x803530C8, 0x803532f8]
+    .sdata: [0x803d3810, 0x803d3818]
+    .sdata2: [0x803d71a8, 0x803d71b0]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/scanf.c:
+    .text: [0x80105a20, 0x80106b24]
+    .rodata: [0x80333be8, 0x80333c10]
+    .data: [0x803532f8, 0x803533c8]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/signal.c:
+    .text: [0x80106b24, 0x80106c0c]
+    .bss: [0x80386130, 0x80386148]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/string.c:
+    .text: [0x80106c0c, 0x801070c0]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/strtold.c:
+    .text: [0x801070c0, 0x801086c4]
+    .rodata: [0x80333c10, 0x80333c68]
+    .sdata2: [0x803d71b0, 0x803d71c8]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/strtoul.c:
+    .text: [0x801086c4, 0x8010900c]
+    .data: [0x803533c8, 0x80353450]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/float.c:
+    .sdata: [0x803d3818, 0x803d3848]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/wchar_io.c:
+    .text: [0x8010900c, 0x801090bc]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/uart_console_io_gcn.c:
+    .text: [0x801090bc, 0x801091b0]
+    .sbss: [0x803d5438, 0x803d5440]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/e_asin.c:
+    .text: [0x801091b0, 0x801093e8]
+    .sdata2: [0x803d71c8, 0x803d7250]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/e_atan2.c:
+    .text: [0x801093e8, 0x80109678]
+    .sdata2: [0x803d7250, 0x803d72a8]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/e_exp.c:
+    .text: [0x80109678, 0x8010989c]
+    .rodata: [0x80333c68, 0x80333c98]
+    .sdata2: [0x803d72a8, 0x803d7320]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/e_pow.c:
+    .text: [0x8010989c, 0x8010a0cc]
+    .rodata: [0x80333c98, 0x80333cc8]
+    .sdata2: [0x803d7320, 0x803d7430]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/e_rem_pio2.c:
+    .text: [0x8010a0cc, 0x8010a46c]
+    .rodata: [0x80333cc8, 0x80333e50]
+    .sdata2: [0x803d7430, 0x803d7488]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/k_cos.c:
+    .text: [0x8010a46c, 0x8010a560]
+    .sdata2: [0x803d7488, 0x803d74d0]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/k_rem_pio2.c:
+    .text: [0x8010a560, 0x8010b3b4]
+    .rodata: [0x80333e50, 0x80333ea0]
+    .sdata2: [0x803d74d0, 0x803d7510]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/k_sin.c:
+    .text: [0x8010b3b4, 0x8010b454]
+    .sdata2: [0x803d7510, 0x803d7548]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/k_tan.c:
+    .text: [0x8010b454, 0x8010b668]
+    .rodata: [0x80333ea0, 0x80333f08]
+    .sdata2: [0x803d7548, 0x803d7580]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/s_atan.c:
+    .text: [0x8010b668, 0x8010b880]
+    .rodata: [0x80333f08, 0x80333fa0]
+    .sdata2: [0x803d7580, 0x803d75a8]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/s_ceil.c:
+    .text: [0x8010b880, 0x8010b9c4]
+    .sdata2: [0x803d75a8, 0x803d75b8]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/s_copysign.c:
+    .text: [0x8010b9c4, 0x8010b9ec]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/s_cos.c:
+    .text: [0x8010b9ec, 0x8010bac0]
+    .sdata2: [0x803d75b8, 0x803d75c0]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/s_floor.c:
+    .text: [0x8010bac0, 0x8010bc08]
+    .sdata2: [0x803d75c0, 0x803d75d0]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/s_frexp.c:
+    .text: [0x8010bc08, 0x8010bc94]
+    .sdata2: [0x803d75d0, 0x803d75d8]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/s_ldexp.c:
+    .text: [0x8010bc94, 0x8010be58]
+    .sdata2: [0x803d75d8, 0x803d7600]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/s_modf.c:
+    .text: [0x8010be58, 0x8010bf54]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/s_sin.c:
+    .text: [0x8010bf54, 0x8010c02c]
+    .sdata2: [0x803d7600, 0x803d7608]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/s_tan.c:
+    .text: [0x8010c02c, 0x8010c0a4]
+    .sdata2: [0x803d7608, 0x803d7610]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/w_asin.c:
+    .text: [0x8010c0a4, 0x8010c0c4]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/w_atan2.c:
+    .text: [0x8010c0c4, 0x8010c0e4]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/w_exp.c:
+    .text: [0x8010c0e4, 0x8010c104]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/w_pow.c:
+    .text: [0x8010c104, 0x8010c124]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/e_sqrt.c:
+    .text: [0x8010c124, 0x8010c348]
+    .sdata2: [0x803d7610, 0x803d7618]
+
+# file can't be linked because __fclassify is weak and gets put at the top of the file while it lives in a header
+#libs/PowerPC_EABI_Support/src/MSL_C/PPC_EABI/math_ppc.c:
+    #.text: [0x80112d20, 0x8010c434]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common_Embedded/Math/Double_precision/w_sqrt.c:
+    .text: [0x8010c434, 0x8010c454]
+
+libs/PowerPC_EABI_Support/src/MSL_C/MSL_Common/extras.c:
+    .text: [0x8010c454, 0x8010c500]
+
+src/Bando/EngineSound.cpp:
+    .text: [0x8011226c, 0x801122dc]
+    .data: [0x80353590, 0x803535e8]
+
+src/Inagaki/GameAudioCommon.cpp:
+    .text: [0x80113900, 0x80113c28]
+    .ctors: [0x802d8594, 0x802d8598]
+    .bss: [0x80388ea8, 0x80388ee8]
+    .sbss: [0x803d5490, 0x803d5498]
+    .sdata2: [0x803d7638, 0x803d7658]
+
+src/Inagaki/GameAudioHostIO.cpp:
+    .text: [0x80113c28, 0x80113ddc]
+    .ctors: [0x802d8598, 0x802d859c]
+    .bss: [0x80388ee8, 0x80388f40]
+    .sdata2: [0x803d7658, 0x803d7660]
+
+src/Inagaki/GameAudioFxConfig.cpp:
+    .text: [0x80122d7c, 0x80122ec8]
+    .data: [0x80353ed8, 0x803540d8]
+
+src/Inagaki/GameAudioArcLoader.cpp:
+    .text: [0x80122ec8, 0x801230d0]
+    .ctors: [0x802d85cc, 0x802d85d0]
+    .data: [0x803540d8, 0x80354118]
+    .bss: [0x80389290, 0x803892b8]
+
+src/Kameda/Task.cpp:
+    .text: [0x80124a58, 0x80124de4]
+
+src/Kameda/WipeManager.cpp:
+    .text: [0x80129f18, 0x8012c188]
+    .ctors: [0x802d85e8, 0x802d85ec]
+    .rodata: [0x80335188, 0x80335198]
+    .data: [0x803543c8, 0x803549a0]
+    .bss: [0x80389bd8, 0x80389c08]
+    .sbss: [0x803d5540, 0x803d5558]
+    .sdata2: [0x803d7a08, 0x803d7a20]
+
+src/Kameda/Scene.cpp:
+    .text: [0x8012cfbc, 0x8012d020]
+    .data: [0x803549a0, 0x803549b8]
+
+src/Kameda/PrintDvdError.cpp:
+    .text: [0x80140d5c, 0x801411c8]
+    .data: [0x80354eb0, 0x80354ee8]
+    .sdata2: [0x803d7bf8, 0x803d7c18]
+
+src/Kameda/ReadPrintMessage.cpp:
+    .text: [0x80151af8, 0x80152374]
+    .rodata: [0x80337cc0, 0x80337d00]
+    .data: [0x803552a8, 0x80355378]
+    .sbss: [0x803d55d0, 0x803d55d8]
+    .sdata2: [0x803d7fb8, 0x803d7fe0]
+
+src/Kameda/BattleName2D.cpp:
+    .text: [0x80173d50, 0x80173f68]
+    .ctors: [0x802d8644, 0x802d8648]
+    .rodata: [0x8033c990, 0x8033c9a8]
+    .bss: [0x8038a0c0, 0x8038a0f0]
+    .sbss: [0x803d5600, 0x803d5608]
+
+src/Kaneshige/DrawBuffer.cpp:
+    .text: [0x801775d0, 0x80177968]
+    .ctors: [0x802d8660, 0x802d8664]
+    .data: [0x80355868, 0x80355880]
+    .bss: [0x8038a210, 0x8038a220]
+    #.bss: [0x803bb258, 0x803bb27c]
+
+src/Kaneshige/Course/Course.cpp:
+    .text: [0x80177968, 0x8017c3a8]
+    .ctors: [0x802d8664, 0x802d8668]
+    .rodata: [0x8033cb80, 0x8033cbd8]
+    .data: [0x80355880, 0x80355990]
+    .bss: [0x8038a220, 0x8038a250]
+    .sdata: [0x803d3890, 0x803d38c0]
+    .sbss: [0x803d5610, 0x803d5618]
+    .sdata2: [0x803d8520, 0x803d85a0]
+
+src/Kaneshige/HioMgr.cpp:
+    .text: [0x80182d00, 0x80182e1c]
+    .data: [0x803559c0, 0x803559d0]
+
+src/Kaneshige/KartInfo.cpp:
+    .text: [0x80183f00, 0x80184598]
+    .ctors: [0x802d8674, 0x802d8678]
+    .rodata: [0x8033cc18, 0x8033ce58]    
+    .data: [0x803559f8, 0x80355aa0]
+    .bss: [0x8038a2e0, 0x8038a310]
+
+src/Kaneshige/KartChecker.cpp:
+    .text: [0x80184598, 0x80186824]  
+    .ctors: [0x802d8678, 0x802d867c] 
+    .data: [0x80355aa0, 0x80355ad0]
+    .bss: [0x8038a310, 0x8038a340] 
+    .sdata: [0x803d38c8, 0x803d38d8]
+    .sbss: [0x803d5620, 0x803d5628]
+    .sdata2: [0x803d8708, 0x803d8740]
+
+src/Kaneshige/RaceMgr.cpp:
+    .text: [0x80186824, 0x801899a0]
+    .rodata: [0x8033ce58, 0x8033d500]
+    .ctors: [0x802d867c, 0x802d8680]
+    .data: [0x80355ad0, 0x80355ae0]
+    .bss: [0x8038a340, 0x8038a370]
+    .sdata: [0x803d38d8, 0x803d38e0]
+    .sbss: [0x803d5628, 0x803d5630]
+    .sdata2: [0x803d8740, 0x803d8838]
+
+src/Kaneshige/CrsArea.cpp:
+    .text: [0x80189d68, 0x8018a144]
+    .ctors: [0x802d8680, 0x802d8684]
+    .bss: [0x8038a370, 0x8038a3a0]
+    .sdata2: [0x803d8850, 0x803d8858]
+
+src/Kaneshige/CenterLine.cpp:
+    .text: [0x8018b004, 0x8018b298]
+
+src/Kaneshige/RaceInfo.cpp:
+    .text: [0x8018b298, 0x8018bb3c]
+    .ctors: [0x802d868c, 0x802d8690]
+    .rodata: [0x8033d518, 0x8033d558]
+    .bss: [0x8038a400, 0x8038a440]
+    .sbss: [0x803d5648, 0x803d5650]
+
+src/Kaneshige/TexLODControl.cpp:
+    .text: [0x8018fefc, 0x80190134]
+    .ctors: [0x802d869c, 0x802d86a0]
+    .data: [0x80355d68, 0x80355d78]
+    .bss: [0x8038a4d0, 0x8038a500]
+    .sbss: [0x803d5658, 0x803d5660]
+    .sdata2: [0x803d88e0, 0x803d88f8]
+
+src/Kaneshige/ShapePktControl.cpp:
+    .text: [0x80190134, 0x80190190]
+
+src/Kaneshige/SimpleDrawer.cpp:
+    .text: [0x80190190, 0x80190324]
+    .sdata: [0x803d38f0, 0x803d38f8]
+    .sbss: [0x803d5660, 0x803d5668]
+
+src/Kaneshige/JugemPoint.cpp:
+    .text: [0x80190324, 0x80190334]
+
+src/Kaneshige/RaceBGMPlayer.cpp:
+    .text: [0x8019dd54, 0x8019e3cc]
+    .ctors: [0x802d86e4, 0x802d86e8]
+    .bss: [0x8038a830, 0x8038a860]
+    .sdata: [0x803d3990, 0x803d3998]
+
+src/Kaneshige/GeoAirJet.cpp:
+    .text: [0x801a3940, 0x801a3f84]
+    .ctors: [0x802d86f8, 0x802d86fc]
+    .rodata: [0x8033dcc0, 0x8033dcd0]
+    .data: [0x80357670, 0x80357740]
+    .bss: [0x8038a920, 0x8038a950]
+    .sdata2: [0x803d8ca8, 0x803d8cd8]
+
+src/Kaneshige/BlurScreen.cpp:
+    .text: [0x801a3f84, 0x801a451c]
+    .sdata2: [0x803d8cd8, 0x803d8ce8]
+
+src/Kaneshige/KartMtx.cpp:
+    .text: [0x801a6678, 0x801a6728]
+    .sdata2: [0x803d8d38, 0x803d8d40]
+
+src/Kaneshige/GhostScreen.cpp:
+    .text: [0x801ab0a0, 0x801ab4ec]
+
+src/Kaneshige/ShimmerScreen.cpp:
+    .text: [0x801ab4ec, 0x801abd70]
+    .sdata: [0x803d3a40, 0x803d3a48]
+    .sbss: [0x803d57d8, 0x803d57e8]
+    .sdata2: [0x803d8da0, 0x803d8dc0]
+
+src/Kaneshige/Movie/MoviePlayer.cpp:
+    .text: [0x801b0084, 0x801b0458]
+    .rodata: [0x8033dd98, 0x8033ddc0]
+    .data: [0x80357fb8, 0x80357fc8]
+    .sdata: [0x803d3a70, 0x803d3a78]
+    .sbss: [0x803d5ab0, 0x803d5ab8]
+
+src/Kaneshige/Movie/THPDraw.c:
+    .text: [0x801b0458, 0x801b0c04]
+    .sdata2: [0x803d8e28, 0x803d8e50]
+
+src/Kaneshige/RaceTime.cpp:
+    .text: [0x801b1d9c, 0x801b1df0]
+
+src/Kaneshige/MaskScreen.cpp:
+    .text: [0x801b1df0, 0x801b2558]
+    .sdata2: [0x803d8e90, 0x803d8ea0]
+
+src/Kaneshige/THP/THPPlayer.c:
+    .text: [0x801b2558, 0x801b3c88]
+    .ctors: [0x802d8728, 0x802d872c]
+    .bss: [0x8038ab60, 0x8038bda8]
+    .data: [0x80358030, 0x80358130]
+    .sbss: [0x803d5ab8, 0x803d5ad0]
+    .sdata2: [0x803d8ea0, 0x803d8ec0]
+
+src/Kaneshige/THP/THPVideoDecode.c:
+    .text: [0x801b3c88, 0x801b41dc]
+    .bss: [0x8038bda8, 0x8038d118]
+    .sbss: [0x803d5ad0, 0x803d5ad8]
+
+src/Kaneshige/THP/THPRead.c:
+    .text: [0x801b41dc, 0x801b44f8]
+    .bss: [0x8038d118, 0x8038e508]
+    .sbss: [0x803d5ad8, 0x803d5ae0]
+
+src/Kaneshige/THP/THPAudioDecode.c:
+    .text: [0x801b44f8, 0x801b48a8]
+    .bss: [0x8038e508, 0x8038F890]
+    .sbss: [0x803d5ae0, 0x803d5ae8]
+
+src/Kawano/SceneTitleLine.cpp:
+    .text: [0x801c9760, 0x801c9b18]
+    .rodata: [0x8033ee78, 0x8033eec8]
+    .sdata2: [0x803d9118, 0x803d9140]
+
+src/Osako/clock.cpp:
+    .text: [0x801cbe60, 0x801cbef8]
+    .sbss: [0x803d5b30, 0x803d5b40]
+    .sdata2: [0x803d9668, 0x803d9680]
+
+src/Osako/testApp.cpp:
+    .text: [0x801cc01c, 0x801cc11c]
+    .data: [0x8035c190, 0x8035c1a8]
+    .sbss: [0x803d5b40, 0x803d5b48]
+    .sdata2: [0x803d9690, 0x803d9698]
+
+src/Osako/shadowModel.cpp:
+    .text: [0x801cc11c, 0x801cc4a4]
+    .ctors: [0x802d8764, 0x802d8768]
+    .rodata: [0x803407b8, 0x803407c8]
+    .data: [0x8035c1a8, 0x8035c1f0]
+    .bss: [0x8038fb08, 0x8038fb38]
+    .sdata2: [0x803d9698, 0x803d96c0]
+
+src/Osako/GameApp.cpp:
+    .text: [0x801cc4a4, 0x801cc5bc]
+    .data: [0x8035c1f0, 0x8035c208]
+
+src/Osako/main.cpp:
+    .text: [0x801cc5bc, 0x801cc5e0]
+
+src/Osako/RaceApp.cpp:
+    .text: [0x801ccda4, 0x801ce300]
+    .ctors: [0x802d8774, 0x802d8778]
+    .data: [0x8035c250, 0x8035c2b8]
+    .rodata: [0x80340880, 0x803408d8]
+    .bss: [0x8038fbc8, 0x8038fbf8]
+    .sbss: [0x803d5b60, 0x803d5b68]
+    .sdata2: [0x803d96d0, 0x803d96e0]
+
+src/Osako/ResMgr.cpp:
+    .text: [0x801ce300, 0x801cf8c4]
+    .ctors: [0x802d8778, 0x802d877c]
+    .rodata: [0x803408d8, 0x80340c48]
+    .data: [0x8035c2b8, 0x8035c5b0]
+    .bss: [0x8038fbf8, 0x8038fc28]
+    #.bss: [0x803bd5c8, 0x803be230]
+    .sdata: [0x803d3af8, 0x803d3b00] 
+    .sbss: [0x803d5b68, 0x803d5ba8]
+    .sdata2: [0x803d96e0, 0x803d99c8]
+
+src/Osako/LogoApp.cpp:
+    .text: [0x801cf8c4, 0x801d02f8]
+    .ctors: [0x802d877c, 0x802d8780]
+    .rodata: [0x80340c48, 0x80340c70]
+    .data: [0x8035c5b0, 0x8035c600]
+    .bss: [0x8038fc28, 0x8038fc58]
+    .sbss: [0x803d5ba8, 0x803d5bb0]
+    .sdata2: [0x803d99c8, 0x803d99f0]
+
+src/Osako/system.cpp:
+    .text: [0x801d02f8, 0x801d1000]
+    .ctors: [0x802d8780, 0x802d8784]
+    .rodata: [0x80340c70, 0x80340ca0]
+    .data: [0x8035c600, 0x8035c638]
+    .bss: [0x8038fc58, 0x8038fc88]
+    .sbss: [0x803d5bb0, 0x803d5be0]
+    .sdata2: [0x803d99f0, 0x803d9a38]
+
+src/Osako/kartPad.cpp:
+    .text: [0x801d1000, 0x801d1a9c]
+    .ctors: [0x802d8784, 0x802d8788]
+    .data: [0x8035c638, 0x8035c688]
+    .bss: [0x8038fc88, 0x8038fd78]
+    #.bss: [0x803be230, 0x803bfe38] # common bss area
+    .sdata2: [0x803d9a38, 0x803d9a50]    
+
+src/Osako/AppMgr.cpp:
+    .text: [0x801d1a9c, 0x801d21a8]
+    .ctors: [0x802d8788, 0x802d878c]
+    .data: [0x8035c688, 0x8035c6c0]
+    .bss: [0x8038fd78, 0x8038fda8]
+    .sbss: [0x803d5be0, 0x803d5c00]
+
+src/Osako/FontMgr.cpp:
+    .text: [0x801d21a8, 0x801d2240]
+    .rodata: [0x80340ca0, 0x80340cb8]
+    .sbss: [0x803d5c00, 0x803d5c08]
+
+src/Osako/ErrorViewApp.cpp:
+    .text: [0x801d2240, 0x801d2780]
+    .ctors: [0x802d878c, 0x802d8790]
+    .rodata: [0x80340cb8, 0x80340cd8]
+    .data: [0x8035c6c0, 0x8035c6d8]
+    .bss: [0x8038fda8, 0x8038fde0]
+    .sbss: [0x803d5c08, 0x803d5c10]
+
+src/Osako/CardMgr.cpp:
+    .text: [0x801d2780, 0x801d36b0]
+    .bss: [0x8038fde0, 0x803a3de0]
+    #.bss: [0x803bfe38, 0x803bff90]
+    .sbss: [0x803d5c10, 0x803d5c18]
+
+src/Osako/CardAgent.cpp:
+    .text: [0x801d36b0, 0x801d5930]
+    .ctors: [0x802d8790, 0x802d8794]    
+    .rodata: [0x80340cd8, 0x80340cf8]
+    .data: [0x8035c6d8, 0x8035c7b8]
+    #.bss: [0x803bff90, 0x803bffa0]
+    .sbss: [0x803d5c18, 0x803d5c48]
+    .sdata2: [0x803d9a50, 0x803d9a80]
+
+src/Osako/SystemFile.cpp:
+    .text: [0x801d5930, 0x801d6520]
+    .ctors: [0x802d8794, 0x802d8798]
+    .rodata: [0x80340cf8, 0x80340d38]
+    .data: [0x8035c7b8, 0x8035c868]
+    .bss: [0x803a3de0, 0x803a3df0]
+    #.bss: [0x803bffa0, 0x803bffa0 + 0xa060] # common bss area
+    .sdata: [0x803d3b00, 0x803d3b08]
+    .sdata2: [0x803d9a80, 0x803d9a88]
+
+src/Osako/systemData.cpp:
+    .text: [0x801d6520, 0x801d66a8]
+    .ctors: [0x802d8798, 0x802d879c]
+    .rodata: [0x80340d38, 0x80340e88]
+    .data: [0x8035c868, 0x8035c928]
+    .sbss: [0x803d5c48, 0x803d5c58]
+    .sdata2: [0x803d9a88, 0x803d9aa8]
+
+src/Osako/SequenceApp.cpp:
+    .text: [0x801d9308, 0x801d9aec]
+    .ctors: [0x802d87a0, 0x802d87a4]
+    .rodata: [0x80340ed8, 0x80340ee8]
+    .data: [0x8035c980, 0x8035c998]
+    .bss: [0x803a3e20, 0x803a3e50]
+    .sdata: [0x803d3b08, 0x803d3b10]
+    .sbss: [0x803d5c60, 0x803d5c68]
+
+src/Osako/TestViewApp.cpp:
+    .text: [0x801da324, 0x801da460]
+    .rodata: [0x80340f78, 0x80340f88]
+    .data: [0x8035c9e0, 0x8035c9f8]
+    .sbss: [0x803d5c70, 0x803d5c78]
+
+src/Osako/shadowScr.cpp:
+    .text: [0x801daf04, 0x801db44c]
+    .sdata2: [0x803d9ad0, 0x803d9ad8]
+    .sbss2: [0x803dc0d8, 0x803dc0e0]
+
+src/Osako/TARecord.cpp:
+    .text: [0x801db44c, 0x801db504]
+
+src/Osako/SystemRecord.cpp:
+    .text: [0x801db504, 0x801dbecc]
+    .ctors: [0x802d87a8, 0x802d87ac]
+    .data: [0x8035ca08, 0x8035cbb8]
+    .bss: [0x803a3e80, 0x803a3eb0]
+    .sdata2: [0x803d9ad8, 0x803d9ae0]
+
+src/Osako/GPRecord.cpp:
+    .text: [0x801dbecc, 0x801dc010]
+
+src/Osako/SaveFile.cpp:
+    .text: [0x801dc010, 0x801dc0b4]
+    #.bss: [0x803c65f4, 0x803c6a00]
+    .sbss: [0x803d5c90, 0x803d5c98]
+
+src/Osako/PadMgr.cpp:
+    .text: [0x801dc0b4, 0x801dc588]
+    .ctors: [0x802d87ac, 0x802d87b0]
+    .bss: [0x803a3eb0, 0x803a3ee0]
+    .sbss: [0x803d5c98, 0x803d5ca0]
+
+src/Osako/PadRecorder.cpp:
+    .text: [0x801dc588, 0x801dcdf4]
+
+src/Osako/ForceEffectMgr.cpp:
+    .text: [0x801dcdf4, 0x801dcf90]
+    .data: [0x8035cbb8, 0x8035cbc8]
+    .sbss: [0x803d5ca0, 0x803d5ca8]
+
+src/Osako/AwardApp.cpp:
+    .text: [0x801ddb68, 0x801dddb8]
+    .ctors: [0x802d87b4, 0x802d87b8]
+    .data: [0x8035cc88, 0x8035cca0]
+    .bss: [0x803ac558, 0x803ac588]
+    .sbss: [0x803d5cb0, 0x803d5cb8]
+    .sdata2: [0x803d9b10, 0x803d9b18]
+
+src/Osako/GhostFile.cpp:
+    .text: [0x801dddb8, 0x801de664]
+    .ctors: [0x802d87b8, 0x802d87bc]
+    .rodata: [0x80340ff8, 0x80341018]
+    .data: [0x8035cca0, 0x8035ccf8]
+    .bss: [0x803ac588, 0x803ac598]
+    #.bss: [0x803c6a00, 0x803c6a00 + 0xa060]
+    .sdata2: [0x803d9b18, 0x803d9b20]
+
+src/Osako/Kart2DCommon.cpp:
+    .text: [0x801de664, 0x801dec78]
+    .rodata: [0x80341018, 0x80341208]
+    .data: [0x8035ccf8, 0x8035ce00]
+    .sdata: [0x803d3b10, 0x803d3b18]
+    .sbss: [0x803d5cb8, 0x803d5cc0]
+    .sdata2: [0x803d9b20, 0x803d9c70]
+
+src/Osako/ResetAgent.cpp:
+    .text: [0x801dec78, 0x801df038]
+    .ctors: [0x802d87bc, 0x802d87c0]
+    .bss: [0x803ac598, 0x803ac5c8]
+    .sbss: [0x803d5cc0, 0x803d5cd0]
+
+src/Osako/MenuBackground.cpp:
+    .text: [0x801e7124, 0x801e7210]
+    .rodata: [0x80341808, 0x80341828]
+    .sbss: [0x803d5cd0, 0x803d5cd8]
+    .sdata2: [0x803d9d10, 0x803d9d18]
+
+src/Osako/MenuTitleLine.cpp:
+    .text: [0x801e7210, 0x801e758c]
+    .rodata: [0x80341828, 0x80341938]
+    .data: [0x8035cf98, 0x8035cfc8]
+    .sbss: [0x803d5cd8, 0x803d5ce0]
+    .sdata2: [0x803d9d18, 0x803d9d20]
+
+src/Osako/GIRecord.cpp:
+    .text: [0x801e758c, 0x801e76a8]
+
+src/Osako/password.cpp:
+    .text: [0x801e76a8, 0x801e7a8c]
+    .rodata: [0x80341938, 0x803419a0]
+
+src/Sato/stMath.cpp:
+    .text: [0x801ebb10, 0x801ed470] 
+    .data: [0x8035d110, 0x8035d128]
+    .sdata: [0x803d3b78, 0x803d3b80]
+    .sbss: [0x803d5cf8, 0x803d5d00]
+    .sdata2: [0x803d9d60, 0x803d9db0]
+
+src/Sato/stEfctWeed.cpp:
+    .text: [0x8021d0f4, 0x8021d410]
+    .ctors: [0x802d881c, 0x802d8820]
+    .data: [0x803602f0, 0x80360320]
+    .bss: [0x803acad8, 0x803acb08]
+    .sdata: [0x803d3e48, 0x803d3e58]
+    .sbss: [0x803d5df0, 0x803d5df8]
+    .sdata2: [0x803da100, 0x803da108]
+
+src/Sato/ItemKinoko.cpp:
+    .text: [0x8021d410, 0x8021dfec]
+    .ctors: [0x802d8820, 0x802d8824]
+    .rodata: [0x80342750, 0x80342798]
+    .data: [ 0x80360320, 0x803605a8]    
+    .bss: [0x803acb08, 0x803acb38]
+    .sdata: [0x803d3e58, 0x803d3e68]
+    .sbss: [0x803d5df8, 0x803d5e10]
+    .sdata2: [0x803da108, 0x803da128]
+
+src/Sato/RivalKart.cpp:
+    .text: [0x8023586c, 0x80235d80]
+    .ctors: [0x802d885c, 0x802d8860]
+    .data: [0x803616c0, 0x803616d8]
+    .bss: [0x803acfa0, 0x803acfd0]
+
+src/Sato/ItemFlyTurtle.cpp:
+    .text: [0x8023cbe0, 0x8023f0c8]
+    .ctors: [0x802d8870, 0x802d8874]
+    .rodata: [0x803431b8, 0x80343220]
+    .data: [0x80361980, 0x80361a58]
+    .bss: [0x803ad0b0, 0x803ad0e0]
+    .sdata: [0x803d4180, 0x803d4210]
+    .sbss: [0x803d5f00, 0x803d5f10]
+    .sdata2: [0x803da520, 0x803da548]
+
+src/Sato/ItemHeart.cpp:
+    .text: [0x80248e0c, 0x802496a4]
+    .ctors: [0x802d8890, 0x802d8894]
+    .rodata: [0x80343430, 0x80343448]
+    .data: [0x803624f8, 0x803625c8]
+    .bss: [0x803ad268, 0x803ad298]
+    .sdata: [0x803d4370, 0x803d4380]
+    .sdata2: [0x803da660, 0x803da670]
+    .sbss2: [0x803dc118, 0x803dc120]
+
+src/Shiraiwa/WipeSlide.cpp:
+    .text: [0x80276fa8, 0x802779ac]
+    .ctors: [0x802d8948, 0x802d894c]
+    .data: [0x80367498, 0x803674c8]
+    .bss: [0x803adb98, 0x803adbc8]
+    .sdata: [0x803d45b8, 0x803d45c0]     
+    .sdata2: [0x803dade0, 0x803dae00]
+    .sbss2: [0x803dc120, 0x803dc128]
+
+src/Shiraiwa/WipeBase.cpp:
+    .text: [0x802779ac, 0x8027837c]
+    .ctors: [0x802d894c, 0x802d8950]
+    .rodata: [0x80344518, 0x80344560]
+    .data: [0x803674c8, 0x80367510]
+    .bss: [0x803adbc8, 0x803adbf8]
+    .sdata2: [0x803dae00, 0x803dae18]
+
+src/Shiraiwa/WipeCircle.cpp:
+    .text: [0x8027837c, 0x80278b90]
+    .ctors: [0x802d8950, 0x802d8954]
+    .data: [0x80367510, 0x80367540]
+    .bss: [0x803adbf8, 0x803adc28]
+    .sdata: [0x803d45c0, 0x803d45c8]  
+    .sbss: [0x803d6218, 0x803d6220]   
+    .sdata2: [0x803dae18, 0x803dae38]
+    .sbss2: [0x803dc128, 0x803dc130]
+
+src/Shiraiwa/WipeCheck.cpp:
+    .text: [0x80290320, 0x80290918]
+    .ctors: [0x802d89b0, 0x802d89b4]
+    .data: [0x8036a3c8, 0x8036a3f8]
+    .bss: [0x803ae0e8, 0x803ae118]
+    .sdata: [0x803d4798, 0x803d47a0]
+    .sdata2: [0x803db2f0, 0x803db308]
+
+src/Shiraiwa/WipeShut.cpp:
+    .text: [0x80290918, 0x80291270]
+    .ctors: [0x802d89b4, 0x802d89b8]
+    .data: [0x8036a3f8, 0x8036a428]
+    .bss: [0x803ae118, 0x803ae148]
+    .sdata: [0x803d47a0, 0x803d47b0]
+    .sbss: [0x803d6378, 0x803d6380]
+    .sdata2: [0x803db308, 0x803db330]
+
+src/Shiraiwa/WipeLine.cpp:
+    .text: [0x80291270, 0x80291b7c]
+    .ctors: [0x802d89b8, 0x802d89bc]
+    .data: [0x8036a428, 0x8036a488]
+    .bss: [0x803ae148, 0x803ae178]
+    .sdata: [0x803d47b0, 0x803d47c0]
+    .sbss: [0x803d6380, 0x803d6388]
+    .sdata2: [0x803db330, 0x803db350]
+
+src/Shiraiwa/WipeWave.cpp:
+    .text: [0x80291b7c, 0x80292364]
+    .ctors: [0x802d89bc, 0x802d89c0]
+    .data: [0x8036a488, 0x8036a4c0]
+    .bss: [0x803ae178, 0x803ae1a8]
+    .sdata: [0x803d47c0, 0x803d47d0]
+    .sbss: [0x803d6388, 0x803d6390]
+    .sdata2: [0x803db350, 0x803db368]
+
+src/Shiraiwa/WipeCurtain.cpp:
+    .text: [0x8029582c, 0x802961b4]
+    .ctors: [0x802d89cc, 0x802d89d0]
+    .data: [0x8036aae8, 0x8036ab18]
+    .bss: [0x803ae238, 0x803ae268]
+    .sdata: [0x803d4800, 0x803d4808]
+    .sbss: [0x803d63b0, 0x803d63b8]
+    .sdata2: [0x803db408, 0x803db428]
+    .sbss2: [0x803dc130, 0x803dc134]
+
+src/Yamamoto/kartCamera.cpp:    
+    .text: [0x8029dffc, 0x8029f4b8]
+    .ctors: [0x802d89dc, 0x802d89e0]
+    .data: [0x8036adf0, 0x8036b140]
+    .bss: [0x803ae2f0, 0x803ae320]
+    .sdata2: [0x803db590, 0x803db5a8]
+
+src/Yamamoto/kartCtrl.cpp:
+    .text: [0x8029f4b8, 0x802a0a60]
+    .ctors: [0x802d89e0, 0x802d89e4]
+    .bss: [0x803ae320, 0x803ae350]
+    .sbss: [0x803d63c8, 0x803d63e0]
+    .sdata2: [0x803db5a8, 0x803db5c0]    
+
+src/Yamamoto/kartvec.cpp:
+    .text: [0x802a20cc, 0x802a320c]
+    .ctors: [0x802d89e8, 0x802d89ec]
+    .bss: [0x803ae380, 0x803ae3b0]
+    .sdata2: [0x803db638, 0x803db670]
+
+src/Yamamoto/kartLine.cpp:
+    .text: [0x802b075c, 0x802b0944]
+    .ctors: [0x802d89f8, 0x802d89fc]
+    .bss: [0x803ae440, 0x803ae470]
+    .sdata2: [0x803db998, 0x803db9a0]
+
+src/Yamamoto/KartSound.cpp:
+    .text: [0x802bcf8c, 0x802be490]
+    .ctors: [0x802d8a0c, 0x802d8a10]
+    .rodata: [0x80345e60, 0x80345eb8]
+    .bss: [0x803ae530, 0x803ae560]
+    .sdata2: [0x803dbbe8, 0x803dbc08]
+
+src/Yamamoto/KartTaeget.cpp:
+    .text: [0x802be490, 0x802be9e4]
+    .ctors: [0x802d8a10, 0x802d8a14]
+    .bss: [0x803ae560, 0x803ae590]
+    .sdata2: [0x803dbc08, 0x803dbc10]
+
+src/Yamamoto/KartDamage.cpp:
+    .text: [0x802c66cc, 0x802c796c]
+    .ctors: [0x802d8a28, 0x802d8a2c]
+    .bss: [0x803ae680, 0x803ae6b0]
+    .sdata2: [0x803dbd88, 0x803dbd90]
+
+src/Yamamoto/KartStar.cpp:
+    .text: [0x802c796c, 0x802c7c68]
+    .ctors: [0x802d8a2c, 0x802d8a30]
+    .bss: [0x803ae6b0, 0x803ae6e0]
+
+src/Yamamoto/KartTire.cpp:
+    .text: [0x802c7c68, 0x802c7da0]
+    .ctors: [0x802d8a30, 0x802d8a34]
+    .bss: [0x803ae6e0, 0x803ae710]
+
+src/Yamamoto/KartDisp.cpp:
+    .text: [0x802d21c0, 0x802d3fb4]
+    .ctors: [0x802d8a44, 0x802d8a48]
+    .rodata: [0x80346170, 0x80346c20]
+    .bss: [0x803ae7d0, 0x803ae800]
+    .sdata2: [0x803dbf88, 0x803dbff8]
+
+src/Yamamoto/KartHandle.cpp:
+    .text: [0x802d3fb4, 0x802d45bc]
+    .ctors: [0x802d8a48, 0x802d8a4c]
+    .data: [0x8036dd48, 0x8036dda8]
+    .bss: [0x803ae800, 0x803ae830]
+    .sdata2: [0x803dbff8, 0x803dc000]
+
+src/Yamamoto/KartApeendix.cpp:
+    .text: [0x802d45bc, 0x802d46f0]
+    .ctors: [0x802d8a4c, 0x802d8a50]
+    .bss: [0x803ae830, 0x803ae860]
+
+src/Yamamoto/KartPipe.cpp:
+    .text: [0x802d46f0, 0x802d5248]
+    .ctors: [0x802d8a50, 0x802d8a54]
+    .bss: [0x803ae860, 0x803ae890]
+
+src/Yamamoto/KartAnt.cpp:
+    .text: [0x802d5248, 0x802d5a44]
+    .ctors: [0x802d8a54, 0x802d8a58]
+    .bss: [0x803ae890, 0x803ae8c0]
+    .sdata2: [0x803dc030, 0x803dc050]
+
+src/Yamamoto/KartPerCam.cpp:
+    .text: [0x802d7670, 0x802d84a0]
+    .ctors: [0x802d8a5c, 0x802d8a80]
+    .bss: [0x803ae8f0, 0x803ae920]
+    .sdata2: [0x803dc068, 0x803dc0c0]
