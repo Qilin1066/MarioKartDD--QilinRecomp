@@ -78,7 +78,7 @@ Accesses found, by library (cells: accesses, then functions):
 
 ## Replaced functions the game calls
 
-`tools/analysis/check_replacements.py cfg.json --symbols symbols.txt --dol main.dol` lists them with their callers: 141 by direct call, and `__read_console` through MSL's `FILE` tables. No dropped function is called or pointed at by lifted code.
+`tools/analysis/check_replacements.py cfg.json --symbols symbols.txt --dol main.dol` lists them with their callers: 144 by direct call (141 of the SDK and the debugger stub, and the game's three aspect getters), and `__read_console` through MSL's `FILE` tables. No dropped function is called or pointed at by lifted code.
 
 ## C++ exceptions
 
@@ -88,4 +88,4 @@ The game can't throw. `extabindex` has five entries, all in the runtime's array 
 
 ## Not analysed yet
 
-Frame timing (`JFWDisplay` sleeps on alarms in `threadSleep` and `JFWDrawDoneAlarm` and waits for retraces through VI's replaced API; whether the game steps by frames or by time is not read), the interrupt sources lifted handlers expect (`__OSSetInterruptHandler` and `__OSUnmaskInterrupts` are called from lifted code), and the placement of data symbols (the map's `.data`, `.bss` and small-data objects in this DOL).
+Frame timing (`JFWDisplay` sleeps on alarms in `threadSleep` and `JFWDrawDoneAlarm` and waits for retraces through VI's replaced API; whether the game steps by frames or by time is not read), the interrupt sources lifted handlers expect (`__OSSetInterruptHandler` and `__OSUnmaskInterrupts` are called from lifted code), are still to do. Data symbols are placed now (`code-analysis.md`).
