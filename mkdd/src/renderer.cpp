@@ -161,6 +161,25 @@ struct PipelineKey {
     bool operator<(const PipelineKey& o) const { return std::memcmp(&k, &o.k, sizeof k) < 0; }
 };
 
+// A pixel shader's SPIR-V with early fragment tests declared: the depth test
+// and write come before the shader, and its discard then only keeps the
+// colour from being written. (One more execution mode beside the entry
+// point's own, rather than a second copy of every module in shaders.inc.)
+std::vector<uint32_t> with_early_tests(const uint32_t* code, size_t bytes) {
+    std::vector<uint32_t> out(code, code + bytes / 4);
+    for (size_t i = 5; i < out.size();) {
+        const uint32_t op = out[i] & 0xFFFFu, words = out[i] >> 16;
+        if (words == 0) break;
+        if (op == 16) {  // OpExecutionMode: entry point, mode
+            const uint32_t early[3] = {(3u << 16) | 16u, out[i + 1], 9u};  // EarlyFragmentTests
+            out.insert(out.begin() + long(i), early, early + 3);
+            return out;
+        }
+        i += words;
+    }
+    rt::fatal(nullptr, "render: a pixel shader with no execution mode to put early tests beside");
+}
+
 VkShaderModule module(VkDevice dev, const uint32_t* code, size_t bytes) {
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize = bytes;
@@ -197,6 +216,7 @@ struct Renderer::Impl {
 
     VkShaderModule gx_vert, gx_frag, gx_frag_depth, fs_vert, clear_frag, copy_frag;
     VkShaderModule gx_frag_stages[16];  // specialised, by TEV stage count
+    VkShaderModule gx_frag_early, gx_frag_stages_early[16];  // the same with early tests (PipelineKey::depth_out 2)
     VkDescriptorSetLayout states_layout, textures_layout, copy_set_layout;
     VkPipelineLayout gx_layout, clear_layout, copy_layout;
     std::map<PipelineKey, VkPipeline> pipelines;  // the ubershader's (main thread)
@@ -378,6 +398,14 @@ struct Renderer::Impl {
             size_t bytes;
         } kStages[16] = {{kGxFragStages1, sizeof kGxFragStages1}, {kGxFragStages2, sizeof kGxFragStages2}, {kGxFragStages3, sizeof kGxFragStages3}, {kGxFragStages4, sizeof kGxFragStages4}, {kGxFragStages5, sizeof kGxFragStages5}, {kGxFragStages6, sizeof kGxFragStages6}, {kGxFragStages7, sizeof kGxFragStages7}, {kGxFragStages8, sizeof kGxFragStages8}, {kGxFragStages9, sizeof kGxFragStages9}, {kGxFragStages10, sizeof kGxFragStages10}, {kGxFragStages11, sizeof kGxFragStages11}, {kGxFragStages12, sizeof kGxFragStages12}, {kGxFragStages13, sizeof kGxFragStages13}, {kGxFragStages14, sizeof kGxFragStages14}, {kGxFragStages15, sizeof kGxFragStages15}, {kGxFragStages16, sizeof kGxFragStages16}};
         for (unsigned i = 0; i < 16; ++i) gx_frag_stages[i] = module(gpu.device, kStages[i].code, kStages[i].bytes);
+        {
+            const auto early = [&](const uint32_t* code, size_t bytes) {
+                const std::vector<uint32_t> spv = with_early_tests(code, bytes);
+                return module(gpu.device, spv.data(), spv.size() * 4);
+            };
+            gx_frag_early = early(kGxFrag, sizeof kGxFrag);
+            for (unsigned i = 0; i < 16; ++i) gx_frag_stages_early[i] = early(kStages[i].code, kStages[i].bytes);
+        }
         fs_vert = module(gpu.device, kFullscreenVert, sizeof kFullscreenVert);
         clear_frag = module(gpu.device, kClearFrag, sizeof kClearFrag);
         copy_frag = module(gpu.device, kCopyFrag, sizeof kCopyFrag);
@@ -632,7 +660,9 @@ struct Renderer::Impl {
             for (uint32_t i = 0; i <= gx::kShapeWords; ++i) entries[i] = {i, uint32_t(i * sizeof(uint32_t)), sizeof(uint32_t)};
             info = {1 + gx::kShapeWords, entries, sizeof values, values};
         }
-        const VkShaderModule fs = shape ? gx_frag_stages[((*shape)[0] >> 10) & 15] : k.depth_out ? gx_frag_depth : gx_frag;
+        const bool early = k.depth_out == 2;
+        const VkShaderModule fs = shape ? (early ? gx_frag_stages_early : gx_frag_stages)[((*shape)[0] >> 10) & 15]
+                                  : k.depth_out == 1 ? gx_frag_depth : early ? gx_frag_early : gx_frag;
         return make_pipeline(gx_vert, fs, gx_layout, true, kTopology[k.topology], b, true, true, logic,
                              k.topology == 1 && gpu.wide_lines, shape ? &info : nullptr, k.small_vertices != 0, gpu.dynamic_blend);
     }
@@ -667,7 +697,7 @@ struct Renderer::Impl {
                 gx::ShapeWords w;
                 std::memcpy(w.data(), p + one, sizeof w);
                 const SpecKey key{k, gx::intern_shape(w)};
-                if (!k.depth_out && requested.insert(key).second) spec.push_back({false, key});
+                if (k.depth_out != 1 && requested.insert(key).second) spec.push_back({false, key});
                 p += one + sizeof w, n -= one + sizeof w;
             } else {
                 return;  // damaged: keep what was read
@@ -711,7 +741,7 @@ struct Renderer::Impl {
             // topology, depth-writing or not, either vertex layout) are all
             // built now, so no draw ever waits for one.
             for (uint8_t topology = 0; topology < 3; ++topology)
-                for (uint8_t depth_out = 0; depth_out < 2; ++depth_out)
+                for (uint8_t depth_out = 0; depth_out < 3; ++depth_out)
                     for (uint8_t small = 0; small < 2; ++small) {
                         gx::PipelineKey k{};
                         k.topology = topology, k.depth_out = depth_out, k.small_vertices = small;
@@ -773,7 +803,7 @@ struct Renderer::Impl {
     VkPipeline gx_pipeline_lookup(const gx::PipelineKey& raw, uint32_t shape) {
         ++draws_total;
         const gx::PipelineKey k = base_key(raw);
-        if (specialize != Specialize::kOff && specialize_on && !k.depth_out) {  // depth-writing draws (rare) keep the ubershader
+        if (specialize != Specialize::kOff && specialize_on && k.depth_out != 1) {  // depth-writing draws (rare) keep the ubershader
             const SpecKey key{k, shape};
             if (auto it = specialized.find(key); it != specialized.end()) {
                 ++draws_specialized;
@@ -1699,6 +1729,8 @@ struct Renderer::Impl {
         for (VkDescriptorSetLayout l : {states_layout, textures_layout, copy_set_layout}) vkDestroyDescriptorSetLayout(gpu.device, l, nullptr);
         for (VkShaderModule m : {gx_vert, gx_frag, gx_frag_depth, fs_vert, clear_frag, copy_frag}) vkDestroyShaderModule(gpu.device, m, nullptr);
         for (VkShaderModule m : gx_frag_stages) vkDestroyShaderModule(gpu.device, m, nullptr);
+        vkDestroyShaderModule(gpu.device, gx_frag_early, nullptr);
+        for (VkShaderModule m : gx_frag_stages_early) vkDestroyShaderModule(gpu.device, m, nullptr);
         if (timestamps) vkDestroyQueryPool(gpu.device, timestamps, nullptr);
         efb.destroy(gpu);
         if (efb_other.image) efb_other.destroy(gpu);

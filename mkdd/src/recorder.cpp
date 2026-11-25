@@ -798,6 +798,19 @@ PipelineKey pipeline_key(const uint32_t* bp, bool& alpha_target) {
     return k;
 }
 
+// The alpha test (BP 0xF3: two compares and how they combine) can't fail.
+constexpr bool alpha_test_passes(uint32_t test) {
+    const uint32_t a = (test >> 16) & 7, b = (test >> 19) & 7;  // 7 always, 0 never
+    switch ((test >> 22) & 3) {
+        case 0: return a == 7 && b == 7;                         // and
+        case 1: return a == 7 || b == 7;                         // or
+        case 2: return (a == 7 && b == 0) || (a == 0 && b == 7);  // xor
+        default: return (a == 7 && b == 7) || (a == 0 && b == 0);  // xnor
+    }
+}
+static_assert(alpha_test_passes((7u << 16) | (7u << 19)) && alpha_test_passes((1u << 22) | (7u << 16) | (4u << 19)) &&
+              !alpha_test_passes((6u << 16) | (7u << 19)) && !alpha_test_passes((1u << 22) | (6u << 16) | (3u << 19)));
+
 void viewport_and_scissor(const Registers& r, Draw& d) {
     const float wd = as_float(r.xf[0x101A]), ht = as_float(r.xf[0x101B]), z_range = as_float(r.xf[0x101C]);
     const float x_orig = as_float(r.xf[0x101D]), y_orig = as_float(r.xf[0x101E]), far_z = as_float(r.xf[0x101F]);
@@ -1157,6 +1170,9 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     // Z textures change the depth written only when Z is compared after texturing
     // (BP 0x43 bit 6 clear); then the shader writes depth.
     if (((r.bp[0xF5] >> 2) & 3) != 0 && d.depth_test && !((r.bp[0x43] >> 6) & 1)) d.pipeline.depth_out = 1;
+    // Z compared before texturing: the depth is written whatever the alpha test
+    // then says. Only a test that can fail needs the pipeline that orders it so.
+    else if (d.depth_test && d.depth_write && ((r.bp[0x43] >> 6) & 1) && !alpha_test_passes(r.bp[0xF3])) d.pipeline.depth_out = 2;
     viewport_and_scissor(r, d);
     bind_textures(r, d);
     d.primitive = g_primitive_serial;

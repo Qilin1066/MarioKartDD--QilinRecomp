@@ -100,7 +100,11 @@ struct PipelineKey {
     uint8_t op = 0, op_alpha = 0;                            // Vulkan blend ops
     uint8_t write_mask = 0xF;  // RGBA
     uint8_t logic = 0;        // logic op + 1, or 0 (approximated where the GPU has none)
-    uint8_t depth_out = 0;    // the shader writes depth: Z textures with the Z test after texturing
+    // 1: the shader writes depth (Z textures with the Z test after texturing).
+    // 2: the depth test and write come before the shader (BP 0x43 bit 6, GXSetZCompLoc
+    //    before texturing) and its alpha test can fail: a pixel the test drops has
+    //    written its depth all the same, as on the console.
+    uint8_t depth_out = 0;
     uint8_t small_vertices = 0;  // the draw's vertices are SmallVertex (Frame::small)
     bool operator==(const PipelineKey&) const = default;
 };

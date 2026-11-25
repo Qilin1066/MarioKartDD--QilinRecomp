@@ -793,6 +793,29 @@ void indexed_matrices(Target& t, Stream& st) {
           "a position matrix loaded by index from an array moves the quad: " + std::to_string(lit(px, 200, 100, 300, 200)) + " lit of 10000");
 }
 
+// GXSetZCompLoc: with Z compared before texturing a pixel the alpha test drops
+// has written its depth all the same (24 of this game's alpha-tested materials
+// are set so); compared after, it hasn't. A green quad that fails its alpha
+// test, nearer than the red one drawn next.
+void z_before_alpha_test(Target& t, Stream& st) {
+    int red[2] = {};
+    for (int before = 0; before < 2; ++before) {
+        stream_begin(st);
+        st.bp(0x43, before ? 1u << 6 : 0u);
+        st.bp(0xF3, (0u << 16) | (7u << 19));                      // alpha test: never and always
+        stream_quad(st, 0, 0, 640, 528, -0.2f, 0x00FF00FFu);
+        st.bp(0xF3, (7u << 16) | (7u << 19));
+        stream_quad(st, 0, 0, 640, 528, -0.5f, 0xFF0000FFu);
+        st.end_frame();
+        st.send();
+        const auto px = t.shown();
+        red[before] = at(px, 320, 264)[0];
+        if (at(px, 320, 264)[1] != 0) red[before] = -1;           // the green was drawn: the alpha test didn't drop it
+    }
+    check(red[0] == 255 && red[1] == 0, "a pixel dropped by the alpha test writes depth only with Z before texturing: red behind it " +
+                                            std::to_string(red[0]) + " after, " + std::to_string(red[1]) + " before");
+}
+
 // A texture's LOD bias (a fifth of this game's course textures have one): drawn one texel a
 // pixel, a bias of +1 takes the second level (black here; the first is white).
 void lod_bias(Target& t, Stream& st) {
@@ -896,6 +919,7 @@ int main(int argc, char** argv) {
         split_screen(t, st);
         indexed_matrices(t, st);
         lod_bias(t, st);
+        z_before_alpha_test(t, st);
         stream_begin(st), st.end_frame(), st.send();
         t.shown();
     }
