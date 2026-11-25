@@ -169,6 +169,7 @@ struct Copy {
     uint32_t dest_width, dest_height;
     uint32_t format;       // the copy's texture format (texture copies), see renderer.cpp
     bool to_xfb, half_scale, from_depth;
+    bool to_memory;        // also written to guest memory at `dest`, once the GPU has drawn it (4x4 at most, RGBA8's layout)
     bool efb_alpha;        // the EFB's pixel format has alpha (RGBA6_Z24); else a copy's alpha is 255
     int32_t texture;       // the id the copy becomes (texture copies)
     bool clear, clear_color, clear_alpha, clear_depth;

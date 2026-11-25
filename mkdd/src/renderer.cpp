@@ -124,6 +124,14 @@ struct Slot {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     Buffer vertices, indices, states, staging;
+    // Copies the CPU reads (gx::Copy::to_memory): four bytes a pixel in
+    // `readback`, written to guest memory once the fence has passed.
+    struct Readback {
+        VkDeviceSize at;
+        uint32_t dest, width, height;
+    };
+    Buffer readback;
+    std::vector<Readback> readbacks;
     VkDescriptorPool descriptors = VK_NULL_HANDLE;
     std::vector<Spare> garbage;  // images this frame stopped using: spare once its fence has passed
 };
@@ -1206,6 +1214,7 @@ struct Renderer::Impl {
             host::transition(cmd, target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             copy_dumps->push_back(std::move(dmp));
         }
+        if (c.to_memory && !c.to_xfb) read_back(cmd, s, c, *target);
         barrier(cmd);
         begin_efb(cmd);
         if (c.clear && (c.clear_color || c.clear_alpha || c.clear_depth)) {
@@ -1251,6 +1260,56 @@ struct Renderer::Impl {
             vkCmdPushConstants(cmd, clear_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof q, &q);
             vkCmdDraw(cmd, 3, 1, 0, 0);
         }
+    }
+
+    // A small copy for the CPU: one texel of each of its pixels (the middle
+    // one, above the console's resolution) into the slot's buffer.
+    void read_back(VkCommandBuffer cmd, Slot& s, const gx::Copy& c, const Image& target) {
+        constexpr VkDeviceSize kRoom = 4096;  // 64 copies a frame
+        if (!s.readback.buffer) s.readback = Buffer::host_visible(gpu, kRoom, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        const VkDeviceSize at = s.readbacks.empty() ? 0 : s.readbacks.back().at + 64;
+        if (at + 64 > kRoom) {
+            static bool said = false;
+            approximated(said, "more than 64 EFB copies for the CPU in a frame: the rest aren't written to memory");
+            return;
+        }
+        VkBufferImageCopy regions[16];
+        uint32_t n = 0;
+        for (uint32_t y = 0; y < c.dest_height; ++y)
+            for (uint32_t x = 0; x < c.dest_width; ++x) {
+                VkBufferImageCopy& r = regions[n++] = {};
+                r.bufferOffset = at + 4 * (y * 4 + x);
+                r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                r.imageOffset = {int32_t(x * scale + scale / 2), int32_t(y * scale + scale / 2), 0};
+                r.imageExtent = {1, 1, 1};
+            }
+        host::transition(cmd, target.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        vkCmdCopyImageToBuffer(cmd, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s.readback.buffer, n, regions);
+        host::transition(cmd, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        s.readbacks.push_back({at, c.dest & 0x1FFFFFFFu, c.dest_width, c.dest_height});
+    }
+    // The slot's GPU work is done: its copies for the CPU go to guest memory,
+    // as the texture the console would have written (a 4x4 tile: alpha and
+    // red of each pixel, then green and blue). The game's thread may be
+    // running: it sees the bytes a frame or two after the copy, where the
+    // console has them when the GPU reaches the copy.
+    void finish_readbacks(Slot& s) {
+        for (const Slot::Readback& r : s.readbacks) {
+            const uint8_t* px = static_cast<const uint8_t*>(s.readback.mapped) + r.at;
+            uint8_t* tile = rt::guest_ptr(0x80000000u | r.dest);
+            for (uint32_t y = 0; y < r.height; ++y)
+                for (uint32_t x = 0; x < r.width; ++x) {
+                    const uint32_t i = y * 4 + x;
+                    tile[2 * i] = px[4 * i + 3], tile[2 * i + 1] = px[4 * i];
+                    tile[32 + 2 * i] = px[4 * i + 1], tile[32 + 2 * i + 1] = px[4 * i + 2];
+                }
+        }
+        s.readbacks.clear();
+    }
+    // Readbacks of frames the GPU has finished, without waiting for it.
+    void poll_readbacks() {
+        for (Slot& s : slots)
+            if (!s.readbacks.empty() && vkGetFenceStatus(gpu.device, s.fence) == VK_SUCCESS) finish_readbacks(s);
     }
 
     void clamp_rect(VkRect2D& r) const {
@@ -1325,10 +1384,12 @@ struct Renderer::Impl {
 
     void render(gx::Frame& f) {
         collect_specialized();
+        poll_readbacks();  // the last frame's, if the GPU is done with it
         slot = (slot + 1) % 2;
         Slot& s = slots[slot];
         const uint64_t w0 = gx::now_ns();  // the GPU finishing the frame before last
         check(vkWaitForFences(gpu.device, 1, &s.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+        finish_readbacks(s);
         gx::recorder_stats().gpu_wait_ns.fetch_add(gx::now_ns() - w0, std::memory_order_relaxed);
         if (timed[slot]) {  // the frame this slot drew last: done (its fence passed)
             uint64_t t[2];
@@ -1619,6 +1680,7 @@ struct Renderer::Impl {
             s.indices.destroy(gpu);
             s.states.destroy(gpu);
             s.staging.destroy(gpu);
+            s.readback.destroy(gpu);
             vkDestroyDescriptorPool(gpu.device, s.descriptors, nullptr);
             vkDestroyFence(gpu.device, s.fence, nullptr);
             vkDestroyCommandPool(gpu.device, s.pool, nullptr);
@@ -1661,6 +1723,10 @@ void Renderer::save_now() {
     impl_->save_now(keys);
 }
 Renderer::~Renderer() { impl_->destroy(); }
+void Renderer::finish_copies() {
+    vkDeviceWaitIdle(impl_->gpu.device);
+    impl_->poll_readbacks();
+}
 void Renderer::render(gx::Frame& frame) {
     const uint64_t t0 = gx::now_ns();
     impl_->render(frame);

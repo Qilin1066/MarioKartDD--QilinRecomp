@@ -23,6 +23,10 @@ public:
     // The latest external frame buffer copied to `address` (in
     // TRANSFER_SRC_OPTIMAL layout, sampled usage), or null if there's none.
     const qilin::host::Image* xfb(uint32_t address) const;
+    // EFB copies the CPU reads (the small ones: gx::Copy::to_memory) reach
+    // guest memory when a later render() finds their frame drawn; this waits
+    // for the GPU and writes them now (the tests; the end of a replay).
+    void finish_copies();
     // Anisotropic filtering for the game's textures: 1 (the console's), 2, 4,
     // 8 or 16, up to what the GPU allows. Waits for the GPU.
     void set_anisotropy(unsigned level);

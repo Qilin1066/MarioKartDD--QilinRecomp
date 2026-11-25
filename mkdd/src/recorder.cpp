@@ -1250,6 +1250,11 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         c.filter[1] = uint8_t(tap(2) + tap(3) + tap(4));
         c.filter[2] = uint8_t(tap(5) + tap(6));
     }
+    // Not a copy of depth: its bytes are one number, not three channels to
+    // blend with the lines around (Dolphin leaves the filter out of them too).
+    // This game keeps its deflicker weights set all frame and copies depth
+    // in mid-frame (the heat shimmer, the Z the CPU reads back).
+    if (c.from_depth && !c.to_xfb) c.filter[0] = 0, c.filter[1] = 64, c.filter[2] = 0;
     c.clamp_top = command & 1;
     c.clamp_bottom = (command >> 1) & 1;
     const uint32_t blend = r.bp[0x41];
@@ -1274,6 +1279,12 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         c.dest_width = uint32_t(c.half_scale ? c.src[2] / 2 : c.src[2]);
         c.dest_height = uint32_t(c.half_scale ? c.src[3] / 2 : c.src[3]);
         c.texture = texture_from_copy(c.dest, c.dest_width, c.dest_height, f);
+        // A copy of one tile or less in the 32-bit layout (RGBA8, Z24X8) also
+        // goes to guest memory, for the CPU: the game copies 2x2 pixels of
+        // depth and reads them to see whether a player's mark or the sun is
+        // hidden (ZCaptureNode, doldecomp's name). Larger copies stay on the
+        // GPU: this game reads none of them (docs/graphics.md).
+        c.to_memory = c.dest_width <= 4 && c.dest_height <= 4 && (c.format & 0xFF) == 6 && in_memory(c.dest & 0x1FFFFFFFu, 64);
     }
     f.packets.push_back({Packet::kCopy, uint32_t(f.copies.size())});
     f.copies.push_back(c);
