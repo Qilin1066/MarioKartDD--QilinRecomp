@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64-gcc14,   os: ubuntu-24.04,     cc: gcc-14,   cxx: g++-14, sweep: true }
+          - { name: linux-x64-clang19, os: ubuntu-24.04,     cc: clang-19, cxx: clang++-19 }
+          - { name: linux-arm64-gcc14, os: ubuntu-24.04-arm, cc: gcc-14,   cxx: g++-14 }
+          # macOS: the runtime is built for 10.15 (CMakeLists.txt's default), the tools for 13.3, on Apple Silicon and Intel.
+          - { name: macos-arm64,       os: macos-latest }
+          - { name: macos-x64,         os: macos-15-intel }
+          - { name: windows-x64,       os: windows-2022 }
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Timing test image dependency
+        run: python -m pip install Pillow
+      # GCC 14's libstdc++ provides <print>; Clang on Linux uses it too.
+      - name: Install compilers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 ${{ startsWith(matrix.cc, 'clang') && matrix.cc || '' }} ${{ matrix.sweep && 'binutils-powerpc-linux-gnu' || '' }}
+          # What SDL3 (fetched by CMake) builds against on Linux: without X11 or Wayland it refuses to configure.
+          sudo apt-get install -y -qq libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+            libxtst-dev libxfixes-dev libxkbcommon-dev libwayland-dev libdecor-0-dev libegl-dev libdrm-dev libgbm-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev
+          sudo apt-get install -y -qq xvfb xauth libvulkan1 mesa-vulkan-drivers
+      - name: Configure
+        shell: bash
+        run: |
+          args=()
+          if [ -n "${{ matrix.cxx }}" ]; then
+            args+=(-DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }})
+          fi
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DQILIN_WERROR=ON "${args[@]}"
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            # Require a software Vulkan device and a desktop for graphical tests.
+            xvfb-run -a env QILIN_REQUIRE_GRAPHICS=1 ctest --test-dir build -C Release --output-on-failure
+          else
+            ctest --test-dir build -C Release --output-on-failure
+          fi
+      - name: Scheduler, save and audio sanitizers
+        if: matrix.sweep
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug -DQILIN_SANITIZE=address,undefined -DQILIN_WERROR=ON \
+            -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
+            -DFETCHCONTENT_SOURCE_DIR_SDL3="$PWD/build/_deps/sdl3-src" \
+            -DFETCHCONTENT_SOURCE_DIR_VULKANHEADERS="$PWD/build/_deps/vulkanheaders-src" \
+            -DFETCHCONTENT_SOURCE_DIR_VOLK="$PWD/build/_deps/volk-src" \
+            -DFETCHCONTENT_SOURCE_DIR_IMGUI="$PWD/build/_deps/imgui-src"
+          cmake --build build-sanitize --parallel 2 --target mkdd_threads_test mkdd_save_history_test mkdd_nand_test qilin_audio_callback_test
+          ctest --test-dir build-sanitize -R 'mkdd_(threads|save_history|nand)_test|qilin_audio_callback_test' --output-on-failure
+      # The decoder against GNU objdump over a sweep of the encoding space (no game files needed).
+      - name: Decoder sweep
+        if: matrix.sweep
+        run: python3 tools/check/verify_decoder.py --qilin build/qilin --sweep
+      # The analysis scripts need the game to run; check they at least compile.
+      - name: Analysis scripts compile
+        if: matrix.sweep
+        run: python3 -m py_compile tools/analysis/identify_libraries.py tools/analysis/hardware_access.py tools/check/verify_decoder.py
+      # The game's shaders are committed as SPIR-V; check that it matches the sources and that they compile.
+      - name: Shaders up to date
+        if: matrix.sweep
+        run: |
+          sudo apt-get install -y glslang-tools
+          python3 tools/build_shaders.py --check
