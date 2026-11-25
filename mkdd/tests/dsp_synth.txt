@@ -1,0 +1,180 @@
+; A synthetic DSP program for mkdd_dsp_test (dsp_test.cpp says what it does and checks).
+; Hexadecimal words; qilin-dsp lifts it with --roots 00e8,00ea. Written for this test: not game code.
+029f 0012 ; 0000  jmp 0x0012
+0000      ; 0002  nop
+0000      ; 0003  nop
+02ff      ; 0004  rti
+0000      ; 0005  nop
+02ff      ; 0006  rti
+0000      ; 0007  nop
+02ff      ; 0008  rti
+0000      ; 0009  nop
+02ff      ; 000a  rti
+0000      ; 000b  nop
+02ff      ; 000c  rti
+0000      ; 000d  nop
+029f 0109 ; 000e  jmp 0x0109
+029f 0012 ; 0010  jmp 0x0012
+1205      ; 0012  sbclr #0x0005
+8e00      ; 0013  set16
+8b00      ; 0014  m0
+8c00      ; 0015  clr15
+0092 00ff ; 0016  lri $config, #0x00ff
+0088 ffff ; 0018  lri $wr0, #0xffff
+0089 ffff ; 001a  lri $wr1, #0xffff
+008a ffff ; 001c  lri $wr2, #0xffff
+008b ffff ; 001e  lri $wr3, #0xffff
+009e 0001 ; 0020  lri $ac0.m, #0x0001
+02bf 00f8 ; 0022  call 0x00f8
+02bf 0103 ; 0024  call 0x0103
+21ff      ; 0026  lrs $ax1.l, @0xff
+00f9 0030 ; 0027  sr @0x0030, $ax1.l
+02bf 0103 ; 0029  call 0x0103
+24ff      ; 002b  lrs $ac0.l, @0xff
+00fe 0031 ; 002c  sr @0x0031, $ac0.m
+00fc 0032 ; 002e  sr @0x0032, $ac0.l
+16c9 0000 ; 0030  si @0xc9, #0x0000  ; DSCR
+16cd 0100 ; 0032  si @0xcd, #0x0100  ; DSPA
+2ece      ; 0034  srs @0xce, $ac0.m
+2ccf      ; 0035  srs @0xcf, $ac0.l
+00df 0030 ; 0036  lr $ac1.m, @0x0030
+1501      ; 0038  lsl $ac1, #1
+2fcb      ; 0039  srs @0xcb, $ac1.m
+0098 4000 ; 003a  lri $ax0.l, #0x4000
+00f8 0420 ; 003c  sr @0x0420, $ax0.l
+0098 2000 ; 003e  lri $ax0.l, #0x2000
+00f8 0421 ; 0040  sr @0x0421, $ax0.l
+0098 e000 ; 0042  lri $ax0.l, #0xe000
+00f8 0422 ; 0044  sr @0x0422, $ax0.l
+0081 0100 ; 0046  lri $ar1, #0x0100
+0082 0200 ; 0048  lri $ar2, #0x0200
+00df 0030 ; 004a  lr $ac1.m, @0x0030
+05fe      ; 004c  addis $ac1, #-2
+007f 0057 ; 004d  bloop $ac1.m, 0x0057
+1c01      ; 004f  mrr $ar0, $ar1
+0083 0420 ; 0050  lri $ar3, #0x0420
+84c3      ; 0052  clrp'ldax : $ax0, @$ar0
+f2c3      ; 0053  madd'ldax $ax0.l, $ax0.h : $ax0, @$ar0
+f2c3      ; 0054  madd'ldax $ax0.l, $ax0.h : $ax0, @$ar0
+f200      ; 0055  madd $ax0.l, $ax0.h
+6e09      ; 0056  movp'ir $ac0 : $ar1
+1b5e      ; 0057  srri @$ar2, $ac0.m  ; loop end
+8f00      ; 0058  set40
+0081 0100 ; 0059  lri $ar1, #0x0100
+0082 0280 ; 005b  lri $ar2, #0x0280
+009b 7fff ; 005d  lri $ax1.h, #0x7fff
+1008      ; 005f  loopi #0x0008
+193a      ; 0060  lrri $ax0.h, @$ar1
+0081 0100 ; 0061  lri $ar1, #0x0100
+1108 0069 ; 0063  bloopi #0x0008, 0x0069
+193a      ; 0065  lrri $ax0.h, @$ar1
+b800      ; 0066  mulx $ax0.h, $ax1.h
+6f00      ; 0067  movp $ac1
+1503      ; 0068  lsl $ac1, #3
+1b5f      ; 0069  srri @$ar2, $ac1.m  ; loop end
+8e00      ; 006a  set16
+008a 0003 ; 006b  lri $wr2, #0x0003
+0082 0040 ; 006d  lri $ar2, #0x0040
+009f 0a00 ; 006f  lri $ac1.m, #0x0a00
+110c 0074 ; 0071  bloopi #0x000c, 0x0074
+1b5f      ; 0073  srri @$ar2, $ac1.m
+7500      ; 0074  incm $acs1  ; loop end
+008a ffff ; 0075  lri $wr2, #0xffff
+16d1 000a ; 0077  si @0xd1, #0x000a  ; FORMAT
+16d6 ffff ; 0079  si @0xd6, #0xffff  ; ACEAH
+16d7 ffff ; 007b  si @0xd7, #0xffff  ; ACEAL
+16d8 8000 ; 007d  si @0xd8, #0x8000  ; ACCAH
+16d9 0100 ; 007f  si @0xd9, #0x0100  ; ACCAL
+0082 0200 ; 0081  lri $ar2, #0x0200
+1110 0086 ; 0083  bloopi #0x0010, 0x0086
+195e      ; 0085  lrri $ac0.m, @$ar2
+2ed3      ; 0086  srs @0xd3, $ac0.m  ; loop end
+16d8 0000 ; 0087  si @0xd8, #0x0000  ; ACCAH
+16d9 0102 ; 0089  si @0xd9, #0x0102  ; ACCAL
+0082 0300 ; 008b  lri $ar2, #0x0300
+0080 ffd3 ; 008d  lri $ar0, #0xffd3
+0084 0000 ; 008f  lri $ix0, #0x0000
+1104 0094 ; 0091  bloopi #0x0004, 0x0094
+199e      ; 0093  lrrn $ac0.m, @$ar0
+1b5e      ; 0094  srri @$ar2, $ac0.m  ; loop end
+8100      ; 0095  clr $ac0
+8900      ; 0096  clr $ac1
+00de 0200 ; 0097  lr $ac0.m, @0x0200
+00df 0201 ; 0099  lr $ac1.m, @0x0201
+8f00      ; 009b  set40
+00de 0200 ; 009c  lr $ac0.m, @0x0200
+00df 0201 ; 009e  lr $ac1.m, @0x0201
+8e00      ; 00a0  set16
+8200      ; 00a1  cmp
+0270      ; 00a2  ifge
+1ffe      ; 00a3  mrr $ac1.m, $ac0.m
+00ff 0310 ; 00a4  sr @0x0310, $ac1.m
+009e 8421 ; 00a6  lri $ac0.m, #0x8421
+009c 1248 ; 00a8  lri $ac0.l, #0x1248
+0090 00ff ; 00aa  lri $ac0.h, #0x00ff
+14fc      ; 00ac  asr $ac0, #4
+00fe 0311 ; 00ad  sr @0x0311, $ac0.m
+00fc 0312 ; 00af  sr @0x0312, $ac0.l
+1478      ; 00b1  lsr $ac0, #8
+00fe 0313 ; 00b2  sr @0x0313, $ac0.m
+00fc 0314 ; 00b4  sr @0x0314, $ac0.l
+009a 007c ; 00b6  lri $ax0.h, #0x007c
+3880      ; 00b8  asrnrx $ac0, $ax0.h
+00fe 0315 ; 00b9  sr @0x0315, $ac0.m
+16c9 0001 ; 00bb  si @0xc9, #0x0001  ; DSCR
+16cd 0200 ; 00bd  si @0xcd, #0x0200  ; DSPA
+00de 0031 ; 00bf  lr $ac0.m, @0x0031
+00dc 0032 ; 00c1  lr $ac0.l, @0x0032
+0098 0040 ; 00c3  lri $ax0.l, #0x0040
+009a 0000 ; 00c5  lri $ax0.h, #0x0000
+4800      ; 00c7  addax $ac0, $ax0
+2ece      ; 00c8  srs @0xce, $ac0.m
+2ccf      ; 00c9  srs @0xcf, $ac0.l
+16cb 0020 ; 00ca  si @0xcb, #0x0020  ; DSBL
+009e 0002 ; 00cc  lri $ac0.m, #0x0002
+02bf 00f8 ; 00ce  call 0x00f8
+009e 0000 ; 00d0  lri $ac0.m, #0x0000
+00fe 0010 ; 00d2  sr @0x0010, $ac0.m
+1305      ; 00d4  sbset #0x0005
+00da 0010 ; 00d5  lr $ax0.h, @0x0010
+8600      ; 00d7  tstaxh $ax0.h
+0295 00d5 ; 00d8  jz 0x00d5
+1205      ; 00da  sbclr #0x0005
+009e 0000 ; 00db  lri $ac0.m, #0x0000
+00fe 0010 ; 00dd  sr @0x0010, $ac0.m
+00de 0011 ; 00df  lr $ac0.m, @0x0011
+0240 0001 ; 00e1  andi $ac0.m, #0x0001
+1401      ; 00e3  lsl $ac0, #1
+0200 00e8 ; 00e4  addi $ac0, #0x00e8
+1c1e      ; 00e6  mrr $ar0, $ac0.m
+170f      ; 00e7  jr $ar0
+029f 00ec ; 00e8  jmp 0x00ec
+029f 00f3 ; 00ea  jmp 0x00f3
+009e 0e0e ; 00ec  lri $ac0.m, #0x0e0e
+02bf 00f8 ; 00ee  call 0x00f8
+1305      ; 00f0  sbset #0x0005
+029f 00d5 ; 00f1  jmp 0x00d5
+009e 0d0d ; 00f3  lri $ac0.m, #0x0d0d
+02bf 00f8 ; 00f5  call 0x00f8
+0021      ; 00f7  halt
+16fc 8888 ; 00f8  si @0xfc, #0x8888  ; DMBH
+2efd      ; 00fa  srs @0xfd, $ac0.m
+16fb 0001 ; 00fb  si @0xfb, #0x0001  ; DIRQ
+27fc      ; 00fd  lrs $ac1.m, @0xfc
+03c0 8000 ; 00fe  andcf $ac1.m, #0x8000
+029d 00fd ; 0100  jlz 0x00fd
+02df      ; 0102  ret
+26fe      ; 0103  lrs $ac0.m, @0xfe
+02c0 8000 ; 0104  andcf $ac0.m, #0x8000
+029c 0103 ; 0106  jlnz 0x0103
+02df      ; 0108  ret
+00fe 003e ; 0109  sr @0x003e, $ac0.m
+00fa 003f ; 010b  sr @0x003f, $ax0.h
+00de ffff ; 010d  lr $ac0.m, @CMBL
+00fe 0011 ; 010f  sr @0x0011, $ac0.m
+00de 0010 ; 0111  lr $ac0.m, @0x0010
+7400      ; 0113  incm $acs0
+00fe 0010 ; 0114  sr @0x0010, $ac0.m
+00de 003e ; 0116  lr $ac0.m, @0x003e
+00da 003f ; 0118  lr $ax0.h, @0x003f
+02ff      ; 011a  rti
