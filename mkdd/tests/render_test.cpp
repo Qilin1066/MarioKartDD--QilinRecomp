@@ -1697,7 +1697,7 @@ int pipe_bytes(bool bench) {
             uint64_t t0 = gx::now_ns();
             for (uint32_t i = 0; i < kStores; ++i) rt::write32(c, 0xCC008000u, i);
             uint64_t t1 = gx::now_ns();
-            for (uint32_t i = 0; i < kStores; ++i) rt::write_slow(c, 0xCC008000u, i, 4);
+            for (uint32_t i = 0; i < kStores; ++i) rt::write_slow<4>(c, 0xCC008000u, i);
             uint64_t t2 = gx::now_ns();
             std::printf("pipe: a word store %.2f ns as lifted code makes it, %.2f ns by the slow branch (bursts to memory included)\n",
                         double(t1 - t0) / kStores, double(t2 - t1) / kStores);
