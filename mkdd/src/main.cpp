@@ -525,7 +525,7 @@ int main(int argc, char** argv) {
     const char* every_text = std::getenv("MKDD_DUMP_EVERY");
     const uint64_t every = every_text ? std::max<uint64_t>(1, std::strtoull(every_text, nullptr, 10)) : 60;
     const uint32_t dump_w = 1280, dump_h = 960;  // the offscreen target's size (above)
-    const uint32_t dump_burst = [] {  // MKDD_DUMP_BURST=n: n pictures in a row each time (to compare neighbours)
+    const uint32_t dump_burst = [] {  // MKDD_DUMP_BURST=n: see the dump, at the end of the loop
         const char* t = std::getenv("MKDD_DUMP_BURST");
         return t ? uint32_t(std::clamp(std::atoi(t), 1, 16)) : 1u;
     }();
@@ -776,22 +776,44 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        if (dump && ++shown % every < dump_burst) {
-            const std::vector<uint8_t> px = display->read_back();
-            char name[512];
-            if (shown % every == 0)
-                std::snprintf(name, sizeof name, "%s/frame%05llu.ppm", dump, static_cast<unsigned long long>(shown / every));
-            else  // (MKDD_DUMP_BURST: the pictures after it, a, b, c ...)
-                std::snprintf(name, sizeof name, "%s/frame%05llu%c.ppm", dump, static_cast<unsigned long long>(shown / every),
-                              char('a' + shown % every - 1));
-            if (FILE* fp = std::fopen(name, "wb")) {
+        if (dump && ++shown % every == 0) {
+            const auto write = [&](const char* name, const std::vector<uint8_t>& px, double phase) {
+                FILE* fp = std::fopen(name, "wb");
+                if (!fp) return;
                 std::fprintf(fp, "P6\n%u %u\n255\n", dump_w, dump_h);
-                for (size_t i = 0; i + 3 < px.size(); i += 4) std::fwrite(&px[i], 1, 3, fp);
+                std::vector<uint8_t> rgb(px.size() / 4 * 3);
+                for (size_t n = 0; n < px.size() / 4; ++n) std::memcpy(&rgb[n * 3], &px[n * 4], 3);
+                std::fwrite(rgb.data(), 1, rgb.size(), fp);
                 std::fclose(fp);
                 dump_index << std::filesystem::path(name).filename().string() << ',' << sequence << '\n';
                 dump_index.flush();
                 if (!dump_index) rt::fatal(nullptr, "capture frame index write failed");
-                rt::log("dumped %s at %.1f s of game time (phase %.3f)", name, mkdd::frame_count() / 60.0, shown_phase);
+                rt::log("dumped %s at %.1f s of game time (phase %.3f)", name, mkdd::frame_count() / 60.0, phase);
+            };
+            char name[512];
+            std::snprintf(name, sizeof name, "%s/frame%05llu.ppm", dump, static_cast<unsigned long long>(shown / every));
+            write(name, display->read_back(), shown_phase);
+            // MKDD_DUMP_BURST=n, with pictures between frames: the same two frames at phases 1/n to
+            // n/n as well (whatever the clock says), for comparing a picture between with its
+            // neighbours: frame00012_1of4.ppm ... The last is the newest frame itself.
+            if (const mkdd::gx::Frame* held = between && dump_burst > 1 && vi_xfb ? renderer->held() : nullptr) {
+                for (uint32_t k = 1; k <= dump_burst; ++k) {
+                    const double phase = double(k) / double(dump_burst);
+                    const qilin::host::Image* x = k < dump_burst ? renderer->render_between(float(phase)) : nullptr;
+                    const bool blended = x != nullptr;
+                    if (!x) {
+                        uint32_t at = vi_xfb;
+                        for (const auto& c : held->copies)
+                            if (c.to_xfb) at = c.dest;
+                        x = renderer->xfb(at);
+                    }
+                    if (!x) break;
+                    display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(),
+                                           vi_h ? vi_h : x->height / renderer->scale());
+                    std::snprintf(name, sizeof name, "%s/frame%05llu_%uof%u%s.ppm", dump, static_cast<unsigned long long>(shown / every), k,
+                                  dump_burst, blended || k == dump_burst ? "" : "_unblended");
+                    write(name, display->read_back(), phase);
+                }
             }
         }
     }

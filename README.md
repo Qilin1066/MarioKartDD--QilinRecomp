@@ -11,7 +11,7 @@ A static recompilation of **Mario Kart: Double Dash!!** (Nintendo, GameCube, 200
 | Part | State |
 |---|---|
 | Disc reader | ✅ `.iso`, `.gcm`, `.ciso` images and extracted folders, read in place (`docs/disc.md`) |
-| Recompiler (decoder, function discovery, lifter) | ✅ for this DOL: 13,472 functions found, 12,755 lifted to C++ with no stubs, the rest replaced or dropped by the plan (`docs/recompiler-core.md`, `docs/dol-analysis.md`) |
+| Recompiler (decoder, function discovery, lifter) | ✅ for this DOL: 13,472 functions found, 12,754 lifted to C++ with no stubs, the rest replaced or dropped by the plan (`docs/recompiler-core.md`, `docs/dol-analysis.md`) |
 | Names and the library plan (`data/GM4E01/plan.tsv`) | ✅ names ported from the disc's own map of its debug build; what is lifted, replaced or dropped, library by library (`docs/code-analysis.md`) |
 | DSP microcode | ✅ the game's own sound-processor program, recompiled to C++ from the player's DOL at build time (`qilin-dsp`, `docs/audio.md`) |
 | Controllers, memory cards, audio RAM | 🔨 written and tested against the SDK's interfaces, not against the running game (`docs/input.md`, `docs/saves.md`) |
@@ -19,7 +19,7 @@ A static recompilation of **Mario Kart: Double Dash!!** (Nintendo, GameCube, 200
 | Sound | 🔨 the DSP and its microcode tested apart from the game (`docs/audio.md`) |
 | Runtime: OS, disc, video, threads, start-up | 🔨 in development (`docs/runtime.md` still describes parts of the Wii project it came from) |
 | Window, settings menu, picture, sound output | 🔨 written; tested offscreen and by unit tests only (below) |
-| Wider pictures, higher frame rates | 🔨 analysed and designed from the game's code (`docs/enhancements.md`); not implemented |
+| Wider pictures, higher frame rates | 🔨 written from an analysis of the game's code (`docs/enhancements.md`, `docs/graphics.md`), tested apart from the game; not seen with it |
 | The game, boot to credits | ❌ not yet |
 
 ## What it is meant to be
@@ -99,7 +99,7 @@ The menu has three pages, as in the author's other recompilations.
 - **Display:** full screen and on which display; the picture's size (whole multiples, fit, fill); render resolution (following the window, or 1x to 8x of 640x480); SMAA anti-aliasing; AMD FSR 1 upscaling with its sharpness; a plain or CRT look; vsync and low latency; presets; anisotropic filtering; true colour; the graphics device; frame times.
 - **Game:** volume, sound output (stereo, or 5.1 decoded from the game's Dolby Surround) and device; the console's own settings (sound, progressive scan); previous saves.
 
-Two groups of options are in the menu and the settings file but **do nothing yet**, and the menu says so: a picture wider than 4:3 (aspect ratio, HUD placement) and frame rates above the game's own 60. Both need the game's code patched, which waits for the game to run (`docs/enhancements.md` has the analysis and the design).
+Two groups of options change the game itself and have not been seen working with it yet: a picture wider than 4:3 (aspect ratio, HUD placement; `docs/enhancements.md`) and frame rates above the game's own 60, which are pictures drawn between its frames (`docs/graphics.md`, `docs/runtime.md`).
 
 The settings (`mkdd.ini`, editable by hand), the saves, captures, the pipeline cache and the log live in `qilin/mkdd` in your per-user application data (Windows: `%LOCALAPPDATA%\qilin\mkdd`). Send a capture (F9), or `mkdd.log`, with any bug report.
 
