@@ -613,8 +613,8 @@ size_t decode_columns(const Registers& r, const Format& f, const Plan& pl, const
 // layouts). For those, a decoder compiled for the layout: one pass a vertex,
 // each attribute at a constant offset with a constant format, and every byte
 // of the vertex written once (decode_columns' results, the same bytes).
-enum Code : uint8_t { kCPosMtx, kCTexMtx0, kCPosF3, kCNrmS16, kCNrmF, kCColRGBA8, kCUv0S16, kCUv1S16 };
-constexpr unsigned code_bytes(Code c) { return c == kCPosMtx || c == kCTexMtx0 ? 1 : 2; }
+enum Code : uint8_t { kCPosMtx, kCTexMtx0, kCTexMtx1, kCPosF3, kCNrmS16, kCNrmF, kCColRGBA8, kCUv0S16, kCUv1S16 };
+constexpr unsigned code_bytes(Code c) { return c == kCPosMtx || c == kCTexMtx0 || c == kCTexMtx1 ? 1 : 2; }
 template <Code... C>
 constexpr std::array<unsigned, sizeof...(C)> code_offsets() {
     std::array<unsigned, sizeof...(C)> at{};
@@ -639,6 +639,8 @@ QILIN_RECORDER_INLINE void fused_step(const FusedIn& in, const uint8_t* p, V& v)
         v.matrices[0] = (v.matrices[0] & ~0xFFu) | (p[At] & 63u);
     } else if constexpr (C == kCTexMtx0) {
         v.matrices[0] = (v.matrices[0] & ~0xFF00u) | ((p[At] & 63u) << 8);
+    } else if constexpr (C == kCTexMtx1) {
+        v.matrices[0] = (v.matrices[0] & ~0xFF0000u) | ((p[At] & 63u) << 16);
     } else if constexpr (C == kCPosF3) {
         const uint8_t* d = in.element(0, 12, p + At);
         v.pos[0] = as_float(be32(d)), v.pos[1] = as_float(be32(d + 4)), v.pos[2] = as_float(be32(d + 8));
@@ -701,6 +703,7 @@ constexpr Fused kFused[] = {
     fused<kCPosF3, kCNrmF, kCUv0S16>(),
     fused<kCPosMtx, kCPosF3, kCNrmS16, kCUv0S16>(),
     fused<kCPosF3, kCUv0S16>(),
+    fused<kCPosMtx, kCTexMtx1, kCPosF3, kCNrmS16, kCUv0S16>(),  // (an eighth of a race frame's primitives)
 };
 void choose_fused(Plan& pl) {
     if (!pl.usable || pl.count > 6) return;
@@ -710,7 +713,7 @@ void choose_fused(Plan& pl) {
         const bool idx16 = st.how == 3;
         switch (st.kind) {
             case Step::kPosMtx: codes[i] = kCPosMtx; break;
-            case Step::kTexMtx: if (st.slot != 0) return; codes[i] = kCTexMtx0; break;
+            case Step::kTexMtx: if (st.slot > 1) return; codes[i] = st.slot ? kCTexMtx1 : kCTexMtx0; break;
             case Step::kPos: if (!idx16 || st.fmt != 4 || st.n != 3) return; codes[i] = kCPosF3; break;
             case Step::kNormal:
                 if (!idx16 || st.n != 1 || (st.fmt != 3 && st.fmt != 4)) return;

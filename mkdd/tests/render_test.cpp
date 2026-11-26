@@ -38,6 +38,7 @@
 #include "recorder.hpp"
 #include "renderer.hpp"
 #include "video.hpp"
+#include "qilin/host/display.hpp"
 #include "qilin/host/vulkan.hpp"
 #include "qilin/rt/system.hpp"
 
@@ -1456,6 +1457,45 @@ int pipe_bytes(bool bench) {
     return g_failures ? 1 : 0;
 }
 
+// mkdd_render_test --render-dff <file.dff> <out.ppm> [loops]: mkdd --render-dff without the game (main.cpp's,
+// the same steps): the frame replayed through the recorder, drawn, shown a pixel for a pixel and written.
+// MKDD_SCALE sets the EFB's scale. For checking that a recorder change leaves the pictures as they were.
+int render_dff(const char* path, const char* out, unsigned loops) {
+    constexpr uint32_t kReadW = 640, kReadH = 528;
+    host::Display::Options o;
+    o.title = "mkdd_render_test";
+    o.headless = true;
+    o.width = kReadW, o.height = kReadH;
+    o.picture.scaling = host::Scaling::integer;
+    o.picture.smooth = false;
+    host::Display display(o);
+    unsigned scale = 1;
+    if (const char* e = std::getenv("MKDD_SCALE")) scale = static_cast<unsigned>(std::clamp(std::atoi(e), 1, 8));
+    mkdd::Renderer renderer(display.gpu(), scale, 1);
+    renderer.set_true_color(std::getenv("MKDD_TRUE_COLOR") != nullptr);
+    uint32_t shown_w = 0, shown_h = 0;
+    mkdd::replay_dff(path, loops, [&](gx::Frame& f) {
+        f.captured = true;
+        renderer.render(f);
+        for (const auto& c : f.copies)
+            if (const host::Image* x = c.to_xfb ? renderer.xfb(c.dest) : nullptr) {
+                shown_w = x->width / scale, shown_h = x->height / scale;
+                display.present_image(x->image, x->view, x->width, x->height, float(shown_w) / float(shown_h), shown_h);
+            }
+    });
+    if (!shown_w || shown_w > kReadW || shown_h > kReadH) rt::fatal(nullptr, "--render-dff: %s has no picture that fits", path);
+    const std::vector<uint8_t> px = display.read_back();
+    FILE* fp = std::fopen(out, "wb");
+    if (!fp) rt::fatal(nullptr, "--render-dff: %s can't be written", out);
+    std::fprintf(fp, "P6\n%u %u\n255\n", shown_w, shown_h);
+    const uint32_t x0 = (kReadW - shown_w) / 2, y0 = (kReadH - shown_h) / 2;
+    for (uint32_t y = 0; y < shown_h; ++y)
+        for (uint32_t x = 0; x < shown_w; ++x) std::fwrite(&px[(size_t(y0 + y) * kReadW + x0 + x) * 4], 1, 3, fp);
+    std::fclose(fp);
+    std::fflush(nullptr);
+    std::_Exit(0);  // (as main.cpp: the renderer's threads aren't waited for)
+}
+
 const rt::FunctionEntry kNoFunctions[] = {{0x80004000u, [](rt::Cpu&) {}}};
 
 }  // namespace
@@ -1472,6 +1512,8 @@ int main(int argc, char** argv) {
         gx::set_rendering(true);
         return bench_dff(argv[2], argc >= 4 ? unsigned(std::atoi(argv[3])) : 200);
     }
+    if (argc >= 4 && std::strcmp(argv[1], "--render-dff") == 0)
+        return render_dff(argv[2], argv[3], argc >= 5 ? unsigned(std::max(1, std::atoi(argv[4]))) : 1);
     host::Gpu gpu = host::Gpu::create({}, false);
     std::printf("device: %s (logic ops %s, wide lines %s, large points %s)\n", gpu.name.c_str(), gpu.logic_op ? "yes" : "no",
                 gpu.wide_lines ? "yes" : "no", gpu.large_points ? "yes" : "no");
