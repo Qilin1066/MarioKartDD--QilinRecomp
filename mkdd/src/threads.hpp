@@ -19,8 +19,8 @@ void wake_all(qilin::rt::Cpu& c, uint32_t queue);
 
 // Development: log every guest thread with its state, priority, what it
 // sleeps on and its call stack (the return addresses up its back chain). Call
-// from the guest's running thread. MKDD_THREADS=<seconds> does it once at that
-// much game time (vi.cpp), to see what a game that stands still waits for.
+// from the guest's running thread. MKDD_THREADS=<seconds>[,<seconds>...] does it at
+// that much game time (vi.cpp), to see what a game that stands still waits for.
 void log_threads();
 
 // Run fn(arg) on a new host thread with a stack big enough for lifted code
