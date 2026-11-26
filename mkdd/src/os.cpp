@@ -773,8 +773,10 @@ void wake_clock() {
     if (const HANDLE e = clock_event()) SetEvent(e);
 }
 #else
-std::mutex g_clock_lock;
-std::condition_variable g_clock_cv;
+// Never destroyed: the clock thread is detached and may be waiting on them at
+// exit, where glibc's pthread_cond_destroy would block (see gpu.cpp).
+std::mutex& g_clock_lock = *new std::mutex;
+std::condition_variable& g_clock_cv = *new std::condition_variable;
 bool g_clock_woken = false;  // under g_clock_lock
 void wake_clock() {
     {

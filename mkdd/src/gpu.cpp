@@ -722,8 +722,11 @@ const bool g_gpu_threaded = [] {
 // any memory twice with different contents. Within a frame the lag is then
 // harmless, and the bound stays as the margin it was chosen for.
 constexpr size_t kMaxIncoming = 16u << 10;
-std::mutex g_gpu_lock;
-std::condition_variable g_gpu_cv;
+// Never destroyed: the GPU thread is detached and may still be waiting on them
+// when static destructors run at exit, and glibc's pthread_cond_destroy blocks
+// while a thread waits (CI's Linux runs hung there; Windows doesn't block).
+std::mutex& g_gpu_lock = *new std::mutex;
+std::condition_variable& g_gpu_cv = *new std::condition_variable;
 bool g_gpu_busy = false;  // the GPU thread is decoding a batch (under g_gpu_lock)
 std::atomic<uint64_t> g_fifo_wait_ns{0};
 std::vector<uint8_t> g_incoming;  // bursts not yet decoded

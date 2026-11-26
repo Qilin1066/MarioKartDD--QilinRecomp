@@ -160,8 +160,10 @@ void raise_flag(uint16_t flag) {
 // mails in bursts, and waking a sleeping thread for each would cost more than the work.
 
 bool g_threaded = false;
-std::mutex g_dsp_mutex;
-std::condition_variable g_dsp_wake;
+// Never destroyed: the worker is detached and may be waiting on them at exit,
+// where glibc's pthread_cond_destroy would block (see gpu.cpp).
+std::mutex& g_dsp_mutex = *new std::mutex;
+std::condition_variable& g_dsp_wake = *new std::condition_variable;
 bool g_dsp_asleep = false;                // (under the mutex) the worker waits on g_dsp_wake
 std::atomic<bool> g_dsp_work{false};      // something for the microcode to look at
 std::atomic<bool> g_dsp_busy{false};      // work pending or the worker inside the microcode
