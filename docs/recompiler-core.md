@@ -172,7 +172,7 @@ It changes no result: the unit test runs three million random and edge-case oper
 
 The opening movie showed what the leaf rule above leaves out. THP's row decoder (`__THPDecompressiMCURowNxN`, `800F4E50`: the inverse DCT of every block, all paired singles) calls the Huffman decoders and saves `f27`–`f31` with `stfd`/`lfd`, so it ran in double mode: a 608x448 frame, 3.09 million guest instructions, took 12 ms, and the movie plays at 59.94 frames a second. Single mode now reaches such functions:
 - **A call** gets the halves the function has written written back, as a way out does; after it every half is the `Cpu`'s again. The halves read as singles later are fetched again there, and if one of them isn't a single-precision value the function's double version takes over from that very point: it takes a second argument, the resume point, and switches on it to a label after the call (all the state is in the `Cpu` then). Conditional calls keep a function out of single mode; compilers don't emit them.
-- **`stfd`** stores the register as it stands: the float written back as a double if this run wrote it, else the `Cpu`'s own double, single or not (a prologue saving the caller's register). **`lfd`** loads straight into the `Cpu`, and the half is the `Cpu`'s from there (an epilogue's restore).
+- **`stfd`** (and, since round 4, `stfs` and `psq_st` of a half the run hasn't written on every path) stores the register as it stands: the float written back as a double if this run wrote it, else the `Cpu`'s own double, single or not (a prologue saving the caller's register). **`lfd`** loads straight into the `Cpu`, and the half is the `Cpu`'s from there (an epilogue's restore).
 - **Doubles in the `Cpu`** (round 4, below): a value that isn't a single (what `lfd` loads, `frsqrte`'s estimate, `fctiw`'s integer, double arithmetic, a move of one) stays in the `Cpu`'s register and is read from there with the double helpers; the rest of the function stays in floats.
 - **Left in double mode on purpose:** a function that rounds with `frsp` a value it didn't make (a double argument, or what a call returned): it would leave single mode every time it ran. Also one where a register holds a float on one path and a double in the `Cpu` on another, where both meet; and one where a paired-single instruction reads such a double.
 - The halves written on some paths only are one bit mask (`written`), not a flag each.
@@ -268,6 +268,7 @@ about 3-5%; the dispatcher for indirect calls 1.8%; replaced-function lookup 0.6
 | Cheaper floating-point helpers (below) | 9.71 -> 7.27 ms | 6.69 -> 5.39 | 6.50 -> 5.70 |
 | Tried and left out: lifted code reading the dispatcher's cache itself, a cache for replaced-function lookups | 7.31 -> 7.42 | 5.37 -> 5.14 | 5.86 -> 5.83 |
 | Doubles in the `Cpu` in single mode (below; after merging main, two pairs) | 7.71 -> 7.68, 7.61 -> 7.58 | 5.52 -> 5.42, 5.51 -> 5.18 | 5.92 -> 5.96 |
+| Stores of a half not ours take the register as it stands (below; two pairs) | 7.68 -> 7.69, 7.60 -> 7.63 | 5.47 -> 5.61, 5.51 -> 5.32 | 5.77 -> 5.62 |
 
 (The pairs ran at different times, so a row's "after" needn't equal the next row's "before". The third row is within
 the noise either way, so the code stayed as it was. The demo race is the least steady figure: it isn't quite the
@@ -320,10 +321,42 @@ Checked:
 That warning check caught a latent fault, now fixed. An `lfd` with nothing to fetch after it still noted the
 "written" flags of a fallback it didn't emit, which left a flag set and never read.
 
+**Stores take a half as the register stands** (for `J3DJoint::recursiveCalc`, 2.2% of the race's busy time). Its
+prologue saves `f26`-`f31` with `stfd` and `psq_st`, and after its calls it stores values it loaded before them.
+Single mode used to read every half `psq_st` and `stfs` store as a float. That cost 12 checks on entry, with a double
+version behind them, and 6 checks after each of its four calls. Now a store of a half that this run hasn't written
+on every path stores the register as it stands, as `stfd` always has: our float where we wrote it (a "written" flag
+says so where only some paths did), else the `Cpu`'s own value, through double mode's store. That is the same value,
+because a half we haven't written is still the `Cpu`'s, so nothing checks it on entry or fetches it again after a
+call. `recursiveCalc` has no check and no double version now. Over the whole lift:
+- `to_f_exact` checks went from 8,021 to 2,341;
+- double versions from 1,194 to 771 (672 to 575 with resume points);
+- `mkdd.exe` shrank from 65.0 MB to 58.5 MB.
+
+The scenes' figures moved within their noise (at best 1-3% in the four-view race). I kept the change for the code it
+removes. Checked:
+- the unit tests: a new case, an argument stored with no check;
+- the instruction difftest;
+- the game difftest: 40 trials, 271,333 runs compared, 0 differences;
+- the whole lift under zig's Clang with the full warning set: no warning, after a fix so that a half taken from the
+  `Cpu` declares no float.
+
+**Deferred checks, tried and left out.** I tried checking a run's results once instead of each one. A run is a
+stretch of float arithmetic with its loads, and integer work that reads no float and no CR field, ending at a
+float's store, a call, a branch or a label. Each result was noted branch-free (`bad |= unusual(r)`). If any wasn't
+ordinary, the run's floats went back to their values at its start and the floating point was done again with the
+checking helpers: the loads' values were kept, so memory is read once, and the integer work isn't repeated. That is
+exact (a helper's fast result is its result whenever it's ordinary), and the game's code shows it would apply
+widely: `PSMTXConcat`'s body is one run. But it saved little. `PSMTXConcat` went from 77 to 74 ns with MSVC, and
+from 68 to 69 ns with Clang. The time is in computing each check (a move to an integer register and two compares),
+not in branching on it, and a deferred check still computes every one. A cheaper exact test of a whole run would
+need the host's floating-point status flags; their underflow rule doesn't match Broadway's "below the smallest
+normal before rounding", and ARM's differ again. The patch is in `work\core\deferred_checks_tried.patch`.
+
 **What is left** (the demo race): `PSMTXConcat` is still the hottest function (6.8% of busy time), then the pipe's
-handling (about 5%, `gpu.cpp`, the GPU role's) and `J3DJoint::recursiveCalc`. In single-mode code the
-ordinary-result checks are still half the time of a function like `PSMTXConcat` (with them removed, which would be
-wrong, it takes 46 ns instead of 77), and writing the FPR halves back on the way out is another 10-25%.
+handling (about 5%, `gpu.cpp`, the GPU role's). In single-mode code the ordinary-result checks are still half the
+time of a function like `PSMTXConcat` (with them removed, which would be wrong, it takes 46 ns instead of 77), and
+writing the FPR halves back on the way out is another 10-25%.
 
 ## Cheap wins noted, not taken
 - **A function's FPR halves written back on the way out only where a caller can read them: not taken, because it

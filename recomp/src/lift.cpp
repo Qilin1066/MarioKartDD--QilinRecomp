@@ -179,6 +179,7 @@ struct SingleInfo {
     // that read one, or make one (lifted with the double helpers).
     std::vector<uint64_t> cpu;
     std::vector<bool> mixed;
+    std::vector<uint64_t> store_cpu;  // per store: the halves it takes as the register stands (not all ours)
 };
 
 bool double_store(Op op) { return op == Op::stfd || op == Op::stfdx || op == Op::stfdu || op == Op::stfdux; }
@@ -282,18 +283,6 @@ SingleInfo analyse_single(const LiftInput& f) {
         }
     }
     if (!any) return info;  // (nothing would be done in floats)
-    // Read before written on some path from the entry: liveness, backwards to a fixed point.
-    std::vector<uint64_t> live(n, 0);
-    for (bool changed = true; changed;) {
-        changed = false;
-        for (size_t k = n; k-- > 0;) {
-            uint64_t out = 0;
-            for (size_t t : succ[k]) out |= live[t];
-            const uint64_t in = use[k] | (out & ~def[k] & ~kill[k]);
-            if (in != live[k]) live[k] = in, changed = true;
-        }
-    }
-    info.live_in = live[0];
     // Written by the function on every path to an instruction (a "must"
     // analysis: start from everything and narrow), and on some path: forwards
     // to a fixed point. An instruction nothing here leads to (there should be
@@ -311,7 +300,29 @@ SingleInfo analyse_single(const LiftInput& f) {
             if (must != info.must[k] || may != info.may[k]) info.must[k] = must, info.may[k] = may, changed = true;
         }
     }
+    // A store of a half this run hasn't written (or not on every path) stores the register as it
+    // stands, as stfd does: the Cpu's own value, single or not, where it isn't ours. Then nothing
+    // need check it on entry or fetch it again after a call: a prologue saving the caller's FPRs,
+    // or a value stored again after the calls in between.
+    info.store_cpu.assign(n, 0);
+    for (size_t k = 0; k < n; ++k)
+        if (is_fp[k] && !info.mixed[k] && (ppc::spec(f.insns[k].second.op).flags & ppc::kStore)) {
+            info.store_cpu[k] = use[k] & ~info.must[k];
+            use[k] &= info.must[k];
+        }
     for (size_t k = 0; k < n; ++k) info.flags |= info.may[k] & ~info.must[k];
+    // Read before written on some path from the entry: liveness, backwards to a fixed point.
+    std::vector<uint64_t> live(n, 0);
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (size_t k = n; k-- > 0;) {
+            uint64_t out = 0;
+            for (size_t t : succ[k]) out |= live[t];
+            const uint64_t in = use[k] | (out & ~def[k] & ~kill[k]);
+            if (in != live[k]) live[k] = in, changed = true;
+        }
+    }
+    info.live_in = live[0];
     info.need.assign(n, 0);
     info.resume.assign(n, 0);
     for (size_t k = 0; k < n; ++k) {
@@ -708,6 +719,34 @@ private:
             if (single_->must[cur_] & bit) value = std::format("fp::to_d({})", F(d));
             else if (single_->may[cur_] & bit) flags_read_ |= bit, value = std::format("((written & 0x{:X}ull) ? fp::to_d({}) : c.ps0[{}])", bit, F(d), d);
             line(std::format("{{ const uint32_t ea = {}; write64(c, ea, fp::bits({}));{} }}", ea, value, update));
+            return true;
+        }
+        // A store taking a half as the register stands (SingleInfo::store_cpu): its double, from
+        // our float where this run wrote it, else from the Cpu, through double mode's store.
+        if (const uint64_t cpu = single_->store_cpu[cur_]) {
+            auto dv = [&](unsigned h) {
+                const uint64_t bit = uint64_t{1} << h;
+                const std::string theirs = std::format("c.ps{}[{}]", h < 32 ? 0 : 1, h & 31);
+                if ((cpu & bit) && !(single_->may[cur_] & bit)) return theirs;  // (naming no float: none is declared)
+                const std::string ours = std::format("fp::to_d({})", h < 32 ? F(h) : P(h & 31));
+                if (!(cpu & bit)) return ours;
+                flags_read_ |= bit;
+                return std::format("((written & 0x{:X}ull) ? {} : {})", bit, ours, theirs);
+            };
+            const bool x = in.op == Op::stfsx || in.op == Op::stfsux || in.op == Op::psq_stx || in.op == Op::psq_stux;
+            const bool u = in.op == Op::stfsu || in.op == Op::stfsux || in.op == Op::psq_stu || in.op == Op::psq_stux;
+            std::string ea, s;
+            if (in.op == Op::stfs || in.op == Op::stfsx || in.op == Op::stfsu || in.op == Op::stfsux) {
+                ea = u ? (x ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm())) : (x ? ea_x() : ea_d());
+                s = std::format("write32(c, ea, fp::store_single({}));", dv(d));
+            } else {
+                const unsigned i = x ? in.psqx_i() : in.psq_i(), w = x ? in.psqx_w() : in.psq_w();
+                const std::string base = u ? R(a) : RA0(a);
+                ea = x ? (base == "0u" ? R(b) : std::format("{} + {}", base, R(b)))
+                       : (base == "0u" ? std::format("{}u", static_cast<uint32_t>(in.psq_d())) : base + plus(in.psq_d()));
+                s = std::format("psq_store(c, ea, {}, {}, {}, {});", i, w != 0, dv(d), w ? std::string("0.0") : dv(32 + d));
+            }
+            line(std::format("{{ const uint32_t ea = {}; {}{} }}", ea, s, u ? std::format(" {} = ea;", R(a)) : ""));
             return true;
         }
         switch (in.op) {

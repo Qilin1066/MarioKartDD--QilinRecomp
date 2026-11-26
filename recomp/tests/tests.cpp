@@ -876,6 +876,11 @@ void test_fp_single_mode() {
     CHECK(saved.code.contains("if (!(int(fp::to_f_exact(c.ps0[31], f31)))) [[unlikely]] { ") && saved.code.contains("fn_80003000_d(c, 1); return; }"));
     CHECK(saved.code.contains("c.ps0[31] = fp::from_bits(read64(c, ea));"));
     CHECK(saved.code.contains("c.ps0[1] = fp::to_d(f1); c.ps1[1] = fp::to_d(p1);  return;") && !saved.code.contains("written"));
+    // stfs f1,0(r3); lfs f2,4(r3); fadds f2,f2,f2; stfs f2,8(r3); blr: f1 is stored as the register
+    // stands (the Cpu's: a prologue's save is the same), so nothing checks it on entry.
+    const Lifted stored = fn({0xD0230000u, 0xC0430004u, 0xEC42102Au, 0xD0430008u, 0x4E800020u});
+    CHECK(stored.ok && stored.code.contains("write32(c, ea, fp::store_single(c.ps0[1]));") && !stored.code.contains("_d(c)"));
+    CHECK(stored.code.contains("write32(c, r3 + 8u, fp::fbits(f2));"));
     // Doubles in the Cpu. lfs f1,0(r3); frsqrte f0,f1; fmuls f2,f0,f0; stfs f2,4(r3); blr (an inlined
     // square root's estimate): the estimate goes to the Cpu's f0 and is read from there by the double
     // helpers, the rest is floats, and the way out doesn't write f0 back over it.
