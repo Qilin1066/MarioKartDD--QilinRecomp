@@ -1,0 +1,12 @@
+# Third-party sources the post-processing passes are built from: fetched, pinned by
+# commit and SHA-256, never copied into the repository. CMake fetches them when it
+# configures (the SMAA tables and FSR's constants are compiled into the host layer);
+# tools/build_shaders.py fetches them to rebuild src/post_shaders.inc.
+# sha256  path  url
+4db53d92ef0b45661f8450303589ffabce93c352cae4282a6f32dd2b80efbeb9 smaa/SMAA.hlsl https://raw.githubusercontent.com/iryoku/smaa/71c806a838bdd7d517df19192a20f0c61b3ca29d/SMAA.hlsl
+1933bf43ce86ba71f7ed5f0fa94b148610c634dc3395b9bc67a817d51ee73af2 smaa/AreaTex.h https://raw.githubusercontent.com/iryoku/smaa/71c806a838bdd7d517df19192a20f0c61b3ca29d/Textures/AreaTex.h
+1fac315ab5f87b60083c9b8387af17f056204d3d1bf21500f2acc5b3e8c1a37a smaa/SearchTex.h https://raw.githubusercontent.com/iryoku/smaa/71c806a838bdd7d517df19192a20f0c61b3ca29d/Textures/SearchTex.h
+2b848b67ba50ac40b53e11cf1ccdaee2a190ca83b4652cba695a5f1ce81f52ae smaa/LICENSE.txt https://raw.githubusercontent.com/iryoku/smaa/71c806a838bdd7d517df19192a20f0c61b3ca29d/LICENSE.txt
+f60e2722fcd13989523b9164d776ab382b3692791767f3bf8bb19967f763f3fb fsr1/ffx_a.h https://raw.githubusercontent.com/GPUOpen-Effects/FidelityFX-FSR/a21ffb8f6c13233ba336352bdff293894c706575/ffx-fsr/ffx_a.h
+93c3922362ea7fc99cbcc698ca30c98de4f8c246d1fbb0b09e015ddef38ce3a5 fsr1/ffx_fsr1.h https://raw.githubusercontent.com/GPUOpen-Effects/FidelityFX-FSR/a21ffb8f6c13233ba336352bdff293894c706575/ffx-fsr/ffx_fsr1.h
+db089274ce766da70f5b7d791029c3486f9f9e27c8c79c652689603d3192e802 fsr1/license.txt https://raw.githubusercontent.com/GPUOpen-Effects/FidelityFX-FSR/a21ffb8f6c13233ba336352bdff293894c706575/license.txt

@@ -48,7 +48,7 @@ def main() -> int:
     fifo_at, fifo_size = struct.unpack_from("<QI", data, frame_at)
     upd_at, upd_n = struct.unpack_from("<QI", data, frame_at + 20)  # FileFrameInfo.memoryUpdatesOffset
     fifo = bytes(data[fifo_at:fifo_at + fifo_size])
-    # MEM1 and MEM2 as the frame starts, then what the GPU read as the frame went
+    # MEM1 as the frame starts (a Wii's log has MEM2 too), then what the GPU read as the frame went
     # on (the capture's memory updates, each at a place in the commands).
     base, updates = {}, []
     for i in range(upd_n):

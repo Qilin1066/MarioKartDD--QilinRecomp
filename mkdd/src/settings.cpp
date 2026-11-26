@@ -2,24 +2,27 @@
 
 #include <cctype>
 #include <fstream>
+#include <initializer_list>
+#include <set>
+#include <span>
 #include <sstream>
 #include <system_error>
 
 #include "qilin/host/pad.hpp"
-#include "qilin/rt/system.hpp"
 #include "qilin/rt/file.hpp"
-#include <set>
+#include "qilin/rt/system.hpp"
 
 namespace mkdd {
 namespace host = qilin::host;
 
 namespace {
 
-constexpr const char* kControlNames[kControlCount] = {"up", "down", "left", "right", "one",
-                                                      "two", "a", "plus", "minus", "home"};
+constexpr const char* kControlNames[kControlCount] = {"a", "b", "x", "y", "z", "l", "r", "start", "up", "down", "left", "right",
+                                                      "stick_up", "stick_down", "stick_left", "stick_right",
+                                                      "c_up", "c_down", "c_left", "c_right"};
 constexpr const char* kControlLabels[kControlCount] = {
-    "Up (block)", "Down (duck)", "Left (dodge)", "Right (dodge)", "1 (left punch)",
-    "2 (right punch)", "A (Star Punch, OK)", "+ (pause)", "- (back)", "Home"};
+    "A", "B", "X", "Y", "Z", "L (trigger)", "R (trigger)", "Start", "D-pad up", "D-pad down", "D-pad left", "D-pad right",
+    "Stick up", "Stick down", "Stick left", "Stick right", "C-stick up", "C-stick down", "C-stick left", "C-stick right"};
 struct PadName {
     const char* name;   // in the file
     const char* label;  // in the menu
@@ -32,7 +35,13 @@ constexpr PadName kPadNames[] = {
     {"Back", "Pad Back", host::kPadBack}, {"Guide", "Pad Guide", host::kPadGuide},
     {"LB", "Pad LB", host::kPadLB},       {"RB", "Pad RB", host::kPadRB},        {"LT", "Pad LT", host::kPadLT},
     {"RT", "Pad RT", host::kPadRT},       {"L3", "Pad L3", host::kPadL3},        {"R3", "Pad R3", host::kPadR3},
+    {"LSUp", "Left stick up", host::kPadLSUp},       {"LSDown", "Left stick down", host::kPadLSDown},
+    {"LSLeft", "Left stick left", host::kPadLSLeft}, {"LSRight", "Left stick right", host::kPadLSRight},
+    {"RSUp", "Right stick up", host::kPadRSUp},       {"RSDown", "Right stick down", host::kPadRSDown},
+    {"RSLeft", "Right stick left", host::kPadRSLeft}, {"RSRight", "Right stick right", host::kPadRSRight},
 };
+constexpr const char* kPadList =
+    "Up Down Left Right A B X Y Start Back Guide LB RB LT RT L3 R3 LSUp LSDown LSLeft LSRight RSUp RSDown RSLeft RSRight";
 
 std::string trim(const std::string& s) {
     size_t a = 0, b = s.size();
@@ -54,7 +63,7 @@ bool parse_binding(const std::string& text, Binding& b, std::string& why) {
     }
     const size_t colon = t.find(':');
     if (colon == std::string::npos) {
-        why = "'" + t + "' isn't an input: write pad:<button>, key:<key> or mouse";
+        why = "'" + t + "' isn't an input: write pad:<input>, key:<key> or mouse";
         return false;
     }
     const std::string kind = lower(trim(t.substr(0, colon))), name = trim(t.substr(colon + 1));
@@ -64,7 +73,7 @@ bool parse_binding(const std::string& text, Binding& b, std::string& why) {
                 b = {Binding::kPad, p.bit, {}};
                 return true;
             }
-        why = "'" + name + "' isn't a pad button (Up Down Left Right A B X Y Start Back Guide LB RB LT RT L3 R3)";
+        why = "'" + name + "' isn't a pad input (" + kPadList + ")";
         return false;
     }
     if (kind == "key") {
@@ -73,7 +82,8 @@ bool parse_binding(const std::string& text, Binding& b, std::string& why) {
             return false;
         }
         if (key_reserved(name)) {
-            why = "key:" + name + " is kept for the program (Escape and F1 open the settings menu, F3 the frame times, F11 is full screen)";
+            why = "key:" + name + " is kept for the program (Escape and F1 open the settings menu, F3 the frame times, F9 "
+                  "captures frames for a report, F11 is full screen)";
             return false;
         }
         b = {Binding::kKey, 0, name};
@@ -94,6 +104,10 @@ const char* scaling_name(host::Scaling s) {
     }
     return "fit";
 }
+// In their enumerations' order.
+constexpr const char* kFrameRates[] = {"original", "60", "display", "unlimited"};
+constexpr const char* kHuds[] = {"edges", "middle", "stretched"};
+constexpr const char* kOutputs[] = {"stereo", "surround", "device"};
 
 }  // namespace
 
@@ -108,7 +122,7 @@ const char* pad_button_name(uint32_t bit) {
 
 bool key_reserved(const std::string& name) {
     const std::string l = lower(trim(name));
-    return l == "escape" || l == "f1" || l == "f3" || l == "f11";
+    return l == "escape" || l == "f1" || l == "f3" || l == "f9" || l == "f11";
 }
 
 std::string binding_text(const Binding& b) {
@@ -132,27 +146,52 @@ std::string binding_label(const Binding& b) {
     return "?";
 }
 
+// The pad by where its buttons are, not by their letters: the GameCube's A is
+// the large button under the thumb (an Xbox pad's A), B below and to its left
+// (X), X to its right (B), Y above (Y); Z is a shoulder button, L and R the
+// triggers. The keyboard plays the first port.
+void default_controls(Settings& s, unsigned player) {
+    auto& c = s.players[player].controls;
+    const bool keys = player == 0;
+    const auto set = [&](Control which, std::initializer_list<uint32_t> pads, const char* name) {
+        c[which].clear();
+        for (uint32_t bit : pads) c[which].push_back(pad(bit));
+        if (keys) c[which].push_back(key(name));
+    };
+    set(kCtlA, {host::kPadA}, "X");
+    set(kCtlB, {host::kPadX}, "Z");
+    set(kCtlX, {host::kPadB}, "C");
+    set(kCtlY, {host::kPadY}, "S");
+    set(kCtlZ, {host::kPadRB, host::kPadLB}, "D");
+    set(kCtlL, {host::kPadLT}, "A");
+    set(kCtlR, {host::kPadRT}, "Space");
+    set(kCtlStart, {host::kPadStart}, "Return");
+    set(kCtlUp, {host::kPadUp}, "T");
+    set(kCtlDown, {host::kPadDown}, "G");
+    set(kCtlLeft, {host::kPadLeft}, "F");
+    set(kCtlRight, {host::kPadRight}, "H");
+    set(kCtlStickUp, {host::kPadLSUp}, "Up");
+    set(kCtlStickDown, {host::kPadLSDown}, "Down");
+    set(kCtlStickLeft, {host::kPadLSLeft}, "Left");
+    set(kCtlStickRight, {host::kPadLSRight}, "Right");
+    set(kCtlCUp, {host::kPadRSUp}, "I");
+    set(kCtlCDown, {host::kPadRSDown}, "K");
+    set(kCtlCLeft, {host::kPadRSLeft}, "J");
+    set(kCtlCRight, {host::kPadRSRight}, "L");
+}
+
 Settings default_settings() {
     Settings s;
-    s.controls[kCtlUp] = {pad(host::kPadUp), key("Up")};
-    s.controls[kCtlDown] = {pad(host::kPadDown), key("Down")};
-    s.controls[kCtlLeft] = {pad(host::kPadLeft), key("Left")};
-    s.controls[kCtlRight] = {pad(host::kPadRight), key("Right")};
-    s.controls[kCtlOne] = {pad(host::kPadB), key("Z")};
-    s.controls[kCtlTwo] = {pad(host::kPadA), key("X")};
-    s.controls[kCtlA] = {pad(host::kPadX), pad(host::kPadY), {Binding::kMouse, 0, {}}, key("C"), key("Space")};
-    s.controls[kCtlPlus] = {pad(host::kPadStart), key("Return")};
-    s.controls[kCtlMinus] = {pad(host::kPadBack), key("Backspace")};
-    s.controls[kCtlHome] = {pad(host::kPadGuide), key("H")};
+    for (unsigned p = 0; p < kPlayers; ++p) default_controls(s, p);
     return s;
 }
 
 bool apply_preset(Settings& s, const std::string& name) {
     if (name == "original" || name == "low-end") {  // the console's picture: 1x, its filtering (a Pi 4 does exactly this)
-        s.scale = 1, s.anisotropy = 1, s.vsync = true;
+        s.scale = 1, s.anisotropy = 1, s.vsync = true, s.smaa = false, s.fsr = false;
         s.true_color = name == "low-end";  // original: the console's 18-bit colour and its dither; low-end: 24 bits (no cost)
-    } else if (name == "desktop") {  // a desktop GPU: 3x (1920x1584 frame buffer), 16x anisotropic
-        s.scale = 0, s.anisotropy = 16, s.vsync = true;  // scale: auto (the screen's height)
+    } else if (name == "desktop") {  // a desktop GPU: the window's resolution, 16x anisotropic
+        s.scale = 0, s.anisotropy = 16, s.vsync = true;
         s.true_color = true;
     } else {
         return false;
@@ -165,16 +204,33 @@ host::Picture picture_of(const Settings& s) {
     host::Picture p;
     p.scaling = s.scaling;
     p.smooth = s.smooth;
+    p.smaa = s.smaa;
+    p.fsr = s.fsr;
+    p.sharpness = float(s.sharpness) / 100.0f;
     p.look = s.look;
     p.scanlines = float(s.scanlines) / 100.0f;
     p.mask = float(s.mask) / 100.0f;
     p.vsync = s.vsync;
+    p.low_latency = s.low_latency;
     p.match_refresh = s.match_refresh;
     p.variable_refresh = s.variable_refresh;
     return p;
 }
 
-bool parse_settings(const std::string& text, Settings& out, std::string& error, bool legacy) {
+float aspect_ratio(const Settings& s, float screen) {
+    constexpr float original = 4.0f / 3.0f;
+    if (s.aspect_w == 0 || s.aspect_h == 0) return screen > original ? (screen < 4.0f ? screen : 4.0f) : original;
+    return float(s.aspect_w) / float(s.aspect_h);
+}
+
+unsigned render_scale(const Settings& s, int height_pixels) {
+    if (s.scale) return s.scale < 8 ? s.scale : 8;
+    if (height_pixels <= 0) return 3;
+    const int k = (height_pixels + 479) / 480;
+    return unsigned(k < 1 ? 1 : k > 8 ? 8 : k);
+}
+
+bool parse_settings(const std::string& text, Settings& out, std::string& error) {
     Settings s = default_settings();
     std::istringstream in(text);
     std::string line, section;
@@ -191,8 +247,9 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
         if (line.front() == '[') {
             if (line.back() != ']') return fail("a section is written [name]");
             section = lower(trim(line.substr(1, line.size() - 2)));
-            if (section != "display" && section != "controls" && section != "console" && !(legacy && section == "video"))
-                return fail("there's no section [" + section + "] (display, controls, console)");
+            if (section != "display" && section != "sound" && section != "controls" && section != "console" &&
+                !(section.size() == 7 && section.starts_with("player") && section[6] >= '1' && section[6] <= '4'))
+                return fail("there's no section [" + section + "] (display, sound, controls, player1 to player4, console)");
             continue;
         }
         const size_t eq = line.find('=');
@@ -216,18 +273,47 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
             to = x;
             return true;
         };
-        if (section == "video") {  // v0.17.0's
-            if (name != "scale") return fail("[video] has no '" + name + "' (scale)");
-            if (!number(s.scale, 1, 8)) return false;
-            continue;
-        }
+        // One of `names` (in the enumeration's order): its index.
+        const auto choice = [&](std::span<const char* const> names, unsigned& to) {
+            std::string list;
+            for (size_t i = 0; i < names.size(); ++i) {
+                if (v == names[i]) {
+                    to = unsigned(i);
+                    return true;
+                }
+                list += (i == 0 ? "" : i + 1 == names.size() ? " or " : ", ") + std::string(names[i]);
+            }
+            return fail(name + " is " + list);
+        };
         if (section == "display") {
+            unsigned pick = 0;
             if (name == "preset") {
                 if (!apply_preset(s, v)) return fail("the presets are original, low-end and desktop");
             } else if (name == "fullscreen") {
                 if (!boolean(s.fullscreen)) return false;
             } else if (name == "monitor") {
                 s.monitor = value;
+            } else if (name == "aspect") {
+                if (v == "auto") {
+                    s.aspect_w = s.aspect_h = 0;
+                } else {
+                    // W:H, whole numbers of up to four digits; from 4:3 (the game's own) to 4:1.
+                    const size_t colon = v.find(':');
+                    unsigned w = 0, h = 0;
+                    bool good = colon != std::string::npos && colon >= 1 && colon <= 4 && v.size() >= colon + 2 && v.size() <= colon + 5;
+                    for (size_t i = 0; good && i < v.size(); ++i) {
+                        if (i == colon) continue;
+                        good = std::isdigit(static_cast<unsigned char>(v[i])) != 0;
+                        unsigned& part = i < colon ? w : h;
+                        if (good) part = part * 10 + unsigned(v[i] - '0');
+                    }
+                    if (!good || w == 0 || h == 0 || w * 3 < h * 4 || w > h * 4)
+                        return fail("aspect is auto or width:height, from 4:3 to 4:1 (16:10, 16:9, 21:9, 32:9)");
+                    s.aspect_w = w, s.aspect_h = h;
+                }
+            } else if (name == "hud") {
+                if (!choice(kHuds, pick)) return false;
+                s.hud = Hud(pick);
             } else if (name == "scaling") {
                 if (v == "integer") s.scaling = host::Scaling::integer;
                 else if (v == "fit") s.scaling = host::Scaling::fit;
@@ -235,6 +321,12 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
                 else return fail("scaling is integer, fit or stretch");
             } else if (name == "smooth") {
                 if (!boolean(s.smooth)) return false;
+            } else if (name == "smaa") {
+                if (!boolean(s.smaa)) return false;
+            } else if (name == "fsr") {
+                if (!boolean(s.fsr)) return false;
+            } else if (name == "sharpness") {
+                if (!number(s.sharpness, 0, 100)) return false;
             } else if (name == "look") {
                 if (v == "plain") s.look = host::Look::plain;
                 else if (v == "crt") s.look = host::Look::crt;
@@ -243,8 +335,8 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
                 if (!number(s.scanlines, 0, 100)) return false;
             } else if (name == "mask") {
                 if (!number(s.mask, 0, 100)) return false;
-            } else if (name == "internal_scale") {
-                if (v == "auto" || v == "0") s.scale = 0;  // auto
+            } else if (name == "render_resolution") {
+                if (v == "auto" || v == "0") s.scale = 0;
                 else if (!number(s.scale, 1, 8)) return false;
             } else if (name == "anisotropy") {
                 if (!number(s.anisotropy, 1, 16)) return false;
@@ -253,6 +345,11 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
                 if (!boolean(s.true_color)) return false;
             } else if (name == "vsync") {
                 if (!boolean(s.vsync)) return false;
+            } else if (name == "frame_rate") {
+                if (!choice(kFrameRates, pick)) return false;
+                s.frame_rate = FrameRate(pick);
+            } else if (name == "low_latency") {
+                if (!boolean(s.low_latency)) return false;
             } else if (name == "gpu") {
                 s.gpu = value;
             } else if (name == "performance_overlay") {
@@ -263,65 +360,91 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
                 if (!boolean(s.variable_refresh)) return false;
             } else {
                 return fail("[display] has no '" + name +
-                            "' (preset fullscreen monitor scaling smooth look scanlines mask internal_scale anisotropy true_color vsync gpu "
-                            "performance_overlay match_refresh variable_refresh)");
+                            "' (preset fullscreen monitor aspect hud scaling smooth smaa fsr sharpness look scanlines mask "
+                            "render_resolution anisotropy true_color vsync low_latency frame_rate gpu performance_overlay "
+                            "match_refresh variable_refresh)");
+            }
+            continue;
+        }
+        if (section == "sound") {
+            unsigned pick = 0;
+            if (name == "volume") {
+                if (!number(s.volume, 0, 100)) return false;
+            } else if (name == "mute_unfocused") {
+                if (!boolean(s.mute_unfocused)) return false;
+            } else if (name == "output") {
+                if (!choice(kOutputs, pick)) return false;
+                s.sound_output = host::SoundOutput(pick);
+            } else if (name == "device") {
+                s.sound_device = value;
+            } else {
+                return fail("[sound] has no '" + name + "' (volume mute_unfocused output device)");
             }
             continue;
         }
         if (section == "console") {
             if (name == "language") {
-                if (!number(s.language, 1, 5)) return fail("language is 1 (English), 2 (German), 3 (French), 4 (Spanish) or 5 (Italian)");
-            } else if (name == "widescreen") {
-                if (!boolean(s.widescreen)) return false;
+                if (v != "english") return fail("language is english (the only one on the USA disc)");
+                s.language = 0;
             } else if (name == "sound") {
                 if (v == "mono") s.sound = 0;
                 else if (v == "stereo") s.sound = 1;
                 else return fail("sound is mono or stereo");
+            } else if (name == "progressive") {
+                if (!boolean(s.progressive)) return false;
             } else {
-                return fail("[console] has no '" + name + "' (language widescreen sound)");
+                return fail("[console] has no '" + name + "' (language sound progressive)");
             }
             continue;
         }
-        // [controls]
-        if (name == "controller1") { s.controller1 = value; continue; }
-        if (name == "controller2") { s.controller2 = value; continue; }
-        if (name == "stick_threshold") { if (!number(s.stick_threshold, 5, 95)) return false; continue; }
-        if (name == "trigger_threshold") { if (!number(s.trigger_threshold, 5, 95)) return false; continue; }
-        if (name == "pointer_deadzone") { if (!number(s.pointer_deadzone, 0, 95)) return false; continue; }
-        if (name == "rumble_strength") { if (!number(s.rumble_strength, 0, 100)) return false; continue; }
-        if (name == "volume") { if (!number(s.volume, 0, 100)) return false; continue; }
-        if (name == "mute_unfocused") { if (!boolean(s.mute_unfocused)) return false; continue; }
+        if (section == "controls") {
+            if (name == "stick_deadzone") {
+                if (!number(s.stick_deadzone, 0, 50)) return false;
+            } else if (name == "stick_threshold") {
+                if (!number(s.stick_threshold, 5, 95)) return false;
+            } else if (name == "trigger_threshold") {
+                if (!number(s.trigger_threshold, 5, 95)) return false;
+            } else if (name == "rumble_strength") {
+                if (!number(s.rumble_strength, 0, 100)) return false;
+            } else {
+                return fail("[controls] has no '" + name +
+                            "' (stick_deadzone stick_threshold trigger_threshold rumble_strength; a player's controls are in "
+                            "[player1] to [player4])");
+            }
+            continue;
+        }
+        // [player1] to [player4]
+        Player& p = s.players[section[6] - '1'];
+        if (name == "controller") {
+            p.controller = v == "none" ? "none" : value;
+            continue;
+        }
         if (name == "rumble") {
-            if (!boolean(s.rumble)) return false;
-            continue;
-        }
-        if (name == "speaker") {
-            if (!boolean(s.speaker)) return false;
-            continue;
-        }
-        if (name == "second_player") {
-            if (v == "off") s.second_player = 0;
-            else if (v == "second controller") s.second_player = 1;
-            else if (v == "first controller") s.second_player = 2;
-            else return fail("second_player is off, second controller or first controller");
+            if (!boolean(p.rumble)) return false;
             continue;
         }
         unsigned c = 0;
         while (c < kControlCount && name != kControlNames[c]) ++c;
         if (c == kControlCount)
-            return fail("'" + name + "' isn't a Wii Remote button (up down left right one two a plus minus home), rumble, speaker or second_player");
-        s.controls[c].clear();
+            return fail("'" + name + "' isn't one of a GameCube controller's controls (a b x y z l r start up down left right "
+                        "stick_up stick_down stick_left stick_right c_up c_down c_left c_right), controller or rumble");
+        p.controls[c].clear();
         std::istringstream items(value);
         for (std::string item; std::getline(items, item, ',');) {
             if (trim(item).empty()) continue;
-            if (legacy && lower(trim(item)) == "key:escape") item = "key:H";  // Escape opens the menu now
             Binding b;
             std::string why;
             if (!parse_binding(item, b, why)) return fail(why);
-            s.controls[c].push_back(b);
+            p.controls[c].push_back(b);
         }
     }
-    if (!s.controller1.empty() && s.controller1 == s.controller2) { error = "player one and player two cannot use the same explicit controller"; return false; }
+    for (unsigned a = 0; a < kPlayers; ++a)
+        for (unsigned b = a + 1; b < kPlayers; ++b)
+            if (!s.players[a].controller.empty() && s.players[a].controller != "none" &&
+                s.players[a].controller == s.players[b].controller) {
+                error = "players " + std::to_string(a + 1) + " and " + std::to_string(b + 1) + " cannot use the same explicit controller";
+                return false;
+            }
     error.clear();
     out = std::move(s);
     return true;
@@ -336,31 +459,49 @@ std::string settings_text(const Settings& s) {
         "\n"
         "[display]\n"
         "# A preset sets the enhancements below it: original (the console's picture), low-end (a Raspberry Pi\n"
-        "# 4-class board), desktop (3x resolution, 16x anisotropic filtering). Keys after it override it.\n"
+        "# 4-class board), desktop (the window's resolution, 16x anisotropic filtering). Keys after it override it.\n"
         "preset = " + s.preset + "\n"
         "# Borderless full screen (F11 or Alt+Enter switch it), and on which display (its name; empty: the main one).\n"
         "fullscreen = " + b(s.fullscreen) + "\n"
         "monitor = " + s.monitor + "\n"
+        "# The picture's shape, width:height: 4:3 is the original; a wider one (16:10, 16:9, 21:9, 32:9, any up to\n"
+        "# 4:1) shows more at the sides; auto is the screen's own. hud: where the game's HUD goes on a wider\n"
+        "# picture: edges, middle (the middle 4:3) or stretched. Not yet: both need the game's cameras and HUD\n"
+        "# patched, and until that is done the picture is 4:3 whatever is set here.\n"
+        "aspect = " + (s.aspect_w && s.aspect_h ? std::to_string(s.aspect_w) + ":" + std::to_string(s.aspect_h) : std::string("auto")) + "\n"
+        "hud = " + kHuds[unsigned(s.hud)] + "\n"
         "# The picture's size: integer (whole multiples of the console's, the sharpest), fit (the largest that\n"
         "# keeps its shape) or stretch (the whole window). smooth: filtered; false: nearest pixel.\n"
         "scaling = " + scaling_name(s.scaling) + "\n"
         "smooth = " + b(s.smooth) + "\n"
+        "# smaa: SMAA anti-aliasing (smooths jagged edges). fsr: AMD FSR 1 upscaling where the picture is shown\n"
+        "# larger than it's drawn (not at whole multiples), with its sharpening, 0 to 100.\n"
+        "smaa = " + b(s.smaa) + "\n"
+        "fsr = " + b(s.fsr) + "\n"
+        "sharpness = " + std::to_string(s.sharpness) + "\n"
         "# Its look: plain, or crt (a CRT television: raster lines and phosphor stripes). For crt, how dark the\n"
         "# gaps between lines are and how strong the stripes, 0 to 100.\n"
         "look = " + (s.look == host::Look::crt ? "crt" : "plain") + "\n"
         "scanlines = " + std::to_string(s.scanlines) + "\n"
         "mask = " + std::to_string(s.mask) + "\n"
-        "# The game's resolution, as a multiple of the Wii's 640x528: 1 to 8, or auto (the smallest that fills\n"
-        "# the screen line for line). Higher is sharper and needs a faster GPU: the GPU's work grows with the\n"
-        "# square (8x is 64 times 1x's pixels). MKDD_SCALE in the environment overrides it.\n"
-        "internal_scale = " + (s.scale ? std::to_string(s.scale) : std::string("auto")) + "\n"
+        "# The resolution the game is drawn at, as a multiple of the GameCube's 640x480: 1 to 8, or auto (the\n"
+        "# smallest that fills the window line for line, taken when the game starts). Higher is sharper and\n"
+        "# needs a faster GPU: the work grows with the square (8x is 64 times 1x's pixels). MKDD_SCALE in the\n"
+        "# environment overrides it.\n"
+        "render_resolution = " + (s.scale ? std::to_string(s.scale) : std::string("auto")) + "\n"
         "# Texture filtering at an angle: 1 (the console's), 2, 4, 8 or 16.\n"
         "anisotropy = " + std::to_string(s.anisotropy) + "\n"
         "# Colour depth: true, 24-bit colour (smooth gradients); false, the console's 18 bits with its dither\n"
-        "# pattern, as on a Wii (the game draws fights that way).\n"
+        "# pattern where the game draws that way.\n"
         "true_color = " + b(s.true_color) + "\n"
-        "# vsync: true, no tearing; false, the lowest latency.\n"
+        "# vsync: true, no tearing; false, the lowest latency. low_latency: with vsync, at most one frame\n"
+        "# waiting for the display.\n"
         "vsync = " + b(s.vsync) + "\n"
+        "low_latency = " + b(s.low_latency) + "\n"
+        "# Frames a second: original (the game's own: 60 with one or two players, 30 with three or four), 60,\n"
+        "# display (the display's refresh rate) or unlimited. Not yet: above the game's own needs the game\n"
+        "# patched, and until that is done it runs as original whatever is set here.\n"
+        "frame_rate = " + kFrameRates[unsigned(s.frame_rate)] + "\n"
         "# The graphics device, by name (empty: the best one).\n"
         "gpu = " + s.gpu + "\n"
         "# Frame rate, 1% and 0.1% lows and recent frame times in a corner (F3 switches it).\n"
@@ -369,56 +510,65 @@ std::string settings_text(const Settings& s) {
         "# highest refresh at the same resolution that is (120 Hz on a 144 Hz monitor), so frames are even.\n"
         "match_refresh = " + b(s.match_refresh) + "\n"
         "# A G-Sync, FreeSync or VRR display with it on in its driver: no switch and no locking to the\n"
-        "# refresh; the display follows the game's 60 frames a second.\n"
+        "# refresh; the display follows the game's own 59.94 frames a second.\n"
         "variable_refresh = " + b(s.variable_refresh) + "\n"
         "\n"
-        "[controls]\n"
-        "# Preferred device identities selected in the menu; empty: automatic.\n"
-        "controller1 = " + s.controller1 + "\n"
-        "controller2 = " + s.controller2 + "\n"
-        "# Press thresholds, 5-95 percent. Release is 5 points lower to resist jitter.\n"
-        "stick_threshold = " + std::to_string(s.stick_threshold) + "\n"
-        "trigger_threshold = " + std::to_string(s.trigger_threshold) + "\n"
-        "# Pointer dead zone, 0-95 percent.\n"
-        "pointer_deadzone = " + std::to_string(s.pointer_deadzone) + "\n"
-        "rumble_strength = " + std::to_string(s.rumble_strength) + "\n"
-        "# Playback volume and optional muting while another window has focus.\n"
+        "[sound]\n"
+        "# Playback volume, 0 to 100, and optional muting while another window has the focus.\n"
         "volume = " + std::to_string(s.volume) + "\n"
         "mute_unfocused = " + b(s.mute_unfocused) + "\n"
-        "# The Wii Remote's rumble, on the controller.\n"
-        "rumble = " + b(s.rumble) + "\n"
-        "# The sounds the game plays on the Wii Remote's own speaker, from the PC's speakers.\n"
-        "speaker = " + b(s.speaker) + "\n"
-        "# A second player (Head-to-Head), with a controller as a second Wii Remote, by the same pad buttons:\n"
-        "#   off                every controller plays the first Wii Remote\n"
-        "#   second controller  the first controller to have a button pressed plays the first Wii Remote (with\n"
-        "#                      the keyboard and mouse), the next one the second\n"
-        "#   first controller   player one has the keyboard and mouse, the controller is the second Wii Remote\n"
-        "second_player = " + std::string(s.second_player == 1 ? "second controller" : s.second_player == 2 ? "first controller" : "off") + "\n"
-        "# The Wii Remote held sideways, buttons only. Each of its buttons takes a list of inputs, separated by\n"
-        "# commas; an empty list leaves it unused. The settings menu's Controls page sets them by pressing them.\n"
-        "#   pad:<button>  a gamepad's button by an Xbox pad's names: Up Down Left Right A B X Y Start Back Guide\n"
-        "#                 LB RB LT RT L3 R3 (the left stick counts as Up/Down/Left/Right past half way)\n"
+        "# output, from the next start: stereo; surround (5.1 from the game's Dolby Surround signal: choose\n"
+        "# Surround in the game's own sound options too); or device (surround where the device has six\n"
+        "# speakers or more, else stereo). device: the playback device by its name (empty: the system's\n"
+        "# default, followed when it changes).\n"
+        "output = " + kOutputs[unsigned(s.sound_output)] + "\n"
+        "device = " + s.sound_device + "\n"
+        "\n"
+        "[controls]\n"
+        "# stick_deadzone: how much of a stick's travel from its centre reads as the centre, 0-50 percent.\n"
+        "# stick_threshold: where a stick's direction counts as pressed when it's bound to a button, 5-95.\n"
+        "# trigger_threshold: where L and R click (the press at the end of the GameCube's triggers), 5-95 percent\n"
+        "# of a trigger's travel. Releases are 5 points lower to resist jitter. rumble_strength: 0-100.\n"
+        "stick_deadzone = " + std::to_string(s.stick_deadzone) + "\n"
+        "stick_threshold = " + std::to_string(s.stick_threshold) + "\n"
+        "trigger_threshold = " + std::to_string(s.trigger_threshold) + "\n"
+        "rumble_strength = " + std::to_string(s.rumble_strength) + "\n"
+        "\n"
+        "# The four controller ports. controller: which controller plays the port: empty, automatic (the\n"
+        "# controllers take the ports in the order each first has a button pressed); a device's identity, as\n"
+        "# the settings menu writes it; or none. rumble: the controller's rumble, true or false.\n"
+        "# Each of the GameCube controller's controls takes a list of inputs, separated by commas; an empty\n"
+        "# list leaves it unused. The settings menu's Controls page sets them by pressing them.\n"
+        "#   pad:<input>   the port's controller, by an Xbox pad's names: A B X Y (by position: bottom, right,\n"
+        "#                 left, top) Start Back Guide LB RB LT RT L3 R3, the D-pad Up Down Left Right, the left\n"
+        "#                 stick LSUp LSDown LSLeft LSRight and the right stick RSUp RSDown RSLeft RSRight\n"
         "#   key:<name>    a key, as SDL names it: A-Z, 0-9, Up, Down, Left, Right, Space, Return, Backspace,\n"
-        "#                 Tab, Left Shift, Right Ctrl, F2 ... (not Escape, F1 or F11: they're the program's)\n"
+        "#                 Tab, Left Shift, Right Ctrl, F2 ... (not Escape, F1, F3, F9 or F11: the program's)\n"
         "#   mouse         the mouse's left button\n"
-        "# up/down/left/right are the player's directions (dodge, duck, block). one and two punch left and right;\n"
-        "# a is the Star Punch, and the menus' OK. The pointer follows the mouse and the right stick.\n";
-    for (unsigned c = 0; c < kControlCount; ++c) {
-        t += kControlNames[c];
-        t += " =";
-        for (size_t i = 0; i < s.controls[c].size(); ++i) t += (i ? ", " : " ") + binding_text(s.controls[c][i]);
-        t += "\n";
+        "# A stick or a trigger bound to the stick's directions, the C-stick's or L and R is analogue; a key or\n"
+        "# a button there presses all the way. A port with keys is always connected; the others while their\n"
+        "# controller is.\n";
+    for (unsigned p = 0; p < kPlayers; ++p) {
+        const Player& pl = s.players[p];
+        t += "\n[player" + std::to_string(p + 1) + "]\n";
+        t += "controller = " + pl.controller + "\n";
+        t += std::string("rumble = ") + b(pl.rumble) + "\n";
+        for (unsigned c = 0; c < kControlCount; ++c) {
+            t += kControlNames[c];
+            t += " =";
+            for (size_t i = 0; i < pl.controls[c].size(); ++i) t += (i ? ", " : " ") + binding_text(pl.controls[c][i]);
+            t += "\n";
+        }
     }
     t += "\n"
          "[console]\n"
-         "# What the game reads as the Wii's own settings, from the next start.\n"
-         "# language: 1 English, 2 German, 3 French, 4 Spanish, 5 Italian.\n"
-         "language = " + std::to_string(s.language) + "\n"
-         "# widescreen: 16:9; false, 4:3.\n"
-         "widescreen = " + b(s.widescreen) + "\n"
-         "# sound: mono or stereo.\n"
-         "sound = " + (s.sound == 0 ? "mono" : "stereo") + "\n";
+         "# What the game reads as the GameCube's own settings, from the next start.\n"
+         "# language: english (the only one on the USA disc).\n"
+         "language = english\n"
+         "# sound: mono or stereo (the game's own sound options add Surround).\n"
+         "sound = " + std::string(s.sound == 0 ? "mono" : "stereo") + "\n"
+         "# progressive: true, progressive scan (480p); false, interlaced, as on a television.\n"
+         "progressive = " + b(s.progressive) + "\n";
     return t;
 }
 
@@ -447,17 +597,19 @@ bool save_settings(const std::filesystem::path& folder, const Settings& s) {
 }
 
 Settings load_settings(const std::filesystem::path& folder) {
-    const std::filesystem::path file = settings_file(folder), old = folder / "settings.ini";
-    const auto read = [](const std::filesystem::path& f, std::string& text) {
-        std::ifstream in(f, std::ios::binary);
-        if (!in) return false;
-        std::stringstream buf;
-        buf << in.rdbuf();
-        text = buf.str();
-        return !in.bad() && !buf.bad();
-    };
+    const std::filesystem::path file = settings_file(folder);
     std::string text;
-    if (read(file, text)) {
+    bool read = false;
+    {
+        std::ifstream in(file, std::ios::binary);
+        if (in) {
+            std::stringstream buf;
+            buf << in.rdbuf();
+            text = buf.str();
+            read = !in.bad() && !buf.bad();
+        }
+    }
+    if (read) {
         Settings s;
         std::string error;
         if (!parse_settings(text, s, error))
@@ -469,21 +621,9 @@ Settings load_settings(const std::filesystem::path& folder) {
     std::error_code read_ec;
     if (std::filesystem::exists(file, read_ec) || read_ec)
         qilin::rt::fatal(nullptr, "cannot read %s (the existing settings have been kept)", file.string().c_str());
-    Settings s = default_settings();
-    if (read(old, text)) {  // v0.17.0's: its controls and scale carry over
-        std::string error;
-        if (!parse_settings(text, s, error, true))
-            qilin::rt::fatal(nullptr, "%s, %s (fix it, or delete the file to get the defaults back)", old.string().c_str(),
-                             error.c_str());
-    }
+    const Settings s = default_settings();
     if (!save_settings(folder, s)) qilin::rt::fatal(nullptr, "cannot write %s", file.string().c_str());
-    if (!text.empty()) {
-        std::error_code ec;
-        std::filesystem::rename(old, folder / "settings.ini.old", ec);
-        qilin::rt::log("settings: moved %s into %s (the old file is settings.ini.old)", old.string().c_str(), file.string().c_str());
-    } else {
-        qilin::rt::log("settings: wrote the defaults to %s", file.string().c_str());
-    }
+    qilin::rt::log("settings: wrote the defaults to %s", file.string().c_str());
     return s;
 }
 

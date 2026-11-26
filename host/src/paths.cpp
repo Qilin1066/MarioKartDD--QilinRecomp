@@ -1,8 +1,6 @@
 // Where this port keeps what it writes (paths.hpp).
 #include "qilin/host/paths.hpp"
 
-#include <SDL3/SDL.h>
-
 #include <cstdio>
 #include <cstdlib>
 #include <system_error>
@@ -23,15 +21,6 @@ std::filesystem::path user_data_base() {
 #endif
     return {};
 }
-
-// v0.17.0's folder, where it is (without creating it).
-std::filesystem::path old_folder() {
-    char* pref = SDL_GetPrefPath("Qilin", "MarioKartDD-QilinComp");  // this creates it, if missing: removed below when empty
-    if (!pref) return {};
-    std::filesystem::path p(reinterpret_cast<const char8_t*>(pref));  // SDL paths are UTF-8
-    SDL_free(pref);
-    return p;
-}
 }  // namespace
 
 std::filesystem::path user_folder() {
@@ -44,24 +33,6 @@ std::filesystem::path user_folder() {
             const std::filesystem::path base = user_data_base();
             if (base.empty()) die("can't find a folder for saves: no LOCALAPPDATA, HOME or XDG_DATA_HOME");
             p = base / "qilin" / "mkdd";
-            const std::filesystem::path before = old_folder();
-            if (!before.empty() && std::filesystem::is_directory(before, ec)) {
-                if (std::filesystem::is_empty(before, ec)) {
-                    std::filesystem::remove(before, ec);  // only SDL's own making, and its parent if that's empty too
-                    if (std::filesystem::is_empty(before.parent_path(), ec)) std::filesystem::remove(before.parent_path(), ec);
-                } else if (!std::filesystem::exists(p, ec)) {
-                    std::filesystem::create_directories(p.parent_path(), ec);
-                    std::filesystem::rename(before, p, ec);
-                    if (ec)
-                        std::fprintf(stderr, "mkdd: can't move %s to %s (%s): your saves are still in the old place\n",
-                                     before.string().c_str(), p.string().c_str(), ec.message().c_str());
-                    else
-                        std::fprintf(stderr, "mkdd: moved %s to %s\n", before.string().c_str(), p.string().c_str());
-                    ec.clear();
-                    if (std::filesystem::is_empty(before.parent_path(), ec)) std::filesystem::remove(before.parent_path(), ec);
-                    ec.clear();
-                }
-            }
         }
         std::filesystem::create_directories(p, ec);
         if (ec) die("can't create %s: %s", p.string().c_str(), ec.message().c_str());

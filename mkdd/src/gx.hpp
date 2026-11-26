@@ -17,6 +17,16 @@
 
 namespace mkdd::gx {
 
+// The memory the GPU can be pointed at: the GameCube's 24 MB of MEM1, from
+// physical address 0 (there is no MEM2). GX hands the GPU physical addresses
+// (display lists, vertex arrays, textures, palettes, copy destinations, the
+// FIFO); callers mask a virtual one down first, as the hardware ignores the
+// top bits.
+constexpr uint32_t kMem1Size = 0x01800000u;
+constexpr bool in_memory(uint32_t physical, uint32_t bytes) { return physical <= kMem1Size && bytes <= kMem1Size - physical; }
+static_assert(in_memory(0, kMem1Size) && in_memory(kMem1Size - 32, 32) && !in_memory(kMem1Size - 31, 32) && !in_memory(0x10000000u, 4) &&
+              !in_memory(0x100, 0xFFFFFF00u));
+
 // One vertex, every attribute GX can send, decoded to floats (the formats
 // and fixed-point scales are the vertex attribute table's). What the vertex
 // didn't have is filled as Dolphin's vertex loader fills it.
@@ -90,7 +100,11 @@ struct PipelineKey {
     uint8_t op = 0, op_alpha = 0;                            // Vulkan blend ops
     uint8_t write_mask = 0xF;  // RGBA
     uint8_t logic = 0;        // logic op + 1, or 0 (approximated where the GPU has none)
-    uint8_t depth_out = 0;    // the shader writes depth: Z textures with the Z test after texturing
+    // 1: the shader writes depth (Z textures with the Z test after texturing).
+    // 2: the depth test and write come before the shader (BP 0x43 bit 6, GXSetZCompLoc
+    //    before texturing) and its alpha test can fail: a pixel the test drops has
+    //    written its depth all the same, as on the console.
+    uint8_t depth_out = 0;
     uint8_t small_vertices = 0;  // the draw's vertices are SmallVertex (Frame::small)
     bool operator==(const PipelineKey&) const = default;
 };
@@ -159,6 +173,7 @@ struct Copy {
     uint32_t dest_width, dest_height;
     uint32_t format;       // the copy's texture format (texture copies), see renderer.cpp
     bool to_xfb, half_scale, from_depth;
+    bool to_memory;        // also written to guest memory at `dest`, once the GPU has drawn it (4x4 at most, RGBA8's layout)
     bool efb_alpha;        // the EFB's pixel format has alpha (RGBA6_Z24); else a copy's alpha is 255
     int32_t texture;       // the id the copy becomes (texture copies)
     bool clear, clear_color, clear_alpha, clear_depth;

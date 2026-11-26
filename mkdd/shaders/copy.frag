@@ -113,7 +113,13 @@ void main() {
     case 0u: ocol0 = vec4(R4); break;                                                // R4 / I4
     case 1u: case 8u: ocol0 = vec4(R); break;                                        // R8 / I8
     case 2u: ocol0 = vec4(R4, R4, R4, float(a8 & 0xF0u) / 240.0); break;             // RA4 / IA4
-    case 3u: ocol0 = vec4(R, R, R, c.a); break;                                      // RA8 / IA8
+    case 3u:                                                                         // RA8 / IA8
+        // Of depth this is Z16, the top sixteen bits: the middle byte where a
+        // texture's intensity is, the high byte where its alpha is (Dolphin's
+        // conversion; this game's heat shimmer reads the alpha).
+        if ((pc.flags & 2u) != 0u) ocol0 = vec4(c.g, c.g, c.g, c.r);
+        else ocol0 = vec4(R, R, R, c.a);
+        break;
     case 4u: ocol0 = vec4(float(rgb.r & 0xF8u) / 248.0, float(rgb.g & 0xFCu) / 252.0, float(rgb.b & 0xF8u) / 248.0, 1.0); break;  // RGB565
     case 5u:                                                                         // RGB5A3: five bits opaque, else four and three of alpha
         if (a8 >= 224u) ocol0 = vec4(vec3(rgb & 0xF8u) / 248.0, 1.0);
@@ -123,7 +129,10 @@ void main() {
     case 9u: ocol0 = vec4(c.g); break;                                               // G8
     case 10u: ocol0 = vec4(c.b); break;                                              // B8
     case 11u: ocol0 = vec4(c.r, c.r, c.r, c.g); break;                               // RG8 (as IA8): intensity R, alpha G
-    case 12u: ocol0 = vec4(c.g, c.g, c.g, c.b); break;                               // GB8 (as IA8): intensity G, alpha B
+    case 12u:                                                                        // GB8 (as IA8): intensity G, alpha B
+        if ((pc.flags & 2u) != 0u) ocol0 = vec4(c.b, c.b, c.b, c.g);                 // of depth, Z16L: the low byte, alpha the middle
+        else ocol0 = vec4(c.g, c.g, c.g, c.b);
+        break;
     default: ocol0 = c; break;                                                       // RGBA8
     }
 }

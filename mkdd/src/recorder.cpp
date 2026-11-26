@@ -97,9 +97,8 @@ const uint8_t* array_data(const Registers& r, unsigned array, uint32_t index, ui
     const uint32_t base = r.cp[0xA0 + array], stride = r.cp[0xB0 + array];
     if (g_dff_use) [[unlikely]] note_array(array, index * stride, bytes);
     const uint32_t a = (base + index * stride) & 0x1FFFFFFFu;
-    if ((a < 0x01800000u && a + bytes <= 0x01800000u) || (a >= 0x10000000u && a + bytes <= 0x14000000u))
-        return rt::guest_ptr(0x80000000u | a);
-    rt::fatal(nullptr, "vertex array %u: element %u (%u bytes at %08X) is outside MEM1 and MEM2", array, index, bytes, base + index * stride);
+    if (in_memory(a, bytes)) return rt::guest_ptr(0x80000000u | a);
+    rt::fatal(nullptr, "vertex array %u: element %u (%u bytes at %08X) is outside MEM1", array, index, bytes, base + index * stride);
 }
 
 void read_color(const uint8_t* p, unsigned fmt, uint8_t* out) {
@@ -147,12 +146,12 @@ struct Format {
     Array arrays[12];  // 0 position, 1 normal, 2-3 colours, 4-11 texture coordinates
 };
 
-// The array's elements of `bytes` each, as far as they stay inside MEM1 or MEM2.
+// The array's elements of `bytes` each, as far as they stay inside MEM1.
 Array resolve_array(const Registers& r, unsigned array, uint32_t bytes) {
     Array a;
     const uint32_t base = r.cp[0xA0 + array] & 0x1FFFFFFFu, stride = r.cp[0xB0 + array];
-    const uint32_t end = base < 0x01800000u ? 0x01800000u : (base >= 0x10000000u && base < 0x14000000u) ? 0x14000000u : 0;
-    if (end == 0 || base + bytes > end) return a;
+    const uint32_t end = kMem1Size;
+    if (!in_memory(base, bytes)) return a;
     a.host = rt::guest_ptr(0x80000000u | base);
     a.stride = stride;
     a.last = stride == 0 ? 0xFFFFFFFFu : (end - base - bytes) / stride;
@@ -799,6 +798,19 @@ PipelineKey pipeline_key(const uint32_t* bp, bool& alpha_target) {
     return k;
 }
 
+// The alpha test (BP 0xF3: two compares and how they combine) can't fail.
+constexpr bool alpha_test_passes(uint32_t test) {
+    const uint32_t a = (test >> 16) & 7, b = (test >> 19) & 7;  // 7 always, 0 never
+    switch ((test >> 22) & 3) {
+        case 0: return a == 7 && b == 7;                         // and
+        case 1: return a == 7 || b == 7;                         // or
+        case 2: return (a == 7 && b == 0) || (a == 0 && b == 7);  // xor
+        default: return (a == 7 && b == 7) || (a == 0 && b == 0);  // xnor
+    }
+}
+static_assert(alpha_test_passes((7u << 16) | (7u << 19)) && alpha_test_passes((1u << 22) | (7u << 16) | (4u << 19)) &&
+              !alpha_test_passes((6u << 16) | (7u << 19)) && !alpha_test_passes((1u << 22) | (6u << 16) | (3u << 19)));
+
 void viewport_and_scissor(const Registers& r, Draw& d) {
     const float wd = as_float(r.xf[0x101A]), ht = as_float(r.xf[0x101B]), z_range = as_float(r.xf[0x101C]);
     const float x_orig = as_float(r.xf[0x101D]), y_orig = as_float(r.xf[0x101E]), far_z = as_float(r.xf[0x101F]);
@@ -929,7 +941,7 @@ std::unique_ptr<Frame> next_frame(unsigned timeout_ms) {
     return f;
 }
 
-void state_changed() { g_dirty = true, g_parts = kPartAll; }
+void state_changed() { g_dirty = true, g_parts = kPartAll, cp_changed(); }
 void xf_changed(uint32_t address, uint32_t count) {
     const uint32_t end = address + count;
     const auto overlaps = [&](uint32_t lo, uint32_t hi) { return address < hi && end > lo; };
@@ -943,6 +955,24 @@ void xf_changed(uint32_t address, uint32_t count) {
 }
 
 static void record_primitive_timed(const Registers& r, uint8_t opcode, const uint8_t* data, uint32_t count);
+// The frame's last packet is a draw of triangles that the next primitive may
+// join (record_primitive_timed): its place in the frame's draws, and what the
+// vertices of a primitive joining it must be like.
+static struct {
+    bool valid = false;
+    uint32_t draw = 0, has = 0;
+    bool small = false;
+} g_join;
+// The vertex format last used and its plan, kept while the CP registers
+// they're made from stay as they are (cp_changed): a model's display list is
+// hundreds of short strips in one format.
+static struct {
+    bool valid = false;
+    unsigned vat = 0;
+    Format fmt;
+    Plan plan;
+} g_kept;
+void cp_changed() { g_kept.valid = false; }
 static bool g_capture_next = false;
 void mark_captured_frame() { g_capture_next = true; }
 static uint32_t g_primitive_serial = 0;
@@ -951,24 +981,24 @@ bool g_dff_use = false;
 void (*g_dff_use_hook)(uint32_t, uint32_t) = nullptr;
 static void record_copy_timed(const Registers& r, uint32_t command);
 
-// Time spent recording, less any wait for the main thread inside.
+// (Timed by the decoder, a batch of commands at a time: two clock readings a
+// primitive cost as much as a five-vertex strip.)
 void record_primitive(const Registers& r, uint8_t opcode, const uint8_t* data, uint32_t count) {
-    const uint64_t t0 = now_ns(), w0 = g_stats.wait_ns.load(std::memory_order_relaxed);
     record_primitive_timed(r, opcode, data, count);
-    g_stats.record_ns.fetch_add(now_ns() - t0 - (g_stats.wait_ns.load(std::memory_order_relaxed) - w0), std::memory_order_relaxed);
 }
-void record_copy(const Registers& r, uint32_t command) {
-    const uint64_t t0 = now_ns(), w0 = g_stats.wait_ns.load(std::memory_order_relaxed);
-    record_copy_timed(r, command);
-    g_stats.record_ns.fetch_add(now_ns() - t0 - (g_stats.wait_ns.load(std::memory_order_relaxed) - w0), std::memory_order_relaxed);
-}
+void record_copy(const Registers& r, uint32_t command) { record_copy_timed(r, command); }
 
 static void record_primitive_timed(const Registers& r, uint8_t opcode, const uint8_t* data, uint32_t count) {
     if (count == 0) return;
     Frame& f = *g_frame;
-    const Format fmt = format_of(r, opcode & 7);
+    if (const unsigned vat = opcode & 7; !g_kept.valid || g_kept.vat != vat) {
+        g_kept.fmt = format_of(r, vat);
+        g_kept.plan = plan_of(r, g_kept.fmt);
+        g_kept.vat = vat, g_kept.valid = true;
+    }
+    const Format& fmt = g_kept.fmt;
     uint32_t has = 0;
-    const Plan plan = plan_of(r, fmt);
+    const Plan& plan = g_kept.plan;
     if (g_dff_use) [[unlikely]]
         std::fill(std::begin(g_use_lo), std::end(g_use_lo), ~0u), std::fill(std::begin(g_use_hi), std::end(g_use_hi), 0u);
     // The compact layout when nothing needs the rest: no tangents or binormals
@@ -1023,6 +1053,70 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     if (g_dff_use) [[unlikely]]
         for (unsigned a = 0; a < 16; ++a)
             if (g_use_lo[a] < g_use_hi[a]) dff_use_memory(r.cp[0xA0 + a] + g_use_lo[a], g_use_hi[a] - g_use_lo[a]);
+    auto& ix = f.indices;
+    const unsigned type = (opcode >> 3) & 7;
+    // Sized once, then written through a pointer.
+    const auto grow = [&](size_t n) {
+        const size_t at = ix.size();
+        ix.resize(at + n);
+        return ix.data() + at;
+    };
+    // The indices that draw vertices [first, first + count) of triangle type `type` as a list.
+    const auto triangles = [&](unsigned type, uint32_t first, uint32_t count) {
+        switch (type) {
+            case 0: case 1: {  // quads (and the second quad type)
+                uint32_t* o = grow(size_t(count / 4) * 6);
+                for (uint32_t i = 0; i + 3 < count; i += 4, o += 6) {
+                    const uint32_t v = first + i;
+                    o[0] = v, o[1] = v + 1, o[2] = v + 2, o[3] = v, o[4] = v + 2, o[5] = v + 3;
+                }
+                break;
+            }
+            case 2: {  // triangles
+                uint32_t* o = grow(size_t(count / 3) * 3);
+                for (uint32_t i = 0; i < count / 3 * 3; ++i) o[i] = first + i;
+                break;
+            }
+            case 3: {  // strip: every other triangle's first two vertices swapped, so all wind alike
+                if (count < 3) break;
+                uint32_t* o = grow(size_t(count - 2) * 3);
+                for (uint32_t i = 0; i + 2 < count; ++i, o += 3) {
+                    const uint32_t v = first + i;
+                    if (i & 1) o[0] = v + 1, o[1] = v, o[2] = v + 2;
+                    else o[0] = v, o[1] = v + 1, o[2] = v + 2;
+                }
+                break;
+            }
+            default: {  // fan
+                if (count < 3) break;
+                uint32_t* o = grow(size_t(count - 2) * 3);
+                for (uint32_t i = 1; i + 1 < count; ++i, o += 3) o[0] = first, o[1] = first + i, o[2] = first + i + 1;
+                break;
+            }
+        }
+    };
+    // A primitive drawn with exactly the state of the draw before it joins that
+    // draw: no register the state reads was written in between (g_dirty), no
+    // copy came between, and its vertices are of the same kind. This game's
+    // models are strips of five vertices on average, 5,000 primitives a course,
+    // and a draw each cost more to record and to draw than their triangles.
+    // The joined draw is an indexed triangle list, in the primitives' order.
+    // (Not while MKDD_DFF captures, which numbers draws by primitive;
+    // MKDD_JOIN=0 gives every primitive its own draw.)
+    static const bool join = [] { const char* e = std::getenv("MKDD_JOIN"); return !(e && *e == '0'); }();
+    if (join && type <= 4 && !g_dirty && g_join.valid && g_join.has == has && g_join.small == small && !g_dff_use &&
+        !f.packets.empty() && f.packets.back().kind == Packet::kDraw && f.packets.back().index == g_join.draw) {
+        Draw& d = f.draws[g_join.draw];
+        if (d.direct) {  // the first to join it: its own vertices as indices
+            const uint32_t v0 = d.first_index, n = d.index_count;
+            d.first_index = uint32_t(ix.size());
+            triangles(d.direct == 2 ? 3 : 2, v0, n);
+            d.direct = 0;
+        }
+        triangles(type, first, count);
+        d.index_count = uint32_t(ix.size()) - d.first_index;
+        return;
+    }
     if (g_dirty) {
         // From the frame's last state where there is one, redoing what changed.
         static const bool check = [] { const char* e = std::getenv("MKDD_CHECK_DECODE"); return e && *e && *e != '0'; }();
@@ -1043,35 +1137,15 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     d.state = g_state;
     d.has = has;
     d.first_index = uint32_t(f.indices.size());
-    auto& ix = f.indices;
-    const unsigned type = (opcode >> 3) & 7;
-    // Sized once, then written through a pointer.
-    const auto grow = [&](size_t n) {
-        const size_t at = ix.size();
-        ix.resize(at + n);
-        return ix.data() + at;
-    };
     switch (type) {
-        case 0: case 1: {  // quads (and the second quad type)
-            uint32_t* o = grow(size_t(count / 4) * 6);
-            for (uint32_t i = 0; i + 3 < count; i += 4, o += 6) {
-                const uint32_t v = first + i;
-                o[0] = v, o[1] = v + 1, o[2] = v + 2, o[3] = v, o[4] = v + 2, o[5] = v + 3;
-            }
-            break;
-        }
+        case 0: case 1: triangles(type, first, count); break;  // quads
         // Lists and strips draw the vertices as they are, in order: no indices.
         // Vulkan's strips wind alternate triangles as GX's do (each odd
         // triangle's vertices are a rotation of GX's), and the shaders have no
         // flat inputs, so the provoking vertex doesn't matter.
         case 2: d.direct = 1, d.first_index = first, d.index_count = count / 3 * 3; break;    // triangles
         case 3: d.direct = 2, d.first_index = first, d.index_count = count >= 3 ? count : 0; break;  // strip
-        case 4: {  // fan
-            if (count < 3) break;
-            uint32_t* o = grow(size_t(count - 2) * 3);
-            for (uint32_t i = 1; i + 1 < count; ++i, o += 3) o[0] = first, o[1] = first + i, o[2] = first + i + 1;
-            break;
-        }
+        case 4: triangles(type, first, count); break;  // fan
         case 5: d.direct = 1, d.first_index = first, d.index_count = count / 2 * 2; break;            // lines
         case 6: d.direct = 2, d.first_index = first, d.index_count = count >= 2 ? count : 0; break;  // line strip
         default: d.direct = 1, d.first_index = first, d.index_count = count; break;                  // points
@@ -1096,15 +1170,19 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     // Z textures change the depth written only when Z is compared after texturing
     // (BP 0x43 bit 6 clear); then the shader writes depth.
     if (((r.bp[0xF5] >> 2) & 3) != 0 && d.depth_test && !((r.bp[0x43] >> 6) & 1)) d.pipeline.depth_out = 1;
+    // Z compared before texturing: the depth is written whatever the alpha test
+    // then says. Only a test that can fail needs the pipeline that orders it so.
+    else if (d.depth_test && d.depth_write && ((r.bp[0x43] >> 6) & 1) && !alpha_test_passes(r.bp[0xF3])) d.pipeline.depth_out = 2;
     viewport_and_scissor(r, d);
     bind_textures(r, d);
     d.primitive = g_primitive_serial;
     f.packets.push_back({Packet::kDraw, uint32_t(f.draws.size())});
+    g_join = {type <= 4, uint32_t(f.draws.size()), has, small};
     f.draws.push_back(d);
 }
 
 void bp_written(uint32_t reg, uint32_t value, bool changed) {
-    if (reg == 0x66) textures_invalidated();
+    if (reg == 0x66) textures_invalidated(), g_join.valid = false;  // (a texture may be new under the same registers)
     if (!changed) return;  // the state is what it was (commands are acted on by gpu.cpp either way)
     g_parts |= kPartBp;
     if (reg >= 0xE0 && reg <= 0xE7) {  // TEV colour registers and konstants: 11-bit signed, the type bit says which
@@ -1157,6 +1235,7 @@ void record_tlut_load(const Registers& r, uint32_t command) {
     const uint32_t source = (r.bp[0x64] & 0xFFFFFF) << 5;
     const uint32_t tmem = (command & 0x3FF) << 9, bytes = ((command >> 10) & 0x7FF) * 32;
     load_tlut(source, tmem, bytes);
+    g_join.valid = false;  // the same registers, another palette
 }
 
 
@@ -1187,6 +1266,11 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         c.filter[1] = uint8_t(tap(2) + tap(3) + tap(4));
         c.filter[2] = uint8_t(tap(5) + tap(6));
     }
+    // Not a copy of depth: its bytes are one number, not three channels to
+    // blend with the lines around (Dolphin leaves the filter out of them too).
+    // This game keeps its deflicker weights set all frame and copies depth
+    // in mid-frame (the heat shimmer, the Z the CPU reads back).
+    if (c.from_depth && !c.to_xfb) c.filter[0] = 0, c.filter[1] = 64, c.filter[2] = 0;
     c.clamp_top = command & 1;
     c.clamp_bottom = (command >> 1) & 1;
     const uint32_t blend = r.bp[0x41];
@@ -1211,6 +1295,12 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         c.dest_width = uint32_t(c.half_scale ? c.src[2] / 2 : c.src[2]);
         c.dest_height = uint32_t(c.half_scale ? c.src[3] / 2 : c.src[3]);
         c.texture = texture_from_copy(c.dest, c.dest_width, c.dest_height, f);
+        // A copy of one tile or less in the 32-bit layout (RGBA8, Z24X8) also
+        // goes to guest memory, for the CPU: the game copies 2x2 pixels of
+        // depth and reads them to see whether a player's mark or the sun is
+        // hidden (ZCaptureNode, doldecomp's name). Larger copies stay on the
+        // GPU: this game reads none of them (docs/graphics.md).
+        c.to_memory = c.dest_width <= 4 && c.dest_height <= 4 && (c.format & 0xFF) == 6 && in_memory(c.dest & 0x1FFFFFFFu, 64);
     }
     f.packets.push_back({Packet::kCopy, uint32_t(f.copies.size())});
     f.copies.push_back(c);
@@ -1222,6 +1312,7 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         submit(std::move(g_frame));
         g_frame = spare_frame();
         g_dirty = true;
+        g_join.valid = false;
     }
 }
 

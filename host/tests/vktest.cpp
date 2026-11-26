@@ -105,6 +105,104 @@ int main() {
             ++failures;
         }
     }
+    // A capture: the last picture as it was shown (the CRT's, here), at the target's size.
+    {
+        const std::vector<uint8_t> shown = d.read_back();
+        uint32_t cw = 0, ch = 0;
+        const std::vector<uint8_t> shot = d.capture(cw, ch);
+        if (cw != 64 || ch != 36 || shot != shown) {
+            std::printf("vktest: a capture is %ux%u, %s the picture shown\n", cw, ch, shot == shown ? "and" : "and not");
+            ++failures;
+        }
+    }
+    // SMAA: a staircase edge (white where x > y) shown pixel for pixel. Without it every pixel is
+    // black or white; with it the steps are blended and the flat areas are untouched.
+    pic = qilin::host::Picture{};
+    pic.scaling = qilin::host::Scaling::stretch;
+    pic.smooth = false;
+    std::vector<uint8_t> stairs(64 * 36 * 4, 255);
+    for (int y = 0; y < 36; ++y)
+        for (int x = 0; x < 64; ++x)
+            if (x <= y)
+                for (int c = 0; c < 3; ++c) stairs[static_cast<size_t>(y * 64 + x) * 4 + static_cast<size_t>(c)] = 0;
+    const auto shades = [&](bool smaa, bool& flat_kept) {
+        pic.smaa = smaa;
+        d.set_picture(pic);
+        d.present(64, 36, stairs.data(), 64.0f / 36.0f, 36);
+        const std::vector<uint8_t> s = d.read_back();
+        int between = 0;
+        for (size_t i = 0; i < s.size(); i += 4) between += s[i] > 8 && s[i] < 247;
+        flat_kept = s[(30 * 64 + 2) * 4] == 0 && s[(2 * 64 + 60) * 4] == 255;  // far below and far above the edge
+        return between;
+    };
+    {
+        bool flat_plain = false, flat_smaa = false;
+        const int plain = shades(false, flat_plain), smoothed = shades(true, flat_smaa);
+        if (plain != 0 || smoothed < 20 || !flat_plain || !flat_smaa) {
+            std::printf("vktest: SMAA: %d blended pixels without it, %d with it (the flat areas %s)\n", plain, smoothed,
+                        flat_plain && flat_smaa ? "kept" : "changed");
+            ++failures;
+        }
+        // And once more without: the pass is really off again.
+        if (shades(false, flat_plain) != 0) {
+            std::puts("vktest: SMAA stays on after it's switched off");
+            ++failures;
+        }
+    }
+    // FSR 1: a 16x9 picture, black on the left half and white on the right, shown four times its
+    // size. Flat areas stay as they are, and the edge is sharper than bilinear filtering leaves it.
+    if (d.fsr_available()) {
+        std::vector<uint8_t> halves(16 * 9 * 4, 255);
+        for (int y = 0; y < 9; ++y)
+            for (int x = 0; x < 8; ++x)
+                for (int c = 0; c < 3; ++c) halves[static_cast<size_t>(y * 16 + x) * 4 + static_cast<size_t>(c)] = 0;
+        const auto row = [&](bool fsr) {
+            pic = qilin::host::Picture{};
+            pic.scaling = qilin::host::Scaling::stretch;
+            pic.fsr = fsr;
+            pic.sharpness = 0.8f;
+            d.set_picture(pic);
+            d.present(16, 9, halves.data(), 16.0f / 9.0f, 9);
+            const std::vector<uint8_t> s = d.read_back();
+            std::vector<int> out(64);
+            for (int x = 0; x < 64; ++x) out[static_cast<size_t>(x)] = s[static_cast<size_t>(18 * 64 + x) * 4];
+            return out;
+        };
+        const std::vector<int> soft = row(false), sharp = row(true);
+        // Bilinear: 32 and 223 a pixel and a half either side of the edge (x = 30, 33).
+        const bool soft_ok = std::abs(soft[30] - 32) <= 3 && std::abs(soft[33] - 223) <= 3;
+        const bool flat = sharp[4] == 0 && sharp[20] == 0 && sharp[44] == 255 && sharp[60] == 255;
+        const bool sharper = sharp[30] + (255 - sharp[33]) < soft[30] + (255 - soft[33]) - 20;
+        if (!soft_ok || !flat || !sharper) {
+            std::printf("vktest: FSR: across the edge bilinear gives %d %d %d %d, FSR %d %d %d %d; flat areas %d %d %d %d\n", soft[30], soft[31],
+                        soft[32], soft[33], sharp[30], sharp[31], sharp[32], sharp[33], sharp[4], sharp[20], sharp[44], sharp[60]);
+            ++failures;
+        }
+        // At whole multiples FSR stands aside (the pixels are the point): exactly the plain picture.
+        pic.scaling = qilin::host::Scaling::integer, pic.smooth = false, pic.fsr = false;
+        d.set_picture(pic);
+        d.present(16, 9, halves.data(), 16.0f / 9.0f, 9);
+        const std::vector<uint8_t> whole = d.read_back();
+        pic.fsr = true;
+        d.set_picture(pic);
+        d.present(16, 9, halves.data(), 16.0f / 9.0f, 9);
+        if (d.read_back() != whole) {
+            std::puts("vktest: FSR changes the picture at whole multiples");
+            ++failures;
+        }
+        // Both together, then a capture of it: the passes run for a capture as for a present.
+        pic.scaling = qilin::host::Scaling::stretch, pic.smaa = true, pic.fsr = true;
+        d.set_picture(pic);
+        d.present(16, 9, halves.data(), 16.0f / 9.0f, 9);
+        const std::vector<uint8_t> both = d.read_back();
+        uint32_t cw = 0, ch = 0;
+        if (d.capture(cw, ch) != both || both[(18 * 64 + 4) * 4] != 0 || both[(18 * 64 + 60) * 4] != 255) {
+            std::puts("vktest: SMAA and FSR together: the capture isn't the picture shown, or the flat areas changed");
+            ++failures;
+        }
+    } else {
+        std::puts("vktest: this device's queue has no compute shaders: FSR not tested");
+    }
     std::printf("vktest: %s on %s\n", failures ? "FAILED" : "passed", d.device_name().c_str());
     return failures ? 1 : 0;
 }

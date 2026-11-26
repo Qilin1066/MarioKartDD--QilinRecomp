@@ -11,7 +11,6 @@
 
 #include <atomic>
 #include <cstdint>
-#include <filesystem>
 #include <functional>
 
 #include "qilin/rt/system.hpp"
@@ -110,9 +109,5 @@ void preempt(qilin::rt::Cpu& c);
 // Call guest function `fn` with r3, r4 as if from an interrupt: on a fresh
 // frame below the current stack, with every register restored afterwards.
 void guest_callback(qilin::rt::Cpu& c, uint32_t fn, uint32_t a0, uint32_t a1);
-
-// The extracted disc (boot.cpp sets it).
-const std::filesystem::path& game_folder();
-void set_game_folder(std::filesystem::path folder);
 
 }  // namespace mkdd

@@ -1,63 +1,35 @@
-# Prior art: Wii and PowerPC recompilation, and this game (researched 2026-11-18)
+# Prior art
 
-What exists, what each project chose, and what it means for this one (C++23, Vulkan 1.3, cross-platform including low-end ARM boards, efficiency and reliability first, the same targets as GBTGhoulies--QilinRecomp). Sections 4–9 are RhythmHeavenFever--QilinRecomp's survey, which applies to every Wii game, carried over unchanged.
+What this project builds on or consults, and under which rule. Two rules hold throughout: no third-party code or text is copied into the repository (dependencies are fetched by CMake at pinned versions), and no game data, or anything derived from it, is committed.
 
-## 1. Sibling projects: GBTGhoulies--QilinRecomp and RhythmHeavenFever--QilinRecomp
-- **GBTGhoulies--QilinRecomp** (Grabbed by the Ghoulies, Xbox) set the requirements and scope this project shares: static recompilation to C++, the platform's system libraries replaced natively, Vulkan 1.3 only, a Raspberry Pi 4–class board as the low-end reference.
-- **RhythmHeavenFever--QilinRecomp** (Beat the Beat: Rhythm Paradise, Wii) applied them to the Wii, and wrote the recompiler core this project started from (v0.4.0): the DOL loader, the Broadway decoder and its binutils cross-check, function discovery and CFG, coverage, the CLI, the tests and CI.
+## 1. Sibling projects (same author, GPL-3.0)
 
-**Takeaways:** the core is game-independent apart from the supported build's hash. Mario Kart: Double Dash!! exercised it harder (56% more code, three times the indirect calls) and needed four new switch rules and a soundness fix (`recompiler-core.md`). They belong in the shared core, so they should go back to RhythmHeavenFever--QilinRecomp too.
+- **PunchOutWii--QilinRecomp** (Punch-Out!!, Wii). This project was started from its v0.22.0: the recompiler (DOL loader, PowerPC decoder, function discovery, lifter with its differential test), the guest runtime, the GX renderer on Vulkan, the host layer and the settings menu. The Wii and the GameCube share the CPU family, GX and most of the SDK's shape, which is why; what differs (no IOS, no Wii Remote, memory cards for NAND, the DSP's microcode, the disc) is being replaced part by part.
+- **GBTGhoulies--QilinRecomp** (Grabbed by the Ghoulies, Xbox). The reference for scope and for the settings menu's options. Its present-pass shader wrappers for SMAA and FSR 1 (`recomp/runtime/gfx/smaa`, `gfx/fsr`), their Vulkan passes and its menu's wording were reused here (`host/src/post.cpp`, `host/shaders/post/`, `mkdd/src/menu.cpp`).
+- **BeatTheBeat--QilinRecomp** (Wii): vblank steering in the main loop came from it by way of the Punch-Out project.
 
-## 2. This game: no decompilation, no symbols
-- There's no public decompilation of Mario Kart: Double Dash!! (Wii), and none of the public Wii symbol collections (for example `riptl/wii-symbols`, 21 game IDs) has `R7P*`. The disc ships no linker map or ELF.
-- What the game does give: the SDK's build banners, MSL's and MetroTRK's strings, C++ class names in `.rodata` (`AK::`, `homebutton::`, `nw4hbm::`, Next Level Games' `nl*`, `Sl*` and `FE*` classes), and a disc whose file names are readable (`art/`, `art/wwiseaudio/SoundbanksInfo.xml`).
-- The libraries it shares with other games have names elsewhere: the Revolution SDK, MSL, the EABI runtime and MetroTRK are named by the Rhythm Heaven Fever decomp (CC0, vendored in RhythmHeavenFever--QilinRecomp) and other Wii decomps (Wii Sports, Super Paper Mario, Mario Kart Wii); the HOME Button Menu and `nw4hbm` by the decomps that link it.
+## 2. This game
 
-**Takeaways:** names for the libraries come from matching against those decomps by function size sequences and strings, as RhythmHeavenFever--QilinRecomp ported US names to PAL; the game and engine code keep address names, with class names where vtables give them. Done for the Rhythm Heaven Fever decomp in v0.2.0 (`code-analysis.md`): it names 1,988 functions of the SDK, MSL, the EABI runtime, the HOME Button Menu and RFL.
+- **The disc's own linker map**, `files/debugInfoS.MAP`: the map of the game's debug build, not of the retail DOL. Same link order and the same SDK library, so SDK functions line up by size; game and JSystem code differ. It names every function with its object file and library. It is game data: it is read from the player's disc by the analysis, and no list ported from it is committed.
+- **doldecomp/mkdd** (CC0): a decompilation in progress. Used for names and structure layouts only, with a comment where code relies on it; none of its code is copied.
 
-## 3. Audiokinetic Wwise on the Wii
-- Wwise is a commercial sound engine; its Wii version runs on top of AX and includes Wii Remote speaker output (`CAkWiimoteMgr`). The game's banks were generated with Wwise's authoring tool (the disc keeps `SoundBanksGeneration.log` and `SoundbanksInfo.xml`, which name the version and every event).
+## 3. Dolphin
 
-**Takeaways:** Wwise is lifted with the game, like NW4R's sound code in Beat the Beat, and AX underneath it is replaced. The banks' metadata on the disc will help name Wwise's functions and check its behaviour.
+The reference for hardware facts (register layouts, formats, timing) and, running the original game, the ground truth for behaviour, picture and sound. Its code is not copied. Its disc tools are the player's way to convert a compressed image (`.rvz`, `.gcz`) to one this project reads (`disc.md`).
 
-## 4. DolRecomp, ModernGekko, RecompCore (ExpansionPak)
-- **DolRecomp:** a static recompiler for GameCube and Wii DOLs and RELs (and early Wii U), with C and LLVM back ends. It handles the CPU side only; the README leaves graphics, audio, input and the platform to the host.
-- **ModernGekko:** "a runtime for GameCube/Wii recomps", crediting the Dolphin team as its foundation, with a code-mod ABI. **RecompCore** is the Dolphin-derived runtime underneath it (per-file GPL-2.0-or-later). Games in its hall of fame include Super Mario Sunshine, Brawl, Melee, Luigi's Mansion and Kirby Wii.
+## 4. GNU binutils
 
-**Takeaways:** proof that CodeWarrior-compiled Wii code recompiles statically. The model (C output, guest registers in a context struct, an interpreter for whatever the translator doesn't cover, Dolphin's hardware emulation as the runtime) is what we're avoiding, for the same reasons Ghoulies avoided xboxrecomp's.
+The decoder is checked word by word against binutils' PowerPC disassembler (`tools/check/verify_decoder.py`).
 
-## 5. CastawayRecomp and BlackKnightRecomp (yunophilia) — Wii, static, C++
-- *The Sims 2: Castaway* statically recompiled to C++ for Windows x64 and Linux x64; the recompiler and most of the runtime come from the same author's BlackKnightRecomp. Function names and starts come from a linker ELF the disc happens to ship.
-- The recompiler decodes every Gekko/Broadway instruction, paired singles and quantised loads and stores included, and emits one C++ function per guest function.
-- **The game's own Revolution OS runs recompiled; guest threads are host fibers.** VI, PI, CP/PE, DSP/AI, EXI, SI and IPC are emulated at a high level, IOS's `/dev/di` and `/dev/fs` are served from the installed disc files and a `nand/` folder. GX renders through Direct3D 11 (DXVK on Linux); audio goes through an AX HLE to SDL3. GPL-2.0-only, with Dolphin-derived runtime code.
-- Testing: an end-to-end TAS script that plays from first boot, saves, quits and reloads, checking game memory at each step; headless on Linux.
+## 5. Libraries built in (fetched, pinned)
 
-**Takeaways:** a working Wii static recompilation with the same CPU decisions as ours. Its system boundary is lower than ours (the SDK runs recompiled on emulated hardware registers); ours replaces the SDK's hardware-facing libraries, as Ghoulies replaces the kernel and D3D, so no hardware register emulation is needed beyond the write-gather pipe. Fibers for guest threads are a data point for the scheduler decision. The TAS-style end-to-end test is worth copying at step 5.
+| Library | Licence | For |
+|---|---|---|
+| SDL3 | zlib | window, events, controllers, sound output |
+| Vulkan-Headers, volk | Apache-2.0 or MIT; MIT | Vulkan, loaded at run time (no SDK needed to build or run) |
+| Dear ImGui | MIT | the settings menu |
+| SMAA (Jimenez, Echevarria, Masia, Navarro, Gutierrez) | MIT | anti-aliasing: `SMAA.hlsl` and its area and search tables |
+| AMD FidelityFX FSR 1 | MIT | upscaling: `ffx_a.h`, `ffx_fsr1.h` (the shaders, and their constants computed on the CPU) |
+| glslang (only with `-DQILIN_SHADER_COMPILER=ON`) | BSD-3-Clause and others | regenerating the committed SPIR-V |
 
-## 6. NWiiRecomp (BlackLineInteractive) and Mario Kart Wiicompiled (patchzy)
-- **NWiiRecomp:** a static recompiler and runtime for GameCube and Wii, PowerPC → C++, stating no instruction-level emulation and no Dolphin code; it implements the time base and decrementer, and paired singles with GQR-based quantisation.
-- **Mario Kart Wiicompiled:** announced in July 2026 as the first static recompilation of a Wii game, in public beta since August, with Windows and x86-64 builds and, since September, an aarch64 one. It was built with AI coding tools, which drew criticism.
-
-**Takeaways:** Wii static recompilation is now practical and done more than one way; none of these targets Vulkan 1.3 with an ARM board as the low-end reference.
-
-## 7. XenonRecomp and ReXGlue (Xbox 360) — the most mature PowerPC → C++ lifters
-- **XenonRecomp** (hedge-dev; Unleashed Recompiled) converts Xbox 360 executables into C++ that compiles for any platform; jump tables and other details come from configuration. Exceptions aren't supported. **ReXGlue** builds on it with a Xenia-based runtime and C++23 output, tracks which registers it can keep as locals, models CR fields for branches, and implements the MSR's interrupt-enable bit as a global lock.
-
-**Takeaways:** a different CPU (64-bit, VMX, no paired singles) but the same instruction-set family; their CR handling and register-as-local tracking are the nearest prior art for our lifter's register model.
-
-## 8. Dolphin
-- The reference emulator, GPL-2.0-or-later. Its CPU interpreter documents Broadway's corner cases from hardware tests (paired-single rounding, the estimate tables, quantisation), and its GX and AX code define what correct output looks like.
-
-**Takeaways:** ground truth for behaviour; we don't copy its code. Where we need a hardware fact that only Dolphin's source records (the `fres`/`frsqrte` tables, for instance), we derive it from hardware documentation or measurement and check it against Dolphin's results, and note the source here.
-
-**Used so far** (v0.5.0, from a checkout of `master` at `438b557`, 2026-11-18): `divw`'s results where the architecture leaves them undefined (`Interpreter_Integer.cpp`), and for floating point the NaN rules, NI flushing, single rounding with frC rounded to 25 bits, the single multiply-add's one rounding, `fctiw`'s result pattern, the bitwise `lfs`/`stfs` conversions and the `fres`/`frsqrte` tables (`Interpreter_FPUtils.h`, `Interpreter_FloatingPoint.cpp`, `Common/FloatUtils.cpp`), plus 57 `frsqrte` input/result pairs from its unit tests as known answers. The tables and test values are numbers measured from the hardware; the code in `runtime/include/qilin/rt/cpu.hpp` is written from these rules, not copied.
-
-## 9. GNU binutils' `broadway` disassembler
-- `objdump -M broadway,raw` decodes the 750CL's instructions with the paired singles, without simplified mnemonics. It is our decoder's cross-check (`tools/check/verify_decoder.py`). It differs from Broadway in reviewed ways: it leaves out `mftb`, accepts `fsqrt`, `fsqrts`, `tlbia`, `tlbld` and `tlbli` (not on the 750CL), accepts later ISAs' hint fields that are reserved on Broadway, and doesn't check several invalid forms. The full list is in the script.
-
-## Decisions changed or added
-1. **Core:** RhythmHeavenFever--QilinRecomp's recompiler core, extended where this game needed it; the extensions go back to it.
-2. **Decoder:** our own, cross-checked against binutils on every word, in CI over a sweep of the encoding space (unchanged).
-3. **Names:** no decomp exists for this game. Libraries are named by matching against the CC0 Rhythm Heaven Fever decomp and other Wii decomps; the rest keeps address names, with class names from vtables.
-4. **System boundary:** replace the SDK's hardware-facing libraries at their API (no hardware register emulation beyond the write-gather pipe); lift the C/C++ runtime, the pure-software SDK libraries, THP, RFL, the HOME Button Menu, Wwise and Next Level Games' engine. Confirm per library in analysis.
-5. **References:** Dolphin for behaviour and timing; CastawayRecomp's TAS test as the model for our end-to-end test.
+SMAA's and FSR's sources are fetched file by file, each checked against a SHA-256 (`host/shaders/post/third_party.txt`). Their shaders are committed only in compiled form (`host/src/post_shaders.inc`), built by `tools/build_shaders.py` from our own wrappers (`host/shaders/post/`) over the fetched sources.

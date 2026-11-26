@@ -65,5 +65,5 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" "$zip" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "$zip" --title "Mario Kart: Double Dash!! QilinRecomp $VERSION" \
-              --notes "The Windows download: unpack it and double-click Play Double Dash.bat (see README.txt). You need your own disc (Europe/Australia, R7PP01, revision 1), extracted with Dolphin. Changes: CHANGELOG.md."
+              --notes "The Windows download: unpack it and double-click Play Double Dash.bat (see README.txt). You need your own disc (USA, GM4E01, revision 0): an .iso, .gcm or .ciso image as it is, or a folder extracted from one. Changes: CHANGELOG.md."
           fi

@@ -1,6 +1,7 @@
 // A controller reaches the game: a virtual Xbox-layout gamepad (SDL's own
 // virtual joystick), connected before the window opens as a player's usually
-// is, and one connected later. Each press must show in Display::buttons().
+// is, and one connected later. Each press must show in Display::buttons(),
+// and each controller at its own place (Display::pad_state).
 // Needs a window: skips (exit 77) where there's no display or no Vulkan 1.3.
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -48,6 +49,12 @@ bool reaches(qilin::host::Display& d, uint32_t want) {
 }  // namespace
 
 int main() {
+    // It opens a real window, so it runs only where that is asked for: QILIN_WINDOW_TESTS=1, or
+    // QILIN_REQUIRE_GRAPHICS=1 (CI under a virtual display). A plain ctest on somebody's desktop skips it.
+    if (!std::getenv("QILIN_WINDOW_TESTS") && !std::getenv("QILIN_REQUIRE_GRAPHICS")) {
+        std::printf("padtest: opens a window: skipped (set QILIN_WINDOW_TESTS=1 to run it)\n");
+        return 77;
+    }
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         std::printf("padtest: no display here (%s): skipped\n", SDL_GetError());
         return std::getenv("QILIN_REQUIRE_GRAPHICS") ? 1 : 77;
@@ -81,7 +88,8 @@ int main() {
     SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, false);
     SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_LEFTX, -32767);
     SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 32767);
-    check(reaches(d, h::kPadLeft | h::kPadRT), "the left stick as the D-pad, the trigger as a button");
+    check(reaches(d, h::kPadLSLeft | h::kPadRT), "the left stick's direction and the trigger as buttons");
+    check(d.pad_state(0).lx < -0.99f && d.pad_state(0).rt > 0.99f && d.pad_state(0).ly == 0.0f, "and as they are: the stick and the trigger all the way");
     SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_LEFTX, 0);
     SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);
     check(reaches(d, 0), "let go");
@@ -91,29 +99,29 @@ int main() {
     SDL_Joystick* j2 = SDL_OpenJoystick(second);
     SDL_SetJoystickVirtualButton(j2, SDL_GAMEPAD_BUTTON_EAST, true);
     check(reaches(d, h::kPadB), "second controller joins");
-    check(d.pad_buttons(0) == 0 && d.pad_buttons(1) == h::kPadB, "independent player inputs");
+    check(d.pad_state(0).buttons == 0 && d.pad_state(1).buttons == h::kPadB, "independent player inputs");
     const auto info = d.controllers();
     const auto key_for = [&](SDL_JoystickID id) { for (const auto& pad : info) if (pad.id == id) return pad.key; return std::string{}; };
     const auto key1 = key_for(first), key2 = key_for(second);
     check(!key1.empty() && !key2.empty() && key1 != key2, "distinct device identities");
-    d.set_player_controllers(key2, key1);
-    check(d.pad_buttons(0) == h::kPadB && d.pad_buttons(1) == 0, "explicit assignments swap players");
-    d.set_player_controllers("", "");
+    d.set_player_controllers({key2, key1, "", ""});
+    check(d.pad_state(0).buttons == h::kPadB && d.pad_state(1).buttons == 0, "explicit assignments swap players");
+    d.set_player_controllers({});
     SDL_CloseJoystick(j); SDL_DetachVirtualJoystick(first);
-    check(reaches(d, h::kPadB) && !d.pad_connected(0) && d.pad_buttons(1) == h::kPadB,
+    check(reaches(d, h::kPadB) && !d.pad_connected(0) && d.pad_state(1).buttons == h::kPadB,
           "unplugging player one does not promote player two");
     const SDL_JoystickID returned = attach_pad("Virtual Xbox controller");
     j = SDL_OpenJoystick(returned);
     SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_SOUTH, true);
-    check(reaches(d, h::kPadA | h::kPadB) && d.pad_buttons(0) == h::kPadA && d.pad_buttons(1) == h::kPadB,
+    check(reaches(d, h::kPadA | h::kPadB) && d.pad_state(0).buttons == h::kPadA && d.pad_state(1).buttons == h::kPadB,
           "reconnected controller reclaims its original slot");
     SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_SOUTH, false);
     SDL_SetJoystickVirtualButton(j2, SDL_GAMEPAD_BUTTON_EAST, false);
-    d.set_input_thresholds(25, 25, 10);
+    d.set_input_thresholds(25, 25);
     SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_LEFTX, 10000);
-    check(reaches(d, h::kPadRight), "custom press threshold");
+    check(reaches(d, h::kPadLSRight), "custom press threshold");
     SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_LEFTX, 7500);
-    check(reaches(d, h::kPadRight), "hysteresis holds through jitter");
+    check(reaches(d, h::kPadLSRight), "hysteresis holds through jitter");
     SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_LEFTX, 0);
     check(reaches(d, 0), "hysteresis releases at centre");
     SDL_CloseJoystick(j); SDL_DetachVirtualJoystick(returned);

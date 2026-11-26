@@ -4,7 +4,7 @@
 #include "qilin/rt/report.hpp"
 #include "boot.hpp"
 
-#include <cstdio>
+#include <optional>
 #include <vector>
 
 #include "build.hpp"
@@ -18,18 +18,6 @@ namespace rt = qilin::rt;
 
 namespace {
 
-std::vector<uint8_t> read_file(const std::filesystem::path& p) {
-    std::vector<uint8_t> out;
-    if (FILE* f = std::fopen(p.string().c_str(), "rb")) {
-        uint8_t buf[65536];
-        for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) out.insert(out.end(), buf, buf + n);
-        std::fclose(f);
-    } else {
-        rt::fatal(nullptr, "cannot read %s", p.string().c_str());
-    }
-    return out;
-}
-
 uint32_t be32(std::span<const uint8_t> d, size_t at) {
     return uint32_t{d[at]} << 24 | uint32_t{d[at + 1]} << 16 | uint32_t{d[at + 2]} << 8 | d[at + 3];
 }
@@ -38,7 +26,7 @@ constexpr uint32_t kMemSize = 0x01800000u, kMemEnd = 0x80000000u + kMemSize;
 
 // Low memory as a retail NTSC GameCube's boot ROM (the IPL) and the disc's
 // apploader leave it.
-//  - The apploader's part is from its own code (sys/apploader.img, the routine
+//  - The apploader's part is from its own code (the disc's apploader, the routine
 //    at 81200778): the debug monitor's size and address and the simulated
 //    memory size from BI2's first words; the file table at the top of memory,
 //    32-byte aligned, with BI2's 0x2000 bytes straight below it; the boot
@@ -80,27 +68,34 @@ void write_boot_info(std::span<const uint8_t> header, std::span<const uint8_t> b
     rt::poke16(0x800030E4u, 0);  // controller 4's buttons at boot (__check_pad3): none held
 }
 
+std::optional<qilin::disc::Disc> g_disc;
+
 }  // namespace
 
-void load_game(const std::filesystem::path& folder) {
-    set_game_folder(folder);
-    const auto dol_path = folder / "sys" / "main.dol";
-    auto dol = qilin::Dol::load(dol_path);
-    if (!dol) rt::fatal(nullptr, "%s: %s", dol_path.string().c_str(), dol.error().c_str());
+const qilin::disc::Disc& game_disc() {
+    if (!g_disc) rt::fatal(nullptr, "the disc is read before it's opened");
+    return *g_disc;
+}
+
+void load_game(const std::filesystem::path& path) {
+    auto disc = qilin::disc::Disc::open(path);
+    if (!disc) rt::fatal(nullptr, "%s", disc.error().c_str());
+    g_disc.emplace(std::move(*disc));
+    const qilin::disc::Header& header = g_disc->header();
+    if (header.game_id != build::kDiscId || header.revision != 0)
+        rt::fatal(nullptr, "%s is %s revision %u, not Mario Kart: Double Dash!!'s USA disc (GM4E01, revision 0)", path.string().c_str(),
+                  header.game_id.c_str(), header.revision);
+    const auto file = g_disc->dol();
+    if (!file) rt::fatal(nullptr, "%s", file.error().c_str());
+    auto dol = qilin::Dol::parse(*file);
+    if (!dol) rt::fatal(nullptr, "%s: main.dol: %s", path.string().c_str(), dol.error().c_str());
     const qilin::KnownBuild* known = qilin::known_build(dol->sha256);
     if (!known || known->disc_id != build::kDiscId)
-        rt::fatal(nullptr, "%s isn't the supported build (Mario Kart: Double Dash!! USA, GM4E01 revision 0): SHA-256 %s",
-                  dol_path.string().c_str(), dol->sha256.c_str());
+        rt::fatal(nullptr, "%s: main.dol isn't the supported build (Mario Kart: Double Dash!! USA, GM4E01 revision 0): SHA-256 %s",
+                  path.string().c_str(), dol->sha256.c_str());
     // The image covers every section and the BSS; bytes outside the sections are zero.
     std::memcpy(rt::guest_ptr(dol->base()), dol->image().data(), dol->image().size());
-
-    const auto header_path = folder / "sys" / "boot.bin";
-    const std::vector<uint8_t> header = read_file(header_path);
-    if (header.size() < 0x440 || std::memcmp(header.data(), build::kDiscId, 6) != 0 || header[7] != 0)
-        rt::fatal(nullptr, "%s isn't the header of Mario Kart: Double Dash!!'s USA disc (GM4E01, revision 0)", header_path.string().c_str());
-    const std::vector<uint8_t> bi2 = read_file(folder / "sys" / "bi2.bin");
-    if (bi2.size() != 0x2000) rt::fatal(nullptr, "%s should be 8192 bytes", (folder / "sys" / "bi2.bin").string().c_str());
-    write_boot_info(header, bi2, read_file(folder / "sys" / "fst.bin"));
+    write_boot_info(g_disc->boot_bin(), g_disc->bi2_bin(), g_disc->fst());
 }
 
 [[noreturn]] void start_game() {

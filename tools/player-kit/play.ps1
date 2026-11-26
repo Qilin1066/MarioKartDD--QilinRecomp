@@ -1,15 +1,16 @@
 # Play Double Dash!! (the Windows download's "Play Double Dash.bat" runs this).
 #
 # The download holds everything but the game's own code: that is made here,
-# from your own disc, the first time (and again after an update): qilin
-# lifts main.dol into C++, the bundled compiler (LLVM-MinGW) compiles it, and
+# from your own disc (an image, .iso, .gcm or .ciso, as it is, or a folder
+# extracted from one), the first time (and again after an update): qilin-disc
+# reads its main.dol, qilin lifts that into C++, the bundled compiler (LLVM-MinGW) compiles it, and
 # it's linked with the prebuilt rest into Double Dash.exe. Then, and every time
 # after, it starts the game.
 #
 #   play.ps1 [-Rebuild] [-BuildOnly] [-ChooseDisc]
 #
 # -Rebuild builds again even if Double Dash.exe is up to date; -BuildOnly
-# doesn't start the game afterwards; -ChooseDisc asks for the disc folder again.
+# doesn't start the game afterwards; -ChooseDisc asks for the disc again.
 param(
     [switch]$Rebuild,
     [switch]$BuildOnly,
@@ -31,7 +32,7 @@ $discFile = Join-Path $work "disc-folder.txt"
 $kitVersion = (Get-Content (Join-Path $kit "VERSION") -Raw).Trim()
 $onWindows = ($PSVersionTable.PSEdition -eq "Desktop") -or $IsWindows   # Windows PowerShell 5.1 has no $IsWindows
 # The game is compiled for this PC's own processor (-march=native: FMA for the
-# Wii's fused multiply-adds, which are then one instruction instead of a call
+# console's fused multiply-adds, which are then one instruction instead of a call
 # into the C library, and whatever else it has). So a build is for one CPU:
 # it's built again if the folder moves to a PC with a different one.
 $cpu = if ($onWindows) { "$env:PROCESSOR_IDENTIFIER" } else { "cross" }
@@ -45,7 +46,7 @@ function Get-Sha256([string]$path) {
     finally { $stream.Dispose(); $sha.Dispose() }
 }
 # Content identity matters while changes share an Unreleased version number.
-$identityParts = @("lib/libmkdd_kit.a", "qilin.exe", "plan.tsv", "kit.ninja") | ForEach-Object {
+$identityParts = @("lib/libmkdd_kit.a", "qilin.exe", "qilin-disc.exe", "plan.tsv", "kit.ninja") | ForEach-Object {
     (Get-Sha256 (Join-Path $kit $_))
 }
 $builtFor = "$kitVersion | $cpu | $($identityParts -join ':')"
@@ -57,55 +58,67 @@ function Invoke-Kit([string]$exe, [string[]]$arguments) {
     if ($runner) { & $runner $exe @arguments | Out-Host } else { & $exe @arguments | Out-Host }
     return $LASTEXITCODE
 }
-# The same, its output (error output too) returned as text, with the exit code.
-function Read-Kit([string]$exe, [string[]]$arguments) {
+$qilin = Join-Path $kit "qilin.exe"
+$discTool = Join-Path $kit "qilin-disc.exe"
+# Whether a path is something to hand qilin-disc: an image file, or a folder with sys\main.dol.
+# (A file picked inside an extracted disc's sys folder, or that folder, means the folder above.)
+function Resolve-Disc([string]$path) {
+    if (-not $path) { return "" }
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $parent = Split-Path -Parent $path
+        if ((Split-Path -Leaf $parent) -eq "sys" -and @("main.dol", "boot.bin", "fst.bin", "bi2.bin", "apploader.img") -contains (Split-Path -Leaf $path)) {
+            return (Split-Path -Parent $parent)
+        }
+        return $path
+    }
+    if ((Split-Path -Leaf $path) -eq "sys" -and (Test-Path -LiteralPath (Join-Path $path "main.dol"))) { return (Split-Path -Parent $path) }
+    if (Test-Path -LiteralPath $path -PathType Container) { return $path }
+    return ""
+}
+# Ask for the disc: an image, or any file in an extracted disc's sys folder. "" if nothing was chosen.
+function Select-Disc {
+    Add-Type -AssemblyName System.Windows.Forms
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = "Choose your Mario Kart: Double Dash!! disc: the image (.iso, .gcm, .ciso), or sys\main.dol of an extracted disc"
+    $dialog.Filter = "GameCube discs (*.iso;*.gcm;*.ciso;main.dol)|*.iso;*.gcm;*.ciso;main.dol|All files (*.*)|*.*"
+    if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return "" }
+    return $dialog.FileName
+}
+# What qilin-disc says of a disc: "" if it is the supported one, else why not.
+function Test-Disc([string]$tool, [string]$path) {
     $saved = $ErrorActionPreference
     $ErrorActionPreference = "Continue"   # Windows PowerShell 5.1 turns redirected error output into errors
-    $text = if ($runner) { & $runner $exe @arguments 2>&1 | Out-String } else { & $exe @arguments 2>&1 | Out-String }
+    $text = if ($runner) { & $runner $tool info $path --json 2>&1 | ForEach-Object { "$_" } | Out-String } else { & $tool info $path --json 2>&1 | ForEach-Object { "$_" } | Out-String }
     $code = $LASTEXITCODE
     $ErrorActionPreference = $saved
-    return @{ text = $text; code = $code }
-}
-
-$qilin = Join-Path $kit "qilin.exe"
-
-# Whether a folder is the extracted disc this port supports. Returns "" if it
-# is, else why not. (A folder picked one level too deep, sys\, is allowed for.)
-function Test-Disc([string]$folder) {
-    $dol = Join-Path (Join-Path $folder "sys") "main.dol"
-    if (-not (Test-Path $dol)) {
-        if ((Split-Path -Leaf $folder) -eq "sys" -and (Test-Path (Join-Path $folder "main.dol"))) { return "pick the folder above sys" }
-        return "there's no sys\main.dol in it (extract the whole disc with Dolphin: right-click the game, Extract Entire Disc)"
+    if ($code -ne 0) { return ($text.Trim() -replace "^qilin-disc: ", "") }
+    $info = $text | ConvertFrom-Json
+    if ($info.id -ne "GM4E01" -or $info.revision -ne 0) {
+        return "it's $($info.id) revision $($info.revision) ($($info.title)): this port needs Mario Kart: Double Dash!! for the USA, GM4E01, revision 0"
     }
-    if (-not (Test-Path (Join-Path $folder "sys/fst.bin") -PathType Leaf)) { return "there's no sys/fst.bin (extract the whole disc)" }
-    if (-not (Test-Path (Join-Path $folder "files") -PathType Container)) { return "there's no files folder in it (extract the whole disc, not just main.dol)" }
-    $report = Read-Kit $qilin @("info", $dol)
-    if ($report.code -ne 0) { return "qilin can't read its main.dol: $($report.text.Trim())" }
-    $info = $report.text | ConvertFrom-Json
-    if (-not $info.build) { return "its main.dol isn't the supported build (SHA-256 $($info.sha256)): this port needs Mario Kart: Double Dash!! for Europe/Australia, disc R7PP01, revision 1" }
-    if ($info.build.disc_id -ne "R7PP01" -or $info.build.revision -ne 1) { return "it's $($info.build.title): this port needs disc R7PP01, revision 1" }
+    if ($info.dol_sha256 -ne "e96b8578451b9157e2b68fe5e918ebb572940c3ea54d6c8c7d45c24382bf12ae") {
+        return "its main.dol isn't the supported build's (SHA-256 $($info.dol_sha256)): a modified or damaged copy?"
+    }
     return ""
 }
 
-# The disc folder: the one used last, else ask (until one holds the supported build).
+# The disc: the one used last, else ask (until one is the supported game).
 $disc = if (-not $ChooseDisc -and (Test-Path $discFile)) { (Get-Content $discFile -Raw).Trim() } else { "" }
 while ($true) {
-    if ($disc) {
-        if ((Split-Path -Leaf $disc) -eq "sys" -and (Test-Path (Join-Path $disc "main.dol"))) { $disc = Split-Path -Parent $disc }
-        $why = Test-Disc $disc
-        if (-not $why) { break }
-        Write-Host "$disc can't be used: $why" -ForegroundColor Yellow
+    $resolved = Resolve-Disc $disc
+    if ($resolved) {
+        $why = Test-Disc $discTool $resolved
+        if (-not $why) { $disc = $resolved; break }
+        Write-Host "$resolved can't be used: $why" -ForegroundColor Yellow
+    } elseif ($disc) {
+        Write-Host "$disc isn't there." -ForegroundColor Yellow
     }
-    if (-not $onWindows) { throw "no disc folder: write it into $discFile" }
-    Add-Type -AssemblyName System.Windows.Forms
-    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = "Choose your extracted Mario Kart: Double Dash!! disc: the folder that holds sys and files (Dolphin: Extract Entire Disc)"
-    $dialog.ShowNewFolderButton = $false
-    if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
-        Write-Host "No disc folder chosen."
+    if (-not $onWindows) { throw "no disc: write its path into $discFile" }
+    $disc = Select-Disc
+    if (-not $disc) {
+        Write-Host "No disc chosen."
         exit 0
     }
-    $disc = $dialog.SelectedPath
 }
 $disc = $disc.TrimEnd('\')
 New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -128,7 +141,9 @@ Write-Host ""
 # recompiles only what changed).
 Write-Host "== Recompiling main.dol into C++" -ForegroundColor Cyan
 $gen = Join-Path $work "gen"
-$lift = @("lift", (Join-Path (Join-Path $disc "sys") "main.dol"), "-o", $gen, "--plan", (Join-Path $kit "plan.tsv"), "--files", "32")
+$dol = Join-Path $work "main.dol"
+if ((Invoke-Kit $discTool @("dol", $disc, $dol)) -ne 0) { throw "the disc's main.dol couldn't be read" }
+$lift = @("lift", $dol, "-o", $gen, "--plan", (Join-Path $kit "plan.tsv"), "--files", "32")
 if ((Invoke-Kit $qilin $lift) -ne 0) { throw "qilin lift failed" }
 
 # Compile and link: a ninja file over what the lift wrote, with the kit's

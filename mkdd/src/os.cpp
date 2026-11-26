@@ -800,10 +800,4 @@ void guest_callback(Cpu& c, uint32_t fn, uint32_t a0, uint32_t a1) {
     c = saved;
 }
 
-namespace {
-std::filesystem::path g_folder;
-}
-const std::filesystem::path& game_folder() { return g_folder; }
-void set_game_folder(std::filesystem::path folder) { g_folder = std::move(folder); }
-
 }  // namespace mkdd

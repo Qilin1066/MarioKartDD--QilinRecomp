@@ -6,7 +6,7 @@
 namespace fs = std::filesystem;
 int main() {
     const fs::path folder = fs::temp_directory_path() / ("mkdd-history-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    const fs::path nand = folder / "nand", save = nand / "title/game/save.dat";
+    const fs::path save = folder / "card-a" / "GM4E01-save.gci";
     fs::create_directories(save.parent_path());
     int failures = 0;
     const auto check = [&](bool ok, const char* what) { std::printf("%s %s\n", ok ? "ok" : "FAIL", what); if (!ok) ++failures; };
@@ -15,7 +15,7 @@ int main() {
     std::string error;
     for (int i = 0; i < 8; ++i) {
         write("version " + std::to_string(i));
-        check(mkdd::backup_save(nand, save, error), "backup succeeds");
+        check(mkdd::backup_save(folder, save, error), "backup succeeds");
     }
     auto backups = mkdd::save_backups(folder);
     check(backups.size() == 5, "history bounded to five per save");
@@ -50,10 +50,19 @@ int main() {
     // A stale staging file from an interrupted operation is never offered as a backup.
     { std::ofstream partial(backups.front().file.string() + ".tmp"); partial << "partial"; }
     check(mkdd::save_backups(folder).size() == 5, "incomplete backups ignored");
-    fs::create_directories(folder / "save-backups/title/game/blocked.dat.history");
-    const fs::path blocked = nand / "title/game/blocked.dat";
+    fs::create_directories(folder / "save-backups/card-a/blocked.gci.history");
+    const fs::path blocked = folder / "card-a" / "blocked.gci";
     fs::create_directory(blocked);
-    check(!mkdd::backup_save(nand, blocked, error), "non-file destination reports failure");
+    check(!mkdd::backup_save(folder, blocked, error), "non-file destination reports failure");
+    // Only the memory cards' files have a history, and only they can be restored over.
+    { std::ofstream settings(folder / "settings.ini"); settings << "x"; }
+    check(!mkdd::backup_save(folder, folder / "settings.ini", error), "a file outside the cards is refused");
+    fs::create_directories(folder / "save-backups/elsewhere/file.history");
+    { std::ofstream stray(folder / "save-backups/elsewhere/file.history/00000000000000000001-000000.bak"); stray << "x"; }
+    check(mkdd::save_backups(folder).size() == 5, "a backup that would restore outside the cards is not offered");
+    check(!mkdd::request_save_restore(folder, folder / "save-backups/elsewhere/file.history/00000000000000000001-000000.bak", error),
+          "nor accepted");
+    check(mkdd::save_backups(folder).front().label.starts_with("Card A: GM4E01-save / "), "labels name the card and the file");
     fs::remove_all(folder);
     return failures ? 1 : 0;
 }

@@ -68,8 +68,8 @@ jobs:
             -DFETCHCONTENT_SOURCE_DIR_VULKANHEADERS="$PWD/build/_deps/vulkanheaders-src" \
             -DFETCHCONTENT_SOURCE_DIR_VOLK="$PWD/build/_deps/volk-src" \
             -DFETCHCONTENT_SOURCE_DIR_IMGUI="$PWD/build/_deps/imgui-src"
-          cmake --build build-sanitize --parallel 2 --target mkdd_threads_test mkdd_save_history_test mkdd_nand_test qilin_audio_callback_test
-          ctest --test-dir build-sanitize -R 'mkdd_(threads|save_history|nand)_test|qilin_audio_callback_test' --output-on-failure
+          cmake --build build-sanitize --parallel 2 --target mkdd_threads_test mkdd_save_history_test mkdd_card_test mkdd_pad_test mkdd_ar_test qilin_audio_callback_test
+          ctest --test-dir build-sanitize -R 'mkdd_(threads|save_history|card|pad|ar)_test|qilin_audio_callback_test' --output-on-failure
       # The decoder against GNU objdump over a sweep of the encoding space (no game files needed).
       - name: Decoder sweep
         if: matrix.sweep

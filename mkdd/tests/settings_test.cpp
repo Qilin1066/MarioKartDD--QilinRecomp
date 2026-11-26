@@ -18,29 +18,33 @@ void check(bool ok, const char* what) {
 }
 
 bool same(const mkdd::Settings& a, const mkdd::Settings& b) {
-    if (a.scale != b.scale || a.preset != b.preset || a.fullscreen != b.fullscreen || a.monitor != b.monitor ||
-        a.scaling != b.scaling || a.smooth != b.smooth || a.look != b.look || a.scanlines != b.scanlines || a.mask != b.mask ||
-        a.anisotropy != b.anisotropy || a.true_color != b.true_color || a.vsync != b.vsync || a.gpu != b.gpu || a.rumble != b.rumble || a.second_player != b.second_player || a.speaker != b.speaker ||
-        a.controller1 != b.controller1 || a.controller2 != b.controller2 || a.stick_threshold != b.stick_threshold ||
-        a.trigger_threshold != b.trigger_threshold || a.pointer_deadzone != b.pointer_deadzone || a.rumble_strength != b.rumble_strength ||
-        a.volume != b.volume || a.mute_unfocused != b.mute_unfocused || a.language != b.language || a.widescreen != b.widescreen || a.sound != b.sound)
+    if (a.preset != b.preset || a.fullscreen != b.fullscreen || a.monitor != b.monitor || a.aspect_w != b.aspect_w ||
+        a.aspect_h != b.aspect_h || a.hud != b.hud || a.scaling != b.scaling || a.smooth != b.smooth || a.smaa != b.smaa ||
+        a.fsr != b.fsr || a.sharpness != b.sharpness || a.look != b.look || a.scanlines != b.scanlines || a.mask != b.mask ||
+        a.scale != b.scale || a.anisotropy != b.anisotropy || a.true_color != b.true_color || a.vsync != b.vsync ||
+        a.frame_rate != b.frame_rate || a.low_latency != b.low_latency || a.gpu != b.gpu ||
+        a.performance_overlay != b.performance_overlay || a.match_refresh != b.match_refresh ||
+        a.variable_refresh != b.variable_refresh || a.volume != b.volume || a.mute_unfocused != b.mute_unfocused ||
+        a.sound_output != b.sound_output || a.sound_device != b.sound_device || a.stick_deadzone != b.stick_deadzone ||
+        a.stick_threshold != b.stick_threshold || a.trigger_threshold != b.trigger_threshold ||
+        a.rumble_strength != b.rumble_strength || a.language != b.language || a.sound != b.sound || a.progressive != b.progressive ||
+        a.eu_rgb60 != b.eu_rgb60)
         return false;
-    for (unsigned c = 0; c < mkdd::kControlCount; ++c) {
-        if (a.controls[c].size() != b.controls[c].size()) return false;
-        for (size_t i = 0; i < a.controls[c].size(); ++i) {
-            const auto &x = a.controls[c][i], &y = b.controls[c][i];
-            if (x.kind != y.kind || x.pad != y.pad || x.key != y.key) return false;
-        }
+    for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
+        if (a.players[p].controller != b.players[p].controller || a.players[p].rumble != b.players[p].rumble) return false;
+        for (unsigned c = 0; c < mkdd::kControlCount; ++c)
+            if (a.players[p].controls[c] != b.players[p].controls[c]) return false;
     }
     return true;
 }
 
 // The error a text gives, or "" if it reads.
-std::string error_of(const std::string& text, bool legacy = false) {
+std::string error_of(const std::string& text) {
     mkdd::Settings s;
     std::string e;
-    return mkdd::parse_settings(text, s, e, legacy) ? "" : e;
+    return mkdd::parse_settings(text, s, e) ? "" : e;
 }
+bool error_has(const std::string& text, const char* part) { return error_of(text).find(part) != std::string::npos; }
 
 }  // namespace
 
@@ -60,53 +64,98 @@ int main() {
         check(mkdd::parse_settings("", s, e) && same(s, d), "an empty file means the defaults");
     }
     {
+        // The defaults themselves (docs/runtime.md's tables).
+        const auto& one = d.players[0].controls;
+        const auto& four = d.players[3].controls;
+        check(one[mkdd::kCtlA].size() == 2 && one[mkdd::kCtlA][0] == Binding{Binding::kPad, host::kPadA, {}} &&
+                  one[mkdd::kCtlA][1] == Binding{Binding::kKey, 0, "X"},
+              "player one's A: pad A and the X key");
+        check(one[mkdd::kCtlB][0].pad == host::kPadX && one[mkdd::kCtlX][0].pad == host::kPadB && one[mkdd::kCtlY][0].pad == host::kPadY,
+              "the face buttons by position: pad X is B, pad B is X");
+        check(one[mkdd::kCtlZ].size() == 3 && one[mkdd::kCtlL][0].pad == host::kPadLT && one[mkdd::kCtlR][0].pad == host::kPadRT,
+              "Z on both shoulder buttons, L and R on the triggers");
+        check(one[mkdd::kCtlStickUp][0].pad == host::kPadLSUp && one[mkdd::kCtlCLeft][0].pad == host::kPadRSLeft &&
+                  one[mkdd::kCtlUp][0].pad == host::kPadUp,
+              "the stick, the C-stick and the D-pad each on their own");
+        bool keys = false;
+        for (unsigned c = 0; c < mkdd::kControlCount; ++c)
+            for (const Binding& b : four[c]) keys = keys || b.kind != Binding::kPad;
+        check(!keys && four[mkdd::kCtlA].size() == 1 && four[mkdd::kCtlA][0].pad == host::kPadA,
+              "the other players have the pad's defaults and no keys");
+        check(d.language == 0 && d.sound == 1 && d.progressive && !d.eu_rgb60, "the console's defaults: English, stereo, progressive");
+        check(d.frame_rate == mkdd::FrameRate::display && d.aspect_w == 0 && d.hud == mkdd::Hud::edges && d.low_latency && !d.smaa && !d.fsr,
+              "the display's defaults");
+    }
+    {
         mkdd::Settings s;
         std::string e;
         const bool ok = mkdd::parse_settings(
             "[Display]\n"
-            "internal_scale = 3   # sharper\n"
+            "render_resolution = 3   # sharper\n"
             "\n"
-            "[controls]\n"
-            "  TWO = pad:Y , KEY:Right Shift,mouse\n"
-            "home =\n",
+            "[Player2]\n"
+            "  Z = pad:Y , KEY:Right Shift,mouse\n"
+            "start =\n"
+            "stick_up = pad:lsup, key:W\n",
             s, e);
-        check(ok && s.scale == 3, "internal_scale is read, sections and names in any case");
-        check(ok && s.controls[mkdd::kCtlTwo].size() == 3 && s.controls[mkdd::kCtlTwo][0].pad == host::kPadY &&
-                  s.controls[mkdd::kCtlTwo][1].kind == Binding::kKey &&
-                  s.controls[mkdd::kCtlTwo][1].key == "Right Shift" &&
-                  s.controls[mkdd::kCtlTwo][2].kind == Binding::kMouse,
+        check(ok && s.scale == 3, "render_resolution is read, sections and names in any case");
+        const auto& c = s.players[1].controls;
+        check(ok && c[mkdd::kCtlZ].size() == 3 && c[mkdd::kCtlZ][0].pad == host::kPadY && c[mkdd::kCtlZ][1].kind == Binding::kKey &&
+                  c[mkdd::kCtlZ][1].key == "Right Shift" && c[mkdd::kCtlZ][2].kind == Binding::kMouse,
               "a control takes pads, keys with spaces in their names, and the mouse");
-        check(ok && s.controls[mkdd::kCtlHome].empty(), "an empty list leaves a control unused");
+        check(ok && c[mkdd::kCtlStart].empty(), "an empty list leaves a control unused");
+        check(ok && c[mkdd::kCtlStickUp].size() == 2 && c[mkdd::kCtlStickUp][0].pad == host::kPadLSUp, "a stick's direction by name");
         mkdd::Settings untouched = s;
         untouched.scale = d.scale;
-        untouched.controls[mkdd::kCtlTwo] = d.controls[mkdd::kCtlTwo];
-        untouched.controls[mkdd::kCtlHome] = d.controls[mkdd::kCtlHome];
-        check(ok && same(untouched, d), "controls not mentioned keep their defaults");
+        for (unsigned k : {unsigned(mkdd::kCtlZ), unsigned(mkdd::kCtlStart), unsigned(mkdd::kCtlStickUp)})
+            untouched.players[1].controls[k] = d.players[1].controls[k];
+        check(ok && same(untouched, d), "controls not mentioned, and the other players, keep their defaults");
     }
-    check(error_of("[controls]\njab = pad:A\n").rfind("line 2: 'jab' isn't a Wii Remote button", 0) == 0,
+    check(error_of("[player1]\njab = pad:A\n").rfind("line 2: 'jab' isn't one of a GameCube controller's controls", 0) == 0,
           "an unknown control is reported with its line");
-    check(error_of("[controls]\none = pad:Z\n").rfind("line 2: 'Z' isn't a pad button", 0) == 0, "an unknown pad button");
-    check(error_of("[controls]\none = Z\n").rfind("line 2: 'Z' isn't an input", 0) == 0, "an input without its kind");
-    check(error_of("[display]\ninternal_scale = 9\n").rfind("line 2: internal_scale is a whole number from 1 to 8", 0) == 0,
-          "a scale out of range");
+    check(error_of("[player1]\na = pad:Q\n").rfind("line 2: 'Q' isn't a pad input", 0) == 0, "an unknown pad input");
+    check(error_of("[player1]\na = Z\n").rfind("line 2: 'Z' isn't an input", 0) == 0, "an input without its kind");
+    check(error_of("[player1]\na = wheel:3\n").rfind("line 2: 'wheel' isn't a kind of input", 0) == 0, "an unknown kind of input");
+    check(error_has("[player1]\na = key:\n", "needs a key's name"), "a key without a name");
+    check(error_has("[player5]\na = pad:A\n", "there's no section [player5]") && error_has("[player0]\n", "no section") &&
+              error_has("[player12]\n", "no section") && error_has("[players]\n", "no section"),
+          "four players, no more");
+    check(error_has("[controls]\na = pad:A\n", "[controls] has no 'a'"), "a control outside a player's section says where they go");
+    for (const char* k : {"f1", "escape", "F3", "F9", "f11"})
+        check(error_has(std::string("[player1]\nstart = key:") + k + "\n", "kept for the program"), "a key of the program's can't be bound");
+    check(error_of("[player1]\na = pad:A\na = pad:B\n").rfind("line 3: 'a' is set twice", 0) == 0, "a control set twice");
+    check(error_of("[player1]\na = pad:A\n[player2]\na = pad:A\n").empty(), "the same control in two players' sections is two settings");
+    check(error_of("[player1]\r\na = pad:A\r\n").empty(), "Windows line endings");
+    check(error_has("[player1]\ncontroller = same\n[player3]\ncontroller = same\n", "players 1 and 3 cannot use the same explicit controller"),
+          "one device cannot be assigned to two players");
     {
         mkdd::Settings s;
         std::string e;
-        check(mkdd::parse_settings("[display]\ninternal_scale = auto\nmatch_refresh = false\nvariable_refresh = true\n", s, e) &&
+        check(mkdd::parse_settings("[player1]\ncontroller = None\n[player2]\ncontroller = none\n[player3]\ncontroller =\nrumble = false\n", s, e) &&
+                  s.players[0].controller == "none" && s.players[1].controller == "none" && s.players[2].controller.empty() &&
+                  !s.players[2].rumble && s.players[0].rumble,
+              "no controller for two players isn't a clash; automatic; rumble per player");
+    }
+    check(error_has("[player2]\nrumble = maybe\n", "rumble is true or false"), "a boolean that isn't");
+
+    // [display]
+    check(error_of("[display]\nrender_resolution = 9\n").rfind("line 2: render_resolution is a whole number from 1 to 8", 0) == 0,
+          "a resolution out of range");
+    check(error_has("[display]\nrender_resolution = 2x\n", "whole number") && error_has("[display]\nrender_resolution = -1\n", "whole number") &&
+              error_has("[display]\nrender_resolution =\n", "whole number") && error_has("[display]\nrender_resolution = 99999\n", "whole number"),
+          "a resolution that isn't a number");
+    {
+        mkdd::Settings s;
+        std::string e;
+        check(mkdd::parse_settings("[display]\nrender_resolution = auto\nmatch_refresh = false\nvariable_refresh = true\n", s, e) &&
                   s.scale == 0 && !s.match_refresh && s.variable_refresh,
-              "auto scale and the refresh switches");
+              "auto resolution and the refresh switches");
+        check(mkdd::render_scale(s, 480) == 1 && mkdd::render_scale(s, 481) == 2 && mkdd::render_scale(s, 1080) == 3 &&
+                  mkdd::render_scale(s, 2160) == 5 && mkdd::render_scale(s, 9000) == 8 && mkdd::render_scale(s, 0) == 3,
+              "auto: the smallest multiple of 480 lines that fills the window, 1 to 8");
+        s.scale = 4;
+        check(mkdd::render_scale(s, 480) == 4, "a set resolution is itself");
     }
-    check(error_of("[video]\nscale = 2\n").rfind("line 1: there's no section [video]", 0) == 0, "v0.17.0's [video] only in the old file");
-    {
-        mkdd::Settings s;
-        std::string e;
-        const bool ok = mkdd::parse_settings("[video]\nscale = 4\n[controls]\nhome = pad:Guide, key:Escape\n", s, e, true);
-        check(ok && s.scale == 4, "the old file's scale carries over");
-        check(ok && s.controls[mkdd::kCtlHome].size() == 2 && s.controls[mkdd::kCtlHome][1].key == "H",
-              "the old file's Escape (now the menu's) becomes H");
-    }
-    check(error_of("[controls]\nplus = key:F1\n").find("kept for the program") != std::string::npos, "F1 can't be bound");
-    check(error_of("[controls]\nplus = key:escape\n").find("kept for the program") != std::string::npos, "nor Escape");
     {
         mkdd::Settings s;
         std::string e;
@@ -114,68 +163,148 @@ int main() {
         check(ok && s.scale == 0 && s.anisotropy == 4 && s.preset == "desktop", "a preset, then a key that overrides it");
         check(!mkdd::parse_settings("[display]\npreset = huge\n", s, e) && e.find("presets are") != std::string::npos,
               "an unknown preset");
-        check(error_of("[display]\nanisotropy = 3\n").find("1, 2, 4, 8 or 16") != std::string::npos, "anisotropy is a power of two");
+        check(error_has("[display]\nanisotropy = 3\n", "1, 2, 4, 8 or 16") && error_has("[display]\nanisotropy = 32\n", "from 1 to 16"),
+              "anisotropy is a power of two up to 16");
         mkdd::Settings o, l, t;
         std::string eo;
-        check(mkdd::parse_settings("[display]\npreset = original\n", o, eo) && !o.true_color &&
+        check(mkdd::parse_settings("[display]\npreset = original\n", o, eo) && !o.true_color && o.scale == 1 &&
                   mkdd::parse_settings("[display]\npreset = low-end\n", l, eo) && l.true_color &&
                   mkdd::parse_settings("[display]\npreset = original\ntrue_color = true\n", t, eo) && t.true_color && s.true_color,
               "true colour: off in the original preset alone, and a key of its own");
+        check(mkdd::parse_settings("[display]\nsmaa = true\nfsr = true\npreset = original\n", o, eo) && !o.smaa && !o.fsr &&
+                  mkdd::parse_settings("[display]\npreset = original\nsmaa = true\n", o, eo) && o.smaa,
+              "the original preset turns SMAA and FSR off; a key after it turns one on");
     }
     {
+        // The picture's shape.
+        mkdd::Settings s;
+        std::string e;
+        check(mkdd::parse_settings("[display]\naspect = 16:9\nhud = middle\n", s, e) && s.aspect_w == 16 && s.aspect_h == 9 &&
+                  s.hud == mkdd::Hud::middle,
+              "an aspect ratio and the HUD's place");
+        check(mkdd::aspect_ratio(s, 2.0f) > 1.777f && mkdd::aspect_ratio(s, 2.0f) < 1.778f, "a set shape is itself");
+        check(mkdd::parse_settings("[display]\naspect = AUTO\n", s, e) && s.aspect_w == 0 && s.aspect_h == 0, "auto");
+        check(mkdd::aspect_ratio(s, 16.0f / 9.0f) > 1.777f && mkdd::aspect_ratio(s, 1.25f) > 1.333f && mkdd::aspect_ratio(s, 1.25f) < 1.334f &&
+                  mkdd::aspect_ratio(s, 6.0f) == 4.0f,
+              "auto is the screen's shape, no narrower than 4:3 and no wider than 4:1");
+        check(mkdd::parse_settings("[display]\naspect = 4:3\n", s, e) && mkdd::parse_settings("[display]\naspect = 64:27\n", s, e) &&
+                  mkdd::parse_settings("[display]\naspect = 32:9\n", s, e) && mkdd::parse_settings("[display]\naspect = 4:1\n", s, e) &&
+                  mkdd::parse_settings("[display]\naspect = 2560:1080\n", s, e),
+              "4:3 to 4:1, by any whole numbers");
+        for (const char* bad : {"5:4", "1:1", "9:16", "5:1", "16:0", "0:9", "16", "16:", ":9", "16:9:1", "16x9", "1.78:1", "-16:9", "16:99999", "wide"})
+            check(error_has(std::string("[display]\naspect = ") + bad + "\n", "aspect is auto or width:height"), "a shape that isn't one is refused");
+        check(error_has("[display]\nhud = centre\n", "hud is edges, middle or stretched"), "an unknown HUD place");
+    }
+    {
+        mkdd::Settings s;
+        std::string e;
+        check(mkdd::parse_settings("[display]\nframe_rate = original\n", s, e) && s.frame_rate == mkdd::FrameRate::original &&
+                  mkdd::parse_settings("[display]\nframe_rate = 60\n", s, e) && s.frame_rate == mkdd::FrameRate::sixty &&
+                  mkdd::parse_settings("[display]\nframe_rate = Display\n", s, e) && s.frame_rate == mkdd::FrameRate::display &&
+                  mkdd::parse_settings("[display]\nframe_rate = unlimited\nlow_latency = false\n", s, e) &&
+                  s.frame_rate == mkdd::FrameRate::unlimited && !s.low_latency,
+              "the frame rates, and low latency");
+        check(error_has("[display]\nframe_rate = 120\n", "frame_rate is original, 60, display or unlimited"), "a frame rate that isn't offered");
+        check(error_has("[display]\nlow_latency = 1\n", "low_latency is true or false"), "low latency is a switch");
+        check(error_has("[display]\nsmaa = on\n", "smaa is true or false") && error_has("[display]\nfsr = yes\n", "fsr is true or false"),
+              "SMAA and FSR are switches");
+        check(error_has("[display]\nsharpness = 101\n", "from 0 to 100") && error_has("[display]\nsharpness = sharp\n", "from 0 to 100"),
+              "sharpness out of range");
+        check(mkdd::parse_settings("[display]\nsmaa = true\nfsr = true\nsharpness = 0\n", s, e) && s.smaa && s.fsr && s.sharpness == 0,
+              "SMAA, FSR and its sharpness");
+        const host::Picture p = mkdd::picture_of(s);
+        check(p.smaa && p.fsr && p.sharpness == 0.0f && p.low_latency == s.low_latency && p.vsync, "and the display is told");
+    }
+    check(error_has("[display]\nlook = vhs\n", "look is plain or crt"), "an unknown look");
+    check(error_has("[display]\nscanlines = 101\n", "from 0 to 100") && error_has("[display]\nmask = 101\n", "from 0 to 100"),
+          "scanlines and mask out of range");
+    check(error_has("[display]\nscaling = zoom\n", "scaling is integer, fit or stretch"), "an unknown scaling");
+    check(error_has("[display]\ninternal_scale = 2\n", "[display] has no 'internal_scale'"), "a key that isn't one is named");
+    check(error_has("[display]\nvsync = true\nVSYNC = false\n", "set twice"), "duplicate scalar settings rejected");
+    check(error_of("\xEF\xBB\xBF[display]\nrender_resolution = AUTO\n").empty(), "BOM and case-insensitive auto");
+
+    // [sound]
+    {
+        mkdd::Settings s;
+        std::string e;
+        check(mkdd::parse_settings("[sound]\nvolume = 65\nmute_unfocused = true\noutput = surround\ndevice = Speakers (USB Audio #2)\n", s, e) &&
+                  s.volume == 65 && s.mute_unfocused && s.sound_output == host::SoundOutput::surround && s.sound_device == "Speakers (USB Audio",
+              "volume, muting, output; a device's name ends at a #, which starts a comment");
+        check(mkdd::parse_settings("[sound]\noutput = device\n", s, e) && s.sound_output == host::SoundOutput::device &&
+                  mkdd::parse_settings("[sound]\noutput = stereo\n", s, e) && s.sound_output == host::SoundOutput::stereo,
+              "the other outputs");
+    }
+    check(error_has("[sound]\nvolume = 101\n", "from 0 to 100") && error_has("[sound]\nvolume = loud\n", "from 0 to 100"), "volume range");
+    check(error_has("[sound]\noutput = 7.1\n", "output is stereo, surround or device"), "an unknown output");
+    check(error_has("[sound]\nmute_unfocused = sometimes\n", "true or false"), "muting is a switch");
+    check(error_has("[sound]\nbass = 3\n", "[sound] has no 'bass'"), "an unknown sound setting");
+
+    // [controls]
+    check(error_has("[controls]\nstick_threshold = 0\n", "from 5 to 95") && error_has("[controls]\ntrigger_threshold = 96\n", "from 5 to 95"),
+          "threshold ranges");
+    check(error_has("[controls]\nstick_deadzone = 51\n", "from 0 to 50") && error_has("[controls]\nrumble_strength = 101\n", "from 0 to 100"),
+          "dead zone and rumble strength ranges");
+    {
+        mkdd::Settings s;
+        std::string e;
+        check(mkdd::parse_settings("[controls]\nstick_deadzone = 0\nstick_threshold = 20\ntrigger_threshold = 95\nrumble_strength = 0\n", s, e) &&
+                  s.stick_deadzone == 0 && s.stick_threshold == 20 && s.trigger_threshold == 95 && s.rumble_strength == 0,
+              "and their ends");
+    }
+
+    // [console]
+    {
+        mkdd::Settings s;
+        std::string e;
+        check(mkdd::parse_settings("[console]\nlanguage = English\nsound = mono\nprogressive = false\n", s, e) && s.language == 0 &&
+                  s.sound == 0 && !s.progressive,
+              "the console's settings");
+    }
+    check(error_has("[console]\nlanguage = german\n", "language is english"), "a language not on the disc");
+    check(error_has("[console]\nlanguage = 1\n", "language is english"), "nor a number for one");
+    check(error_has("[console]\nsound = surround\n", "sound is mono or stereo"), "the console's sound is mono or stereo");
+    check(error_has("[console]\nprogressive = 480p\n", "progressive is true or false"), "progressive scan is a switch");
+    check(error_has("[console]\nwidescreen = true\n", "[console] has no 'widescreen'"), "the GameCube has no widescreen setting");
+
+    // The file's shape.
+    check(error_of("scale = 2\n").rfind("line 1: 'scale' comes before any [section]", 0) == 0, "a setting outside a section");
+    check(error_of("[audio]\n").rfind("line 1: there's no section [audio]", 0) == 0, "an unknown section");
+    check(error_has("[display\n", "a section is written [name]"), "a section left open");
+    check(error_has("[display]\nfullscreen\n", "expected name = value"), "a line that isn't a setting");
+    {
         mkdd::Settings s = d;
-        s.preset = "desktop", s.fullscreen = true, s.monitor = "DELL U2720Q", s.scaling = qilin::host::Scaling::integer;
-        s.smooth = false, s.look = qilin::host::Look::crt, s.scanlines = 80, s.mask = 0, s.scale = 5, s.anisotropy = 8;
-        s.vsync = false, s.gpu = "AMD Radeon RX 6600", s.rumble = false, s.second_player = 1, s.speaker = false, s.language = 3, s.widescreen = false, s.sound = 0;
-        s.controller1 = "guid:n:70616431:0", s.controller2 = "guid:n:70616432:0";
-        s.stick_threshold = 20, s.trigger_threshold = 30, s.pointer_deadzone = 10, s.rumble_strength = 45;
-        s.volume = 65, s.mute_unfocused = true;
-        s.controls[mkdd::kCtlOne] = {{Binding::kPad, host::kPadLT, {}}, {Binding::kKey, 0, "Left Shift"}};
+        s.preset = "desktop", s.fullscreen = true, s.monitor = "DELL U2720Q", s.aspect_w = 64, s.aspect_h = 27, s.hud = mkdd::Hud::stretched;
+        s.scaling = host::Scaling::integer, s.smooth = false, s.smaa = true, s.fsr = true, s.sharpness = 35, s.look = host::Look::crt;
+        s.scanlines = 80, s.mask = 0, s.scale = 5, s.anisotropy = 8, s.true_color = false, s.vsync = false;
+        s.frame_rate = mkdd::FrameRate::unlimited, s.low_latency = false, s.gpu = "AMD Radeon RX 6600", s.performance_overlay = true;
+        s.match_refresh = false, s.variable_refresh = true;
+        s.volume = 65, s.mute_unfocused = true, s.sound_output = host::SoundOutput::device, s.sound_device = "Speakers (Realtek Audio)";
+        s.stick_deadzone = 5, s.stick_threshold = 20, s.trigger_threshold = 30, s.rumble_strength = 45;
+        s.players[0].controller = "guid:n:70616431:0", s.players[1].controller = "guid:n:70616432:0", s.players[3].controller = "none";
+        s.players[2].rumble = false;
+        s.players[0].controls[mkdd::kCtlR] = {{Binding::kPad, host::kPadRB, {}}, {Binding::kKey, 0, "Left Shift"}};
+        s.players[3].controls[mkdd::kCtlCUp] = {{Binding::kMouse, 0, {}}, {Binding::kPad, host::kPadRSDown, {}}};
+        s.players[2].controls[mkdd::kCtlStart].clear();
+        s.sound = 0, s.progressive = false;
         mkdd::Settings back;
         std::string e;
         check(mkdd::parse_settings(mkdd::settings_text(s), back, e) && same(back, s), "every setting reads back as written");
     }
-    check(error_of("[display]\nlook = vhs\n").find("look is plain or crt") != std::string::npos, "an unknown look");
-    check(error_of("[display]\nscanlines = 101\n").find("from 0 to 100") != std::string::npos, "scanlines out of range");
-    check(error_of("[console]\nlanguage = 0\n").find("language is 1 (English)") != std::string::npos, "a language not on the disc");
-    check(error_of("[controls]\nrumble = maybe\n").find("rumble is true or false") != std::string::npos, "a boolean that isn't");
-    check(error_of("[controls]\nsecond_player = third controller\n").find("second_player is off") != std::string::npos, "a second player that isn't");
     {
-        mkdd::Settings t;
-        std::string e;
-        check(mkdd::parse_settings("[controls]\nsecond_player = first controller\n", t, e) && t.second_player == 2 && d.second_player == 0,
-              "a second player on the first controller; none by default");
-    }
-    check(error_of("scale = 2\n").rfind("line 1: 'scale' comes before any [section]", 0) == 0, "a setting outside a section");
-    check(error_of("[audio]\n").rfind("line 1: there's no section [audio]", 0) == 0, "an unknown section");
-    {
-        // The data folder's file: written with the defaults, from v0.17.0's when that's there.
+        // The data folder's file: written with the defaults, then kept.
         const std::filesystem::path dir = std::filesystem::temp_directory_path() / "mkdd_settings_test";
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir);
-        {
-            std::ofstream old(dir / "settings.ini");
-            old << "[video]\nscale = 2\n[controls]\nhome = key:Escape\n";
-        }
         const mkdd::Settings s = mkdd::load_settings(dir);
-        check(s.scale == 2 && std::filesystem::exists(dir / "mkdd.ini") && std::filesystem::exists(dir / "settings.ini.old") &&
-                  !std::filesystem::exists(dir / "settings.ini"),
-              "v0.17.0's settings.ini becomes mkdd.ini");
+        check(same(s, d) && std::filesystem::exists(dir / "mkdd.ini"), "a missing mkdd.ini is written with the defaults");
         mkdd::Settings changed = s;
-        changed.look = qilin::host::Look::crt;
-        check(mkdd::save_settings(dir, changed) && mkdd::load_settings(dir).look == qilin::host::Look::crt,
-              "saving, then loading, keeps a change");
+        changed.look = host::Look::crt;
+        changed.players[1].controls[mkdd::kCtlA] = {{Binding::kKey, 0, "Q"}};
+        const mkdd::Settings again = mkdd::save_settings(dir, changed) ? mkdd::load_settings(dir) : s;
+        check(again.look == host::Look::crt && same(again, changed), "saving, then loading, keeps a change");
+        check(!std::filesystem::exists(dir / "mkdd.ini.tmp"), "the temporary file is gone");
         std::filesystem::remove_all(dir);
     }
-    check(error_of("[controls]\na = pad:A\na = pad:B\n").rfind("line 3: 'a' is set twice", 0) == 0, "a control set twice");
-    check(error_of("[controls]\r\na = pad:A\r\n").empty(), "Windows line endings");
-
-    check(error_of("[controls]\ncontroller1 = same\ncontroller2 = same\n").find("same explicit controller") != std::string::npos,
-          "one device cannot be assigned to both players");
-    check(error_of("[controls]\nstick_threshold = 0\n").find("from 5 to 95") != std::string::npos, "stick threshold range");
-    check(error_of("[controls]\nvolume = 101\n").find("from 0 to 100") != std::string::npos, "volume range");
-    check(error_of("[display]\nvsync = true\nVSYNC = false\n").find("set twice") != std::string::npos, "duplicate scalar settings rejected");
-    check(error_of("\xEF\xBB\xBF[display]\ninternal_scale = AUTO\n").empty(), "BOM and case-insensitive auto");
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");
     return g_failures ? 1 : 0;
 }
