@@ -502,6 +502,19 @@ int main(int argc, char** argv) {
     if (display) start_watchdog();
     for (;;) {
         g_main_passes.fetch_add(1, std::memory_order_relaxed);
+        {  // What the game itself set in SRAM (os.hpp) goes into the settings file, as the console keeps it.
+            const int stereo = mkdd::g_game_set_stereo.exchange(-1, std::memory_order_relaxed);
+            const int progressive = mkdd::g_game_set_progressive.exchange(-1, std::memory_order_relaxed);
+            const bool sound_changed = stereo >= 0 && settings.sound != unsigned(stereo);
+            const bool progressive_changed = progressive >= 0 && settings.progressive != (progressive != 0);
+            if (sound_changed) settings.sound = unsigned(stereo);
+            if (progressive_changed) settings.progressive = progressive != 0;
+            if (sound_changed || progressive_changed) {
+                rt::log("the game changed the console's settings: sound %s, progressive scan %s (saved)", settings.sound ? "stereo" : "mono",
+                        settings.progressive ? "on" : "off");
+                if (!mkdd::save_settings(data, settings)) rt::log("the settings can't be saved");
+            }
+        }
         if (display) {
             std::array<std::string, qilin::host::kPlayerPlaces> chosen;
             for (unsigned p = 0; p < mkdd::kPlayers; ++p) chosen[p] = settings.players[p].controller;

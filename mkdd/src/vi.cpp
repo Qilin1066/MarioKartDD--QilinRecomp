@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 #include <atomic>
 
 #include "boot.hpp"
@@ -150,13 +151,19 @@ void poll_retrace() {
         post_interrupt([](Cpu& c) {
             park_if_requested();  // the settings menu's pause: here, between frames
             ++g_retraces;
-            static const double threads_at = [] {  // MKDD_THREADS (threads.hpp)
-                const char* e = std::getenv("MKDD_THREADS");
-                return e ? std::atof(e) : -1.0;
+            static const std::vector<double> threads_at = [] {  // MKDD_THREADS (threads.hpp): one time, or several with commas
+                std::vector<double> times;
+                for (const char* e = std::getenv("MKDD_THREADS"); e && *e;) {
+                    char* end = nullptr;
+                    times.push_back(std::strtod(e, &end));
+                    e = *end == ',' ? end + 1 : "";
+                }
+                return times;
             }();
-            static bool threads_said = false;
-            if (threads_at >= 0 && !threads_said && g_frames >= threads_at * 60) {
-                threads_said = true;
+            static size_t threads_said = 0;
+            if (threads_said < threads_at.size() && g_frames >= threads_at[threads_said] * 60) {
+                ++threads_said;
+                rt::log("guest threads at %.0f s of game time:", double(g_frames) / 60.0);
                 log_threads();
                 // MKDD_PEEK=<address>:<words> (hex): that much guest memory with it.
                 unsigned at = 0, words = 0;
@@ -230,6 +237,15 @@ void VIGetRetraceCount(Cpu& c) { c.r[3] = g_retraces; }
 // movie only when the next field is the one it expects, which it flips after
 // each (THPPlayer's PlayControl, 801B4400).
 void VIGetNextField(Cpu& c) { c.r[3] = (g_retraces & 1) ^ 1; }
+// The line the beam is on within its field: the time since the last retrace
+// over the period, in the mode's lines (262 a field interlaced, 525 a picture
+// progressive: half the timing tables' 525 and 1050 half lines, 800B06E8).
+void VIGetCurrentLine(Cpu& c) {
+    const uint64_t period = g_period.load(std::memory_order_relaxed), now = time_base();
+    const uint64_t since = g_next_retrace > now ? period - std::min(period, g_next_retrace - now) : period - 1;
+    const uint64_t half_lines = g_shown.progressive ? 1050 : 525;
+    c.r[3] = static_cast<uint32_t>(since * half_lines / period / 2);
+}
 void VIGetTvFormat(Cpu& c) { c.r[3] = 0; }  // VI_NTSC
 void VIGetDTVStatus(Cpu& c) { c.r[3] = component_cable(); }
 
@@ -246,6 +262,7 @@ const rt::Provided kReplacements[] = {
     {0x800B0524u, "VISetBlack", VISetBlack},
     {0x800B05A0u, "VIGetRetraceCount", VIGetRetraceCount},
     {0x800B064Cu, "VIGetNextField", VIGetNextField},
+    {0x800B06E8u, "VIGetCurrentLine", VIGetCurrentLine},
     {0x800B0780u, "VIGetTvFormat", VIGetTvFormat},
     {0x800B07E8u, "VIGetDTVStatus", VIGetDTVStatus},
 };
