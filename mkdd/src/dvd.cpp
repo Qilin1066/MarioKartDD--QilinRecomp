@@ -201,6 +201,9 @@ void DVDConvertPathToEntrynum(Cpu& c) {
 bool open_entry(uint32_t n, uint32_t fi) {
     const auto& entries = fst();
     if (n >= entries.size() || entries[n].directory) return false;
+    static const bool say = std::getenv("MKDD_DVD_LOG") != nullptr;  // development: which files the game opens, and when
+    static const uint64_t first = time_base();
+    if (say) rt::log("DVD: %.2f s: opens %s (%u bytes)", double(time_base() - first) / double(kTimerHz), entries[n].path.c_str(), entries[n].size);
     rt::poke32(fi + kFileStart, entries[n].offset);
     rt::poke32(fi + kFileLength, entries[n].size);
     rt::poke32(fi + kFileCallback, 0);

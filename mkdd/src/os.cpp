@@ -346,7 +346,12 @@ void DCZeroRange(Cpu& c) {
 }
 
 // ---- the locked cache: 16 KB at 0xE0000000 (the runtime backs it). Its DMA
-// is a copy, done at once, so there's never a queue to wait for.
+// is a copy, done at once, so there's never a queue to wait for. Enabling it
+// sets HID2's LCE bit, which code reads to know it's there: the movie decoder
+// (THPVideoDecode, 800F0848) refuses to decode without it.
+constexpr uint32_t kHid2Lce = 0x10000000u;
+void LCEnable(Cpu&) { g_hid2 |= kHid2Lce; }
+void LCDisable(Cpu&) { g_hid2 &= ~kHid2Lce; }
 uint32_t blocks(uint32_t n) { return n == 0 ? 128 : n; }  // 0 means 128 blocks of 32 bytes
 void LCStoreBlocks(Cpu& c) { std::memmove(rt::guest_ptr(c.r[3] | 0x80000000u), rt::guest_ptr(c.r[4]), 32 * blocks(c.r[5])); }
 void LCStoreData(Cpu& c) {  // (dest, srcLC, bytes) -> DMA transactions issued
@@ -489,8 +494,8 @@ const rt::Provided kReplacements[] = {
     {0x800E7188u, "ICInvalidateRange", nothing},
     {0x800E71BCu, "ICFlashInvalidate", nothing},
     {0x800E71CCu, "ICEnable", nothing},
-    {0x800E72ACu, "LCEnable", nothing},
-    {0x800E72E4u, "LCDisable", nothing},
+    {0x800E72ACu, "LCEnable", LCEnable},
+    {0x800E72E4u, "LCDisable", LCDisable},
     {0x800E730Cu, "LCStoreBlocks", LCStoreBlocks},
     {0x800E7330u, "LCStoreData", LCStoreData},
     {0x800E73DCu, "LCQueueWait", nothing},

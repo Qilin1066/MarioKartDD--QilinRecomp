@@ -8,6 +8,8 @@
 // the cable) and SRAM's progressive flag or the player says so.
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <atomic>
 
 #include "boot.hpp"
@@ -148,6 +150,21 @@ void poll_retrace() {
         post_interrupt([](Cpu& c) {
             park_if_requested();  // the settings menu's pause: here, between frames
             ++g_retraces;
+            static const double threads_at = [] {  // MKDD_THREADS (threads.hpp)
+                const char* e = std::getenv("MKDD_THREADS");
+                return e ? std::atof(e) : -1.0;
+            }();
+            static bool threads_said = false;
+            if (threads_at >= 0 && !threads_said && g_frames >= threads_at * 60) {
+                threads_said = true;
+                log_threads();
+                // MKDD_PEEK=<address>:<words> (hex): that much guest memory with it.
+                unsigned at = 0, words = 0;
+                if (const char* e = std::getenv("MKDD_PEEK"); e && std::sscanf(e, "%x:%x", &at, &words) == 2 && at >= 0x80000000u && at < 0x81800000u)
+                    for (unsigned i = 0; i < words && at + 4 * i < 0x81800000u - 16; i += 4)
+                        rt::log("%08X: %08X %08X %08X %08X", at + 4 * i, rt::peek32(at + 4 * i), rt::peek32(at + 4 * i + 4), rt::peek32(at + 4 * i + 8),
+                                rt::peek32(at + 4 * i + 12));
+            }
             if (g_retraces % 300 == 0) report();
             if (g_pre_cb) guest_callback(c, g_pre_cb, g_retraces, 0);
             if (g_flush_pending) g_shown = g_flushed, g_flush_pending = false;
@@ -205,10 +222,14 @@ void VIGetNextFrameBuffer(Cpu& c) { c.r[3] = g_set.fb; }
 void VIGetCurrentFrameBuffer(Cpu& c) { c.r[3] = g_shown.fb; }
 void VISetBlack(Cpu& c) { g_set.black = c.r[3] != 0; }
 void VIGetRetraceCount(Cpu& c) { c.r[3] = g_retraces; }
-// The field after the one being shown: interlaced, they alternate with the
-// retraces; progressive, every frame is whole and the answer is always 1
-// (VIGetNextField, 800B064C, with the picture at its default position).
-void VIGetNextField(Cpu& c) { c.r[3] = g_shown.progressive ? 1 : (g_retraces & 1) ^ 1; }
+// The field after the one being shown: they alternate with the retraces. With
+// progressive scan too: the hardware's line counter still runs through two
+// "fields" (each then a whole picture; the progressive timing's 1050 half
+// lines are one of them, VIGetNextField 800B064C with the table at 80345AA0),
+// and the movie player counts on it, taking a frame of its 59.94-a-second
+// movie only when the next field is the one it expects, which it flips after
+// each (THPPlayer's PlayControl, 801B4400).
+void VIGetNextField(Cpu& c) { c.r[3] = (g_retraces & 1) ^ 1; }
 void VIGetTvFormat(Cpu& c) { c.r[3] = 0; }  // VI_NTSC
 void VIGetDTVStatus(Cpu& c) { c.r[3] = component_cable(); }
 
