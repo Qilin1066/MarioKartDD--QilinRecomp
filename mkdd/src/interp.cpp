@@ -368,7 +368,7 @@ bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
 
 void Blender::states(const gx::Frame& cur, float phase, gx::State* out) {
     const size_t n = cur.states.size();
-    if (n) std::memcpy(out, cur.states.data(), n * sizeof(gx::State));
+    cur.states.resolve_all(out);
     if (!(phase < 1.0f) || prepared_.size() != cur.loads.size() || views_.size() != cur.views.size()) return;
     const float t = std::max(phase, 0.0f);
     const size_t loads = cur.loads.size(), views = views_.size();
@@ -411,7 +411,8 @@ void Blender::states(const gx::Frame& cur, float phase, gx::State* out) {
     }
     for (size_t i = 0; i < n; ++i) {
         // (Read from the frame's own states: `out` is the GPU's memory, slow to read back.)
-        const gx::State& was = cur.states[i];
+        thread_local gx::State was;  // (the frame keeps its states as blocks)
+        cur.states.resolve(i, was);
         gx::State& s = out[i];
         if (was.projection[3][2] != -1.0f) continue;  // flat drawing (orthographic): as the newer frame has it
         const gx::StateInfo& info = cur.state_info[i];

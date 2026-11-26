@@ -88,10 +88,12 @@ void place(gx::Frame& f) {
 
     thread_local std::vector<Flat> flats;
     flats.clear();
+    thread_local gx::State s;  // the draw's state (the frame keeps them as blocks)
+    uint32_t s_at = ~0u;
     for (uint32_t pi = 0; pi < f.packets.size(); ++pi) {
         if (f.packets[pi].kind != gx::Packet::kDraw) continue;
         const gx::Draw& d = f.draws[f.packets[pi].index];
-        const gx::State& s = f.states[d.state];
+        if (d.state != s_at) f.states.resolve(d.state, s), s_at = d.state;
         if (s.projection[3][3] != 1.0f || d.index_count == 0) continue;  // perspective: the cameras' business
         float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
         if (d.pipeline.small_vertices) extent(f, d, s, f.small.data(), lo, hi);
@@ -169,10 +171,11 @@ void place(gx::Frame& f) {
             continue;
         }
         const uint32_t to = uint32_t(f.states.size());
-        f.states.push_back(gx::State(f.states[d.state]));
-        float* row = f.states.back().projection[0];
+        gx::State placed = f.states[d.state];
+        float* row = placed.projection[0];
         for (unsigned c = 0; c < 4; ++c) row[c] *= k;
         row[3] += anchor * (1 - k);
+        f.states.push(placed);
         made.push_back({d.state, to, anchor});
         d.state = to;
     }

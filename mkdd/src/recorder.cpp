@@ -43,6 +43,16 @@ namespace {
 RecorderStats g_stats;
 std::unique_ptr<Frame> g_frame = std::make_unique<Frame>();
 
+// The switches read for every primitive, read once at start-up (a function's own static is a guard to
+// check each time it runs).
+bool env_set(const char* name) {
+    const char* e = std::getenv(name);
+    return e && *e && *e != '0';
+}
+const bool g_check_decode = env_set("MKDD_CHECK_DECODE");  // the fast decoders and incremental states checked
+const bool g_force_full = env_set("MKDD_FULL_VERTICES");   // always the full vertex layout (tests both)
+const bool g_join_on = [] { const char* e = std::getenv("MKDD_JOIN"); return !(e && *e == '0'); }();  // MKDD_JOIN=0: a draw a primitive
+
 // Every shape seen, by its words, and by id for the renderer's threads.
 struct ShapeHash {
     size_t operator()(const ShapeWords& w) const {
@@ -94,11 +104,13 @@ QILIN_RECORDER_INLINE float component(const uint8_t* p, unsigned fmt, float scal
     }
 }
 QILIN_RECORDER_INLINE float normal_component(const uint8_t* p, unsigned fmt) {
-    switch (fmt) {  // fixed scales: the fraction is the type's
-        case 0: return p[0] / 128.0f;
-        case 1: return static_cast<int8_t>(p[0]) / 64.0f;
-        case 2: return be16(p) / 32768.0f;
-        case 3: return static_cast<int16_t>(be16(p)) / 16384.0f;
+    // Fixed scales: the fraction is the type's. (Times the power of two's inverse: the same float as the
+    // division, which MSVC keeps as a division.)
+    switch (fmt) {
+        case 0: return float(p[0]) * (1.0f / 128.0f);
+        case 1: return float(static_cast<int8_t>(p[0])) * (1.0f / 64.0f);
+        case 2: return float(be16(p)) * (1.0f / 32768.0f);
+        case 3: return float(static_cast<int16_t>(be16(p))) * (1.0f / 16384.0f);
         default: return as_float(be32(p));
     }
 }
@@ -613,8 +625,8 @@ size_t decode_columns(const Registers& r, const Format& f, const Plan& pl, const
 // layouts). For those, a decoder compiled for the layout: one pass a vertex,
 // each attribute at a constant offset with a constant format, and every byte
 // of the vertex written once (decode_columns' results, the same bytes).
-enum Code : uint8_t { kCPosMtx, kCTexMtx0, kCPosF3, kCNrmS16, kCNrmF, kCColRGBA8, kCUv0S16, kCUv1S16 };
-constexpr unsigned code_bytes(Code c) { return c == kCPosMtx || c == kCTexMtx0 ? 1 : 2; }
+enum Code : uint8_t { kCPosMtx, kCTexMtx0, kCTexMtx1, kCPosF3, kCNrmS16, kCNrmF, kCColRGBA8, kCUv0S16, kCUv1S16 };
+constexpr unsigned code_bytes(Code c) { return c == kCPosMtx || c == kCTexMtx0 || c == kCTexMtx1 ? 1 : 2; }
 template <Code... C>
 constexpr std::array<unsigned, sizeof...(C)> code_offsets() {
     std::array<unsigned, sizeof...(C)> at{};
@@ -639,12 +651,14 @@ QILIN_RECORDER_INLINE void fused_step(const FusedIn& in, const uint8_t* p, V& v)
         v.matrices[0] = (v.matrices[0] & ~0xFFu) | (p[At] & 63u);
     } else if constexpr (C == kCTexMtx0) {
         v.matrices[0] = (v.matrices[0] & ~0xFF00u) | ((p[At] & 63u) << 8);
+    } else if constexpr (C == kCTexMtx1) {
+        v.matrices[0] = (v.matrices[0] & ~0xFF0000u) | ((p[At] & 63u) << 16);
     } else if constexpr (C == kCPosF3) {
         const uint8_t* d = in.element(0, 12, p + At);
         v.pos[0] = as_float(be32(d)), v.pos[1] = as_float(be32(d + 4)), v.pos[2] = as_float(be32(d + 8));
     } else if constexpr (C == kCNrmS16) {
         const uint8_t* d = in.element(1, 6, p + At);
-        for (unsigned j = 0; j < 3; ++j) v.normal[j] = static_cast<int16_t>(be16(d + 2 * j)) / 16384.0f;
+        for (unsigned j = 0; j < 3; ++j) v.normal[j] = float(static_cast<int16_t>(be16(d + 2 * j))) * (1.0f / 16384.0f);
     } else if constexpr (C == kCNrmF) {
         const uint8_t* d = in.element(1, 12, p + At);
         for (unsigned j = 0; j < 3; ++j) v.normal[j] = as_float(be32(d + 4 * j));
@@ -701,6 +715,7 @@ constexpr Fused kFused[] = {
     fused<kCPosF3, kCNrmF, kCUv0S16>(),
     fused<kCPosMtx, kCPosF3, kCNrmS16, kCUv0S16>(),
     fused<kCPosF3, kCUv0S16>(),
+    fused<kCPosMtx, kCTexMtx1, kCPosF3, kCNrmS16, kCUv0S16>(),  // (an eighth of a race frame's primitives)
 };
 void choose_fused(Plan& pl) {
     if (!pl.usable || pl.count > 6) return;
@@ -710,7 +725,7 @@ void choose_fused(Plan& pl) {
         const bool idx16 = st.how == 3;
         switch (st.kind) {
             case Step::kPosMtx: codes[i] = kCPosMtx; break;
-            case Step::kTexMtx: if (st.slot != 0) return; codes[i] = kCTexMtx0; break;
+            case Step::kTexMtx: if (st.slot > 1) return; codes[i] = st.slot ? kCTexMtx1 : kCTexMtx0; break;
             case Step::kPos: if (!idx16 || st.fmt != 4 || st.n != 3) return; codes[i] = kCPosF3; break;
             case Step::kNormal:
                 if (!idx16 || st.n != 1 || (st.fmt != 3 && st.fmt != 4)) return;
@@ -749,8 +764,7 @@ size_t decode_best(const Registers& r, const Format& f, const Plan& pl, const ui
 // fatal error at the first difference. For tests and after changing either.
 template <class V>
 size_t decode_checked(const Registers& r, const Format& f, const Plan& pl, const uint8_t* data, uint32_t count, V* out) {
-    static const bool check = [] { const char* e = std::getenv("MKDD_CHECK_DECODE"); return e && *e && *e != '0'; }();
-    if (!check) [[likely]] return decode_best(r, f, pl, data, count, out);
+    if (!g_check_decode) [[likely]] return decode_best(r, f, pl, data, count, out);
     float last[3][3];
     std::memcpy(last[0], g_last_normal, 12), std::memcpy(last[1], g_last_tangent, 12), std::memcpy(last[2], g_last_binormal, 12);
     const size_t used = decode_best(r, f, pl, data, count, out);
@@ -805,6 +819,68 @@ void build_state(const Registers& r, State& s, uint32_t parts) {
     if (parts & kPartLights) build_lights(xf, s);
     if (parts & kPartXfRegs) build_xf_regs(xf, s);
     if (parts & (kPartBp | kPartXfRegs)) build_bp(r, s);
+}
+
+// The blocks of a State (States::kBlock bytes each) that rebuilding `parts` may change.
+static_assert(offsetof(State, posmtx) == 0 && offsetof(State, nrmmtx) < offsetof(State, postmtx) &&
+              offsetof(State, postmtx) < offsetof(State, lights) && offsetof(State, lights) < offsetof(State, projection) &&
+              offsetof(State, projection) < offsetof(State, pixel_center) && offsetof(State, xf) < offsetof(State, bp) &&
+              offsetof(State, bp) < offsetof(State, texdims) && offsetof(State, fog_range) < sizeof(State),
+              "blocks_of takes the parts' members to lie in this order");
+constexpr uint32_t blocks_in(size_t from, size_t to) {  // the blocks bytes [from, to) lie in
+    uint32_t m = 0;
+    for (size_t b = from / States::kBlock; b * States::kBlock < to; ++b) m |= 1u << b;
+    return m;
+}
+constexpr uint32_t blocks_of(uint32_t parts) {
+    uint32_t m = 0;
+    if (parts & kPartPos) m |= blocks_in(offsetof(State, posmtx), offsetof(State, nrmmtx));
+    if (parts & kPartNormal) m |= blocks_in(offsetof(State, nrmmtx), offsetof(State, postmtx));
+    if (parts & kPartPost) m |= blocks_in(offsetof(State, postmtx), offsetof(State, lights));
+    if (parts & kPartLights) m |= blocks_in(offsetof(State, lights), offsetof(State, projection));
+    if (parts & kPartXfRegs) m |= blocks_in(offsetof(State, projection), offsetof(State, bp));
+    if (parts & (kPartBp | kPartXfRegs)) m |= blocks_in(offsetof(State, bp), sizeof(State));
+    return m;
+}
+static_assert(blocks_of(kPartAll) == (1u << States::kBlocks) - 1 && blocks_of(kPartPos) == 0xFu && blocks_in(0, 0) == 0);
+// The state as last built: each new one is made from it, then kept in the frame's blocks.
+State g_built{};
+// Within the parts, what was written since the last state: XF words [g_pos_lo, g_pos_hi) of the position
+// matrices, and BP registers by bit. A state then copies those alone (most draws load a matrix or two
+// and change a few colours).
+uint32_t g_pos_lo = 0, g_pos_hi = 256;
+uint64_t g_bp_dirty[4] = {~0ull, ~0ull, ~0ull, ~0ull};
+void build_bp_derived(const Registers& r, State& s);
+void build_whole(const Registers& r, State& s) {
+    build_state(r, s, kPartAll);
+    g_pos_lo = 256, g_pos_hi = 0;
+    std::fill(std::begin(g_bp_dirty), std::end(g_bp_dirty), 0ull);
+}
+// build_state(r, s, parts) on the state last built, copying only what was written; returns the blocks it may have changed.
+uint32_t build_changed(const Registers& r, State& s, uint32_t parts) {
+    uint32_t blocks = blocks_of(parts & (kPartNormal | kPartPost | kPartLights | kPartXfRegs));
+    if ((parts & kPartPos) && g_pos_lo < g_pos_hi) {
+        std::memcpy(&s.posmtx[0][0] + g_pos_lo, r.xf + g_pos_lo, (g_pos_hi - g_pos_lo) * 4);  // (floats by their bits)
+        blocks |= blocks_in(offsetof(State, posmtx) + 4 * g_pos_lo, offsetof(State, posmtx) + 4 * g_pos_hi);
+    }
+    build_state(r, s, parts & (kPartNormal | kPartPost | kPartLights));
+    if (parts & kPartXfRegs) build_xf_regs(r.xf, s);
+    if (parts & kPartBp)
+        for (unsigned w = 0; w < 4; ++w)
+            for (uint64_t m = g_bp_dirty[w]; m; m &= m - 1) {
+                const unsigned reg = 64 * w + unsigned(std::countr_zero(m));
+                s.bp[reg / 4][reg % 4] = r.bp[reg];
+                blocks |= blocks_in(offsetof(State, bp) + 4 * reg, offsetof(State, bp) + 4 * reg + 4);
+            }
+    if (parts & (kPartBp | kPartXfRegs)) {
+        // (The write mask, 0xFE, changes without a BP write's notice: set by its own write, cleared by the next.)
+        s.bp[0xFE / 4][0xFE % 4] = r.bp[0xFE];
+        build_bp_derived(r, s);
+        blocks |= blocks_in(offsetof(State, bp) + 4 * 0xFE, sizeof(State));
+    }
+    g_pos_lo = 256, g_pos_hi = 0;
+    std::fill(std::begin(g_bp_dirty), std::end(g_bp_dirty), 0ull);
+    return blocks;
 }
 
 void build_lights(const uint32_t* xf, State& s) {
@@ -866,9 +942,12 @@ void build_xf_regs(const uint32_t* xf, State& s) {
 }
 
 void build_bp(const Registers& r, State& s) {
-    const uint32_t* xf = r.xf;
-    // Pixel side.
     for (int i = 0; i < 256; ++i) s.bp[i / 4][i % 4] = r.bp[i];
+    build_bp_derived(r, s);
+}
+// What the shaders take from BP registers worked out (and the fog's part of the viewport).
+void build_bp_derived(const Registers& r, State& s) {
+    const uint32_t* xf = r.xf;
     for (unsigned m2 = 0; m2 < 8; ++m2) {
         const uint32_t image0 = r.bp[(m2 < 4 ? 0x88 : 0xA8) + m2 % 4];
         s.texdims[m2][0] = int32_t((image0 & 0x3FF) + 1);
@@ -1139,7 +1218,7 @@ void xf_changed(uint32_t address, uint32_t count) {
     const uint32_t end = address + count;
     const auto overlaps = [&](uint32_t lo, uint32_t hi) { return address < hi && end > lo; };
     uint32_t parts = 0;
-    if (overlaps(0x000, 0x100)) parts |= kPartPos;
+    if (overlaps(0x000, 0x100)) parts |= kPartPos, g_pos_lo = std::min(g_pos_lo, address), g_pos_hi = std::max(g_pos_hi, std::min(end, 0x100u));
     if (overlaps(0x400, 0x460)) parts |= kPartNormal;
     if (overlaps(0x500, 0x600)) parts |= kPartPost;
     if (overlaps(0x600, 0x680)) parts |= kPartLights;
@@ -1202,10 +1281,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     // answer: the last tangents only change in a format that has them.
     constexpr uint32_t kBig = kHasTangent | kHasBinormal | (((1u << (8 - kSmallUvs)) - 1) * (kHasUv0 << kSmallUvs));
     static constexpr float kZero3[3] = {};
-    static const bool force_full = [] {  // MKDD_FULL_VERTICES=1: always the full layout (tests both)
-        const char* e = std::getenv("MKDD_FULL_VERTICES");
-        return e && *e && *e != '0';
-    }();
+    const bool force_full = g_force_full;
     const auto zero_bytes = [](const float* v) {  // (all 12 bytes: -0 isn't zero here)
         uint32_t w[3];
         std::memcpy(w, v, 12);
@@ -1303,8 +1379,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     // The joined draw is an indexed triangle list, in the primitives' order.
     // (Not while MKDD_DFF captures, which numbers draws by primitive;
     // MKDD_JOIN=0 gives every primitive its own draw.)
-    static const bool join = [] { const char* e = std::getenv("MKDD_JOIN"); return !(e && *e == '0'); }();
-    if (join && type <= 4 && !g_dirty && g_join.valid && g_join.has == has && g_join.small == small && !g_dff_use &&
+    if (g_join_on && type <= 4 && !g_dirty && g_join.valid && g_join.has == has && g_join.small == small && !g_dff_use &&
         !f.packets.empty() && f.packets.back().kind == Packet::kDraw && f.packets.back().index == g_join.draw) {
         Draw& d = f.draws[g_join.draw];
         if (d.direct) {  // the first to join it: its own vertices as indices
@@ -1319,15 +1394,15 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     }
     if (g_dirty) {
         // From the frame's last state where there is one, redoing what changed.
-        static const bool check = [] { const char* e = std::getenv("MKDD_CHECK_DECODE"); return e && *e && *e != '0'; }();
+        // (Into the state last built, then into the frame: only the blocks that differ are copied.)
         const uint32_t parts = f.states.empty() ? uint32_t(kPartAll) : g_parts;
-        if (f.states.empty()) f.states.emplace_back();
-        else f.states.push_back(f.states.back());
-        build_state(r, f.states.back(), parts);
-        if (check && parts != kPartAll) [[unlikely]] {  // MKDD_CHECK_DECODE: the same as built whole
-            State whole;
+        if (parts == kPartAll) build_whole(r, g_built), f.states.push(g_built);
+        else f.states.push(g_built, build_changed(r, g_built, parts));
+        if (g_check_decode && parts != kPartAll) [[unlikely]] {  // MKDD_CHECK_DECODE: the same as built whole
+            State whole, kept;
             build_state(r, whole, kPartAll);
-            if (std::memcmp(&whole, &f.states.back(), sizeof whole) != 0)
+            f.states.resolve(f.states.size() - 1, kept);
+            if (std::memcmp(&whole, &kept, sizeof whole) != 0)
                 rt::fatal(nullptr, "MKDD_CHECK_DECODE: a state built from the one before differs (parts %X)", parts);
         }
         g_state = uint32_t(f.states.size() - 1);
@@ -1408,6 +1483,7 @@ void bp_written(uint32_t reg, uint32_t value, bool changed) {
     if (reg == 0x66) textures_invalidated(), g_join.valid = false;  // (a texture may be new under the same registers)
     if (!changed) return;  // the state is what it was (commands are acted on by gpu.cpp either way)
     g_parts |= kPartBp;
+    g_bp_dirty[(reg & 0xFF) / 64] |= 1ull << (reg % 64);
     if (reg >= 0xE0 && reg <= 0xE7) {  // TEV colour registers and konstants: 11-bit signed, the type bit says which
         const unsigned i = (reg - 0xE0) / 2;
         const bool konst = (value >> 23) & 1;
@@ -1488,7 +1564,7 @@ Survey* const g_survey = [] () -> Survey* {
 void survey(const Frame& f, uint64_t frame_number) {
     Survey& s = *g_survey;
     for (const Draw& d : f.draws) {
-        const State& st = f.states[d.state];
+        const State st = f.states[d.state];  // (a copy: the frame keeps them as blocks)
         if (st.projection[3][2] != -1.0f || d.pipeline.topology != 0) continue;
         float lo = 2.0f, hi = -1.0f;
         const auto vertex = [&](uint32_t i) {
@@ -1816,12 +1892,17 @@ uint64_t now_ns() {
 }
 
 uint32_t shape_id(const uint32_t* bp) {
+    // The draw before's, mostly (a material's draws share one): compared before the table is searched.
+    static ShapeWords last{};
+    static uint32_t last_id = kNoLoad;
     const ShapeWords w = shape_of(bp);
+    if (last_id != kNoLoad && w == last) return last_id;
     const auto [it, added] = g_shape_ids.try_emplace(w, uint32_t(g_shape_ids.size()));
     if (added) {
         std::lock_guard lock(g_shapes_lock);
         g_shapes.push_back(w);
     }
+    last = w, last_id = it->second;
     return it->second;
 }
 uint32_t intern_shape(const ShapeWords& w) {

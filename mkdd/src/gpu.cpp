@@ -164,6 +164,15 @@ void cp_written() {
     g_vertex_size_known = 0;
     gx::cp_changed();
 }
+// One CP register changed: only what reads it is made again. The vertex sizes read the descriptors and
+// the attribute tables (0x50-0x9F); the recorder's format and plan those, the matrix indices (0x30, 0x40)
+// and vertex arrays 0-11 (0xA0-0xAB, 0xB0-0xBB). Arrays 12-15 hold the indexed loads' matrices, read by
+// the loads themselves: a race frame changes array 12's base 600 times, between shapes of one format.
+void cp_register_written(uint32_t reg) {
+    if (reg >= 0x50 && reg < 0xA0) g_vertex_size_known = 0;
+    if (reg == 0x30 || reg == 0x40 || (reg >= 0x50 && reg < 0xA0) || (reg & 0xEF) - 0xA0 < 12) gx::cp_changed();
+}
+static_assert((0xACu & 0xEF) - 0xA0 >= 12 && (0xBBu & 0xEF) - 0xA0 < 12 && (0xBCu & 0xEF) - 0xA0 >= 12 && (0xA0u & 0xEF) - 0xA0 == 0);
 
 const bool g_trace = [] {
     const char* t = std::getenv("MKDD_TRACE");
@@ -465,7 +474,7 @@ int bench_recording(const char* dff_path, unsigned times) {
     Cpu c = rt::new_cpu();
     gx::set_rendering(true);  // frames are queued (and taken back below), as when drawing
     std::vector<double> ms;
-    uint64_t draws = 0, vertices = 0, states = 0, hashed_before = 0;
+    uint64_t draws = 0, vertices = 0, states = 0, state_bytes = 0, hashed_before = 0;
     for (unsigned i = 0; i < times + 5; ++i) {
         if (i == 5) hashed_before = gx::recorder_stats().hashed_bytes.load();  // five to warm the caches up, not counted
         dff.registers();
@@ -475,7 +484,7 @@ int bench_recording(const char* dff_path, unsigned times) {
         decode(c, commands.data(), commands.size(), used, false);
         const uint64_t t1 = gx::now_ns();
         while (auto f = gx::next_frame(0)) {
-            if (i >= 5) draws += f->draws.size(), vertices += f->vertices.size() + f->small.size(), states += f->states.size();
+            if (i >= 5) draws += f->draws.size(), vertices += f->vertices.size() + f->small.size(), states += f->states.size(), state_bytes += f->states.blocks() * gx::States::kBlock;
             gx::recycle_frame(std::move(f));
         }
         if (i >= 5) ms.push_back(double(t1 - t0) / 1e6);
@@ -484,10 +493,10 @@ int bench_recording(const char* dff_path, unsigned times) {
     double sum = 0;
     for (double v : ms) sum += v;
     std::printf("recording %s, %u times: median %.3f ms, fastest %.3f, slowest %.3f, mean %.3f; "
-                "%llu draws, %llu vertices and %llu states a frame, %llu KB of textures checked\n",
+                "%llu draws, %llu vertices and %llu states (%llu KB) a frame, %llu KB of textures checked\n",
                 dff_path, times, ms[ms.size() / 2], ms.front(), ms.back(), sum / double(ms.size()),
                 static_cast<unsigned long long>(draws / times), static_cast<unsigned long long>(vertices / times),
-                static_cast<unsigned long long>(states / times),
+                static_cast<unsigned long long>(states / times), static_cast<unsigned long long>(state_bytes / times / 1024),
                 static_cast<unsigned long long>((gx::recorder_stats().hashed_bytes.load() - hashed_before) / times / 1024));
     return 0;
 }
@@ -586,16 +595,27 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
         const size_t left = size - used;
         const uint8_t op = p[0];
         size_t n;
-        if (op == 0x00) {  // NOPs, in a run (display lists are padded to 32 bytes with them: a race frame has 30,000)
+        // By the opcode's top five bits: one jump through a table instead of a chain of compares (a race
+        // frame: 34,000 BP writes, 28,000 primitives, 21,000 CP writes, 9,000 XF loads, 2,000 NOP runs).
+        switch (op >> 3) {
+        case 0x00 >> 3:  // NOPs, in a run (display lists are padded to 32 bytes with them)
+            if (op != 0x00) bad_command(c, data, used, left, in_display_list);
             n = 1;
             while (n < left && p[n] == 0x00) ++n;
-        } else if (op == 0x08) {  // LOAD_CP_REG: register, value
+            break;
+        case 0x08 >> 3: {  // LOAD_CP_REG: register, value
+            if (op != 0x08) bad_command(c, data, used, left, in_display_list);
             if (left < 6) return;
             const uint32_t v = be32(p + 2);
-            if (g_cpmem[p[1]] != v) g_cpmem[p[1]] = v, cp_written();  // vertex formats and arrays: read by each primitive, not part of a draw's state
+            // Vertex formats and arrays: read by each primitive, not part of a draw's state. (The game writes
+            // the same values again nine times in ten.)
+            if (g_cpmem[p[1]] != v) g_cpmem[p[1]] = v, cp_register_written(p[1]);
             g_cp_writes[g_cp_write_count++ % 8] = {p[1], v, in_display_list};
             n = 6;
-        } else if (op == 0x10) {  // LOAD_XF_REG: (count - 1) << 16 | address, then the values
+            break;
+        }
+        case 0x10 >> 3: {  // LOAD_XF_REG: (count - 1) << 16 | address, then the values
+            if (op != 0x10) bad_command(c, data, used, left, in_display_list);
             if (left < 5) return;
             const uint32_t h = be32(p + 1), count = ((h >> 16) & 0xF) + 1, addr = h & 0xFFFF;
             if (left < 5 + 4 * count) return;
@@ -612,7 +632,10 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
                 gx::matrix_loaded(addr, &g_xf[addr], t ? t->tag : 0, t ? t->view : nullptr, t ? t->id : 0, t ? t->context : uint8_t(0));
             }
             n = 5 + 4 * count;
-        } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) {  // LOAD_INDX_A-D
+            break;
+        }
+        case 0x20 >> 3: case 0x28 >> 3: case 0x30 >> 3: case 0x38 >> 3: {  // LOAD_INDX_A-D
+            if (op & 7) bad_command(c, data, used, left, in_display_list);
             if (left < 5) return;
             ++g_stats.indexed_loads;
             // Matrices from CP arrays 12-15 into XF memory: index, then size - 1 and the address.
@@ -632,7 +655,14 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             if (changed) gx::xf_changed(addr, words);
             if (addr < 120 && words == 12) gx::matrix_loaded(addr, &g_xf[addr], src | 1u, nullptr);  // tagged by where it comes from
             n = 5;
-        } else if (op == 0x40) {  // CALL_DL: address, size
+            break;
+        }
+        case 0x40 >> 3:  // CALL_DL: address, size; 0x44: metrics
+            if (op == 0x44) {
+                n = 1;
+                break;
+            }
+            if (op != 0x40) bad_command(c, data, used, left, in_display_list);
             if (left < 9) return;
             if (in_display_list) rt::fatal(&c, "GX display list calls another display list");
             if (g_dff_recording) {
@@ -645,19 +675,25 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             }
             call_display_list(c, be32(p + 1), be32(p + 5));
             n = 9;
-        } else if (op == 0x44 || op == 0x48) {  // metrics; invalidate the vertex cache
+            break;
+        case 0x48 >> 3:  // invalidate the vertex cache
+            if (op != 0x48) bad_command(c, data, used, left, in_display_list);
             n = 1;
-        } else if (op == 0x61) {  // LOAD_BP_REG: register in the top byte, 24-bit value
+            break;
+        case 0x60 >> 3:  // LOAD_BP_REG: register in the top byte, 24-bit value
+            if (op != 0x61) bad_command(c, data, used, left, in_display_list);
             if (left < 5) return;
             g_bp_from[p[1]] = in_display_list ? g_dl_address + uint32_t(used) : 0;
             on_bp(c, p[1], be32(p + 1) & 0xFFFFFFu);
             n = 5;
-        } else if (op >= 0x80 && op <= 0xBF) {  // a primitive: count, then the vertices
+            break;
+        case 0x80 >> 3: case 0x88 >> 3: case 0x90 >> 3: case 0x98 >> 3:
+        case 0xA0 >> 3: case 0xA8 >> 3: case 0xB0 >> 3: case 0xB8 >> 3: {  // a primitive: count, then the vertices
             if (left < 3) return;
             const uint32_t count = uint32_t{p[1]} << 8 | p[2];
             const unsigned vertex = vertex_size(op & 7);
             const size_t bytes = size_t{count} * vertex;
-            if (g_trace && !in_display_list && used == 0)
+            if (g_trace && !in_display_list && used == 0) [[unlikely]]
                 rt::log("GPU: primitive %02X, %u vertices of %u bytes (VCD %08X %08X, VAT %08X %08X %08X)", op, count,
                         vertex, g_cpmem[0x50], g_cpmem[0x60], g_cpmem[0x70 + (op & 7)], g_cpmem[0x80 + (op & 7)],
                         g_cpmem[0x90 + (op & 7)]);
@@ -665,7 +701,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             g_last_primitive = {op, count, vertex, g_cpmem[0x50], g_cpmem[0x60],
                                 {g_cpmem[0x70 + (op & 7)], g_cpmem[0x80 + (op & 7)], g_cpmem[0x90 + (op & 7)]}};
             ++g_primitive_serial;
-            if (g_dff_recording) {
+            if (g_dff_recording) [[unlikely]] {
                 char line[96];
                 if (in_display_list)
                     std::snprintf(line, sizeof line, "%u dl %08X %llu %llu\n", g_primitive_serial, unsigned(g_dl_address + used),
@@ -680,8 +716,9 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             ++g_stats.draws;
             g_stats.vertices += count;
             n = 3 + bytes;
-        } else {
-            bad_command(c, data, used, left, in_display_list);
+            break;
+        }
+        default: bad_command(c, data, used, left, in_display_list);
         }
         used += n;
         if (g_dff && !in_display_list && g_dff->state < 2) dff_after(p, n);
