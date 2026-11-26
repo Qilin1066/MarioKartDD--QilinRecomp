@@ -592,14 +592,20 @@ void test_calendar(Cpu& c) {
            {"2000-01-01 00:00:00.000000 wday 6 yday 0", "1999-12-31 23:59:59.000000 wday 5 yday 364",
             "2024-02-29 13:45:30.250128 wday 4 yday 59", "2026-11-19 00:00:00.000000 wday 4 yday 322"});
 
-    // The time base is the PC's local date and time.
+    // The time base is the PC's local date and time. Sampling may cross a
+    // second (including midnight); the epoch also starts at a whole second.
+    const std::time_t before = std::time(nullptr);
     rt::call(c, kGetTime);
     const int64_t now = static_cast<int64_t>(uint64_t(c.r[3]) << 32 | c.r[4]);
-    const std::string got = calendar(c, now).substr(0, 16);  // to the minute
-    const std::time_t t = std::time(nullptr);
-    char want[32];
-    std::strftime(want, sizeof want, "%Y-%m-%d %H:%M", std::localtime(&t));
-    note(got == want ? "today" : got + " but it's " + want);
+    const std::string got = calendar(c, now).substr(0, 19);
+    const std::time_t after = std::time(nullptr);
+    bool today = false;
+    char want[32]{};
+    for (std::time_t t = before - 1; t <= after + 1; ++t) {
+        std::strftime(want, sizeof want, "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+        today |= got == want;
+    }
+    note(today ? "today" : got + " but it's near " + want);
     expect("OSGetTime is the local date and time", {"today"});
 }
 
