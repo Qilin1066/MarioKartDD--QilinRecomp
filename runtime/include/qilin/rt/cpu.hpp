@@ -14,9 +14,11 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#if defined(_MSC_VER) && !defined(__clang__) && (defined(__AVX2__) || defined(_M_X64))
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>  // __cpuid, __iso_volatile_load8
+#if defined(__AVX2__) || defined(_M_X64)
 #include <immintrin.h>  // fused(): MSVC's std::fma is a call even with /arch:AVX2
-#include <intrin.h>     // __cpuid
+#endif
 #endif
 #if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__) && !defined(__FMA__)
 #include <cpuid.h>      // fused(): is the FMA instruction there?
@@ -33,6 +35,30 @@
 #define QILIN_INLINE [[gnu::always_inline]] inline
 #define QILIN_OUTLINE [[gnu::noinline]] inline
 #define QILIN_COLD_OUTLINE [[gnu::noinline, gnu::cold]] inline
+#endif
+// The floating-point helpers' rare paths (a NaN, a denormal, a tie), called from every
+// check in single-mode code. With the usual convention such a call clobbers every
+// vector register (all of them on x86-64 SysV, all but d8-d15's low halves on ARM64),
+// so the lifted function keeps its floats on the stack around each of hundreds of
+// checks, though the call almost never happens. Clang's preserve_all makes the rare
+// path save what it uses instead. (GCC and MSVC have no such convention; Windows x64
+// keeps xmm6-xmm15 anyway. Apple's Clang is left out until checked.)
+// A single-mode function's double version (lift.cpp): taken only when a register
+// holds a double where floats were expected, which no profile of the game has
+// caught happening; a quarter of the lifted code. Out of the hot code's way, and
+// built for size where the compiler can be told so per function (GCC's cold
+// implies it; MSVC has no such attribute).
+#if defined(__clang__)
+#define QILIN_TWIN [[gnu::cold, clang::minsize]]
+#elif defined(__GNUC__)
+#define QILIN_TWIN [[gnu::cold]]
+#else
+#define QILIN_TWIN
+#endif
+#if defined(__clang__) && !defined(__apple_build_version__) && __clang_major__ >= 17 && (defined(__x86_64__) || defined(__aarch64__))
+#define QILIN_RARE [[clang::preserve_all]] QILIN_COLD_OUTLINE
+#else
+#define QILIN_RARE QILIN_COLD_OUTLINE
 #endif
 
 namespace qilin::rt {
@@ -68,7 +94,14 @@ struct CpuHooks {
 // to the same one): the function's registers stay in its locals, and only the
 // stack pointer is written back first, for the handler's frame to go below.
 inline std::atomic<bool> g_poll_due{false};
-QILIN_INLINE bool poll_due() { return g_poll_due.load(std::memory_order_relaxed); }
+QILIN_INLINE bool poll_due() {
+#if defined(_MSC_VER) && !defined(__clang__)
+    // (What a relaxed load is on MSVC, as its <atomic> has it: std::atomic's own load is left a call in a large function.)
+    return __iso_volatile_load8(reinterpret_cast<const volatile char*>(&g_poll_due)) != 0;
+#else
+    return g_poll_due.load(std::memory_order_relaxed);
+#endif
+}
 
 struct Cpu {
     uint32_t r[32] = {};
@@ -118,27 +151,35 @@ inline uint32_t plain_memory(uint32_t a, unsigned size) {
 }
 
 // The slow branch of a load or store: the plain memory there (the uncached
-// mirrors), the write-gather pipe, or the hooks.
-QILIN_OUTLINE uint32_t read_slow(Cpu& c, uint32_t a, unsigned size) {
-    const uint32_t m = plain_memory(a, size);
-    if (!m) return c.hooks->read(c, a, size);
-    if (size == 1) return c.mem[m];
-    if (size == 2) {
+// mirrors), the write-gather pipe, or the hooks. One function per size, so that
+// each of the hundreds of thousands of places that may take it passes no more
+// than the address (and the value).
+template <unsigned N>
+QILIN_OUTLINE uint32_t read_slow(Cpu& c, uint32_t a) {
+    const uint32_t m = plain_memory(a, N);
+    if (!m) return c.hooks->read(c, a, N);
+    if constexpr (N == 1) {
+        return c.mem[m];
+    } else if constexpr (N == 2) {
         uint16_t v;
         std::memcpy(&v, c.mem + m, 2);
         return std::byteswap(v);
+    } else {
+        uint32_t v;
+        std::memcpy(&v, c.mem + m, 4);
+        return std::byteswap(v);
     }
-    uint32_t v;
-    std::memcpy(&v, c.mem + m, 4);
-    return std::byteswap(v);
 }
-QILIN_OUTLINE void write_slow(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
-    if (is_pipe(a) && g_pipe_write) return g_pipe_write(c, v, size);
-    const uint32_t m = plain_memory(a, size);
-    if (!m) return c.hooks->write(c, a, v, size);
-    if (size == 1) {
+template <unsigned N>
+QILIN_OUTLINE void write_slow(Cpu& c, uint32_t a, uint32_t v) {
+    if constexpr (N == 1) v &= 0xFFu;
+    if constexpr (N == 2) v &= 0xFFFFu;
+    if (is_pipe(a) && g_pipe_write) return g_pipe_write(c, v, N);
+    const uint32_t m = plain_memory(a, N);
+    if (!m) return c.hooks->write(c, a, v, N);
+    if constexpr (N == 1) {
         c.mem[m] = static_cast<uint8_t>(v);
-    } else if (size == 2) {
+    } else if constexpr (N == 2) {
         const uint16_t s = std::byteswap(static_cast<uint16_t>(v));
         std::memcpy(c.mem + m, &s, 2);
     } else {
@@ -147,66 +188,134 @@ QILIN_OUTLINE void write_slow(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
     }
 }
 
-QILIN_INLINE uint32_t read8(Cpu& c, uint32_t a) {
-    if (is_slow(a)) [[unlikely]] return read_slow(c, a, 1);
-    return c.mem[a];
+// Lifted code reaches guest memory through `Mem`, the base it took from the Cpu on entry. A
+// store through `c.mem + a` could, for all the compiler knows, change the Cpu itself (it's
+// a byte store), so with the Cpu's own field every access after a store would load the
+// base again first. The base never changes once the runtime has set it.
+struct Mem {
+    uint8_t* base;
+    Cpu& c;
+};
+QILIN_INLINE uint32_t read8(Mem m, uint32_t a) {
+    if (is_slow(a)) [[unlikely]] return read_slow<1>(m.c, a);
+    return m.base[a];
 }
-QILIN_INLINE uint32_t read16(Cpu& c, uint32_t a) {
-    if (is_slow(a)) [[unlikely]] return read_slow(c, a, 2);
+QILIN_INLINE uint32_t read16(Mem m, uint32_t a) {
+    if (is_slow(a)) [[unlikely]] return read_slow<2>(m.c, a);
     uint16_t v;
-    std::memcpy(&v, c.mem + a, 2);
+    std::memcpy(&v, m.base + a, 2);
     return std::byteswap(v);
 }
-QILIN_INLINE uint32_t read32(Cpu& c, uint32_t a) {
-    if (is_slow(a)) [[unlikely]] return read_slow(c, a, 4);
+QILIN_INLINE uint32_t read32(Mem m, uint32_t a) {
+    if (is_slow(a)) [[unlikely]] return read_slow<4>(m.c, a);
     uint32_t v;
-    std::memcpy(&v, c.mem + a, 4);
+    std::memcpy(&v, m.base + a, 4);
     return std::byteswap(v);
 }
-QILIN_INLINE uint64_t read64(Cpu& c, uint32_t a) { return uint64_t{read32(c, a)} << 32 | read32(c, a + 4); }
-QILIN_INLINE void write8(Cpu& c, uint32_t a, uint32_t v) {
-    if (is_slow(a)) [[unlikely]] return write_slow(c, a, v & 0xFF, 1);
-    c.mem[a] = static_cast<uint8_t>(v);
+// Several bytes as one host access where none of them is in the slow range: one
+// check, then plain loads and stores (eight bytes for lfd, stfd and a pair of
+// floats; up to 128 for lmw and stmw). The guest's reservation reaches past 4 GB
+// (memory.cpp), so an access running off the very top faults as the single ones would.
+QILIN_INLINE bool is_slow_n(uint32_t a, uint32_t n) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    // (ARM64 can't take the constants below as immediates.) The last byte's test alone: an access
+    // from the very end of the slow range into the locked cache (0xDFFFFFF9 on, for 8 bytes) then
+    // faults on the unbacked slow range, where the hooks would have stopped the runtime as loudly.
+    return is_slow(a + (n - 1));
+#else
+    return a - (kSlowFrom - (n - 1)) < kSlowSize + (n - 1);
+#endif
 }
-QILIN_INLINE void write16(Cpu& c, uint32_t a, uint32_t v) {
-    if (is_slow(a)) [[unlikely]] return write_slow(c, a, v & 0xFFFF, 2);
+QILIN_INLINE bool is_slow8(uint32_t a) { return is_slow_n(a, 8); }
+QILIN_OUTLINE uint64_t read64_slow(Cpu& c, uint32_t a) {
+    const Mem m{c.mem, c};
+    return uint64_t{read32(m, a)} << 32 | read32(m, a + 4);
+}
+QILIN_INLINE uint64_t read64(Mem m, uint32_t a) {
+    if (is_slow8(a)) [[unlikely]] return read64_slow(m.c, a);
+    uint64_t v;
+    std::memcpy(&v, m.base + a, 8);
+    return std::byteswap(v);
+}
+QILIN_INLINE void write8(Mem m, uint32_t a, uint32_t v) {
+    if (is_slow(a)) [[unlikely]] return write_slow<1>(m.c, a, v);
+    m.base[a] = static_cast<uint8_t>(v);
+}
+QILIN_INLINE void write16(Mem m, uint32_t a, uint32_t v) {
+    if (is_slow(a)) [[unlikely]] return write_slow<2>(m.c, a, v);
     const uint16_t s = std::byteswap(static_cast<uint16_t>(v));
-    std::memcpy(c.mem + a, &s, 2);
+    std::memcpy(m.base + a, &s, 2);
 }
-QILIN_INLINE void write32(Cpu& c, uint32_t a, uint32_t v) {
-    if (is_slow(a)) [[unlikely]] return write_slow(c, a, v, 4);
+QILIN_INLINE void write32(Mem m, uint32_t a, uint32_t v) {
+    if (is_slow(a)) [[unlikely]] return write_slow<4>(m.c, a, v);
     const uint32_t s = std::byteswap(v);
-    std::memcpy(c.mem + a, &s, 4);
+    std::memcpy(m.base + a, &s, 4);
 }
-QILIN_INLINE void write64(Cpu& c, uint32_t a, uint64_t v) {
-    write32(c, a, static_cast<uint32_t>(v >> 32));
-    write32(c, a + 4, static_cast<uint32_t>(v));
+QILIN_OUTLINE void write64_slow(Cpu& c, uint32_t a, uint64_t v) {
+    const Mem m{c.mem, c};
+    write32(m, a, static_cast<uint32_t>(v >> 32));
+    write32(m, a + 4, static_cast<uint32_t>(v));
 }
-inline void zero_block(Cpu& c, uint32_t a) {  // dcbz: the 32-byte block holding a
+QILIN_INLINE void write64(Mem m, uint32_t a, uint64_t v) {
+    if (is_slow8(a)) [[unlikely]] return write64_slow(m.c, a, v);
+    const uint64_t s = std::byteswap(v);
+    std::memcpy(m.base + a, &s, 8);
+}
+QILIN_INLINE void zero_block(Mem m, uint32_t a) {  // dcbz: the 32-byte block holding a
     a &= ~31u;
     if (is_slow(a)) [[unlikely]] {
-        for (uint32_t k = 0; k < 32; k += 4) c.hooks->write(c, a + k, 0, 4);
+        for (uint32_t k = 0; k < 32; k += 4) m.c.hooks->write(m.c, a + k, 0, 4);
         return;
     }
-    std::memset(c.mem + a, 0, 32);
+    std::memset(m.base + a, 0, 32);
 }
+// lmw and stmw: the words from register `first` to r31, at a. After is_slow_n, plain memory
+// (get32/put32); else these, from and to the Cpu's registers, which the lifted code writes
+// back first or reads again after.
+QILIN_INLINE uint32_t get32(Mem m, uint32_t a) {
+    uint32_t v;
+    std::memcpy(&v, m.base + a, 4);
+    return std::byteswap(v);
+}
+QILIN_INLINE void put32(Mem m, uint32_t a, uint32_t v) {
+    const uint32_t s = std::byteswap(v);
+    std::memcpy(m.base + a, &s, 4);
+}
+QILIN_OUTLINE void load_words_slow(Cpu& c, uint32_t a, unsigned first) {
+    const Mem m{c.mem, c};
+    for (unsigned r = first; r < 32; ++r) c.r[r] = read32(m, a + 4 * (r - first));
+}
+QILIN_OUTLINE void store_words_slow(Cpu& c, uint32_t a, unsigned first) {
+    const Mem m{c.mem, c};
+    for (unsigned r = first; r < 32; ++r) write32(m, a + 4 * (r - first), c.r[r]);
+}
+// The same from the Cpu, for native code.
+QILIN_INLINE uint32_t read8(Cpu& c, uint32_t a) { return read8(Mem{c.mem, c}, a); }
+QILIN_INLINE uint32_t read16(Cpu& c, uint32_t a) { return read16(Mem{c.mem, c}, a); }
+QILIN_INLINE uint32_t read32(Cpu& c, uint32_t a) { return read32(Mem{c.mem, c}, a); }
+QILIN_INLINE uint64_t read64(Cpu& c, uint32_t a) { return read64(Mem{c.mem, c}, a); }
+QILIN_INLINE void write8(Cpu& c, uint32_t a, uint32_t v) { write8(Mem{c.mem, c}, a, v); }
+QILIN_INLINE void write16(Cpu& c, uint32_t a, uint32_t v) { write16(Mem{c.mem, c}, a, v); }
+QILIN_INLINE void write32(Cpu& c, uint32_t a, uint32_t v) { write32(Mem{c.mem, c}, a, v); }
+QILIN_INLINE void write64(Cpu& c, uint32_t a, uint64_t v) { write64(Mem{c.mem, c}, a, v); }
+QILIN_INLINE void zero_block(Cpu& c, uint32_t a) { zero_block(Mem{c.mem, c}, a); }
 
 // CR0 after a record form ("."): the sign of the result, and XER's SO.
-inline uint32_t record(uint32_t v, uint32_t so) {
+QILIN_INLINE uint32_t record(uint32_t v, uint32_t so) {
     const int32_t s = static_cast<int32_t>(v);
     return (s < 0 ? 8u : s > 0 ? 4u : 2u) | so;
 }
-inline uint32_t compare_signed(int32_t a, int32_t b, uint32_t so) { return (a < b ? 8u : a > b ? 4u : 2u) | so; }
-inline uint32_t compare_unsigned(uint32_t a, uint32_t b, uint32_t so) { return (a < b ? 8u : a > b ? 4u : 2u) | so; }
+QILIN_INLINE uint32_t compare_signed(int32_t a, int32_t b, uint32_t so) { return (a < b ? 8u : a > b ? 4u : 2u) | so; }
+QILIN_INLINE uint32_t compare_unsigned(uint32_t a, uint32_t b, uint32_t so) { return (a < b ? 8u : a > b ? 4u : 2u) | so; }
 
 // a + b + carry_in, and the carry out.
-inline uint32_t add_carry(uint32_t a, uint32_t b, uint32_t cin, uint32_t& cout) {
+QILIN_INLINE uint32_t add_carry(uint32_t a, uint32_t b, uint32_t cin, uint32_t& cout) {
     const uint64_t t = uint64_t{a} + b + cin;
     cout = static_cast<uint32_t>(t >> 32);
     return static_cast<uint32_t>(t);
 }
 
-inline uint32_t sraw(uint32_t s, uint32_t n, uint32_t& ca) {
+QILIN_INLINE uint32_t sraw(uint32_t s, uint32_t n, uint32_t& ca) {
     n &= 63;
     const int32_t v = static_cast<int32_t>(s);
     if (n >= 32) {
@@ -216,22 +325,24 @@ inline uint32_t sraw(uint32_t s, uint32_t n, uint32_t& ca) {
     ca = v < 0 && n && (s & ((1u << n) - 1));
     return static_cast<uint32_t>(v >> n);
 }
-inline uint32_t slw(uint32_t s, uint32_t n) { return (n & 32) ? 0 : s << (n & 31); }
-inline uint32_t srw(uint32_t s, uint32_t n) { return (n & 32) ? 0 : s >> (n & 31); }
+// rlwnm, and rlwinm/rlwimi where the mask isn't a shift's (MSVC leaves std::rotl a call in a large function).
+QILIN_INLINE uint32_t rotl32(uint32_t v, uint32_t n) { return (v << (n & 31)) | (v >> ((32 - n) & 31)); }
+QILIN_INLINE uint32_t slw(uint32_t s, uint32_t n) { return (n & 32) ? 0 : s << (n & 31); }
+QILIN_INLINE uint32_t srw(uint32_t s, uint32_t n) { return (n & 32) ? 0 : s >> (n & 31); }
 
 // divw and divwu where the architecture leaves the result undefined (division
 // by zero, INT_MIN / -1): all ones for a negative dividend, else zero, as
 // Dolphin's interpreter has it (Interpreter_Integer.cpp, divwx; PR #6943).
-inline uint32_t divw(uint32_t a, uint32_t b) {
+QILIN_INLINE uint32_t divw(uint32_t a, uint32_t b) {
     const int32_t x = static_cast<int32_t>(a), y = static_cast<int32_t>(b);
     if (y == 0 || (x == INT32_MIN && y == -1)) return x < 0 ? 0xFFFFFFFFu : 0;
     return static_cast<uint32_t>(x / y);
 }
-inline uint32_t divwu(uint32_t a, uint32_t b) { return b ? a / b : 0; }
-inline uint32_t mulhw(uint32_t a, uint32_t b) {
+QILIN_INLINE uint32_t divwu(uint32_t a, uint32_t b) { return b ? a / b : 0; }
+QILIN_INLINE uint32_t mulhw(uint32_t a, uint32_t b) {
     return static_cast<uint32_t>(static_cast<uint64_t>(int64_t{static_cast<int32_t>(a)} * static_cast<int32_t>(b)) >> 32);
 }
-inline uint32_t mulhwu(uint32_t a, uint32_t b) { return static_cast<uint32_t>((uint64_t{a} * b) >> 32); }
+QILIN_INLINE uint32_t mulhwu(uint32_t a, uint32_t b) { return static_cast<uint32_t>((uint64_t{a} * b) >> 32); }
 
 // ---------------------------------------------------------------- floating point
 //
@@ -246,11 +357,11 @@ namespace fp {
 constexpr uint64_t kSign = 0x8000000000000000ull, kExp = 0x7FF0000000000000ull, kFrac = 0x000FFFFFFFFFFFFFull;
 constexpr uint64_t kQuiet = 0x0008000000000000ull, kDefaultNan = 0x7FF8000000000000ull;
 
-inline uint64_t bits(double d) { return std::bit_cast<uint64_t>(d); }
-inline double from_bits(uint64_t b) { return std::bit_cast<double>(b); }
+QILIN_INLINE uint64_t bits(double d) { return std::bit_cast<uint64_t>(d); }
+QILIN_INLINE double from_bits(uint64_t b) { return std::bit_cast<double>(b); }
 // (Compares, not bit tests, wherever the two say the same: MSVC takes a double's bits through memory.)
 QILIN_INLINE bool is_nan(double d) { return d != d; }
-inline double quiet(double d) { return from_bits(bits(d) | kQuiet); }
+QILIN_INLINE double quiet(double d) { return from_bits(bits(d) | kQuiet); }
 
 // A NaN result: the first NaN operand, made quiet, else the default NaN.
 inline double nan2(double a, double b) { return is_nan(a) ? quiet(a) : is_nan(b) ? quiet(b) : from_bits(kDefaultNan); }
@@ -267,7 +378,7 @@ QILIN_INLINE double single(double v) {
 }
 
 // frC of single-precision multiplies, rounded to 25 significant bits.
-QILIN_COLD_OUTLINE double round25_subnormal(uint64_t i) {  // rounds as if normalised: at a lower bit
+QILIN_RARE double round25_subnormal(uint64_t i) {  // rounds as if normalised: at a lower bit
     const unsigned shift = static_cast<unsigned>(std::countl_zero(i & kFrac)) - 11;
     const uint64_t keep = static_cast<uint64_t>(static_cast<int64_t>(0xFFFFFFFFF8000000ull) >> shift), round = 0x8000000ull >> shift;
     return from_bits((i & keep) + (i & round));
@@ -349,7 +460,7 @@ QILIN_INLINE double madd(double a, double c, double b, bool subtract) {
 // that lands exactly halfway between two singles, the fma's own rounding
 // error (found with an error-free transformation) decides the direction, so
 // the result is rounded to single only once, as Broadway does.
-QILIN_COLD_OUTLINE double madd_single_tie(double a, double cr, double bs, double r) {
+QILIN_RARE double madd_single_tie(double a, double cr, double bs, double r) {
     const uint64_t rb = bits(r);
     const double a1 = bs - r;  // -(a*cr) plus the fma's rounding error, rounded
     const double b1 = r + a1;
@@ -367,7 +478,7 @@ QILIN_INLINE double madd_single(double a, double c, double b, bool subtract) {
     if ((bits(r) & 0x1FFFFFFFull) == 0x10000000ull) [[unlikely]] r = madd_single_tie(a, cr, bs, r);
     return is_nan(r) ? nan3(a, b, c) : r;
 }
-inline double neg_unless_nan(double d) { return is_nan(d) ? d : -d; }
+QILIN_INLINE double neg_unless_nan(double d) { return is_nan(d) ? d : -d; }
 
 // fctiw / fctiwz: the integer in the low word, 0xFFF80000 above it (and the
 // next bit up set for a negative value that converts to zero).
@@ -383,7 +494,7 @@ inline double to_int(double b, bool truncate) {
     return from_bits(out);
 }
 
-inline uint32_t compare(double a, double b) {
+QILIN_INLINE uint32_t compare(double a, double b) {
     if (is_nan(a) || is_nan(b)) return 1;  // unordered
     return a < b ? 8u : a > b ? 4u : 2u;
 }
@@ -392,7 +503,7 @@ inline uint32_t compare(double a, double b) {
 // signalling NaNs kept), not the host's float/double conversions.
 // A NaN: the bits move over, the exponent's top bit filling the three new ones
 // (out of line: rare).
-QILIN_COLD_OUTLINE double load_single_nan(uint32_t x) {
+QILIN_RARE double load_single_nan(uint32_t x) {
     const uint64_t v = x;
     return from_bits(((v & 0xC0000000u) << 32) | uint64_t{7} << 59 | ((v & 0x3FFFFFFFu) << 29));
 }
@@ -484,8 +595,8 @@ enum class Quant : unsigned { kFloat = 0, kU8 = 4, kU16 = 5, kS8 = 6, kS16 = 7 }
 inline bool quant_valid(unsigned type) { return type == 0 || type >= 4; }
 inline unsigned quant_size(unsigned type) { return type == 0 ? 4 : (type == 4 || type == 6) ? 1 : 2; }
 // 2^e as a float, for a scale's -32..32: the exponent field, no library call.
-inline float pow2f(int e) { return std::bit_cast<float>(static_cast<uint32_t>(127 + e) << 23); }
-inline int signed_scale(unsigned s) { return s < 32 ? static_cast<int>(s) : static_cast<int>(s) - 64; }
+QILIN_INLINE float pow2f(int e) { return std::bit_cast<float>(static_cast<uint32_t>(127 + e) << 23); }
+QILIN_INLINE int signed_scale(unsigned s) { return s < 32 ? static_cast<int>(s) : static_cast<int>(s) - 64; }
 
 // One loaded element (raw is the big-endian value read, zero-extended) to its double.
 inline double dequantize(unsigned type, unsigned scale, uint32_t raw) {
@@ -501,7 +612,7 @@ inline double dequantize(unsigned type, unsigned scale, uint32_t raw) {
 }
 
 // stfs's conversion, but values in the single-subnormal range become signed zeros.
-inline uint32_t store_single_ftz(double d) {
+QILIN_INLINE uint32_t store_single_ftz(double d) {
     const uint64_t x = bits(d);
     const uint32_t e = static_cast<uint32_t>((x >> 52) & 0x7FF);
     if (e > 896 || (x & ~kSign) == 0) return static_cast<uint32_t>(((x >> 32) & 0xC0000000u) | ((x >> 29) & 0x3FFFFFFFu));
@@ -542,29 +653,45 @@ inline uint32_t quantize(unsigned type, unsigned scale, double value) {
 // and the NaN rules differ from the host's). Tested against the double
 // helpers on random and edge operands (qilin_tests), and with them against
 // the reference interpreter (qilin_difftest).
-inline uint32_t fbits(float f) { return std::bit_cast<uint32_t>(f); }
-inline float ffrom(uint32_t b) { return std::bit_cast<float>(b); }
+QILIN_INLINE uint32_t fbits(float f) { return std::bit_cast<uint32_t>(f); }
+QILIN_INLINE float ffrom(uint32_t b) { return std::bit_cast<float>(b); }
 QILIN_INLINE double to_d(float f) { return f == f ? static_cast<double>(f) : load_single_nan(fbits(f)); }  // (load_single's rule)
 QILIN_INLINE float to_f(double d) { return ffrom(store_single(d)); }
 // A register's double as a float, and whether that loses nothing (it holds a single-precision value).
-QILIN_INLINE bool to_f_exact(double d, float& f) {
+QILIN_COLD_OUTLINE bool to_f_exact_bits(double d, float& f) {  // the manual's conversion, bit for bit
     const uint32_t b = store_single(d);
     f = ffrom(b);
     return bits(load_single(b)) == bits(d);
+}
+QILIN_INLINE bool to_f_exact(double d, float& f) {
+    // The host's conversion where it is exact: then it is the manual's too, and keeps the value
+    // (and the sign); an inexact one changes it. A NaN, an infinity or anything beyond a
+    // single's range the manual's way (rare; the host's conversion would also quiet a NaN).
+    if (!(std::fabs(d) <= 0x1.fffffep127)) [[unlikely]] return to_f_exact_bits(d, f);
+    f = static_cast<float>(d);
+    return static_cast<double>(f) == d;
 }
 // A result the host's arithmetic gave as Broadway would: zero, or a normal
 // number above the smallest normal single (at it, the value before rounding
 // may have been below it: a zero in NI mode).
 QILIN_INLINE bool ordinary(float r) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    // ARM64 can't take the constants below as immediates, and in a large function rebuilds
+    // both at every check (four instructions): the exponent field instead, from 2 to 254, or
+    // a zero. An exponent of 1 (below 2^-125) goes the careful way too, which gives the same.
+    const uint32_t b = fbits(r);
+    return ((b >> 23) & 0xFFu) - 2u < 253u || (b << 1) == 0;
+#else
     // The bits without the sign: 0x00800001 to 0x7F7FFFFF, or 0. One compare on the common path.
     const uint32_t u = fbits(r) << 1;
     return u - 0x01000002u <= 0xFDFFFFFCu || u == 0;
+#endif
 }
-QILIN_COLD_OUTLINE float add_s_rare(float a, float b) { return to_f(single(add(to_d(a), to_d(b)))); }
-QILIN_COLD_OUTLINE float sub_s_rare(float a, float b) { return to_f(single(sub(to_d(a), to_d(b)))); }
-QILIN_COLD_OUTLINE float mul_s_rare(float a, float c) { return to_f(single(mul(to_d(a), round25(to_d(c))))); }
-QILIN_COLD_OUTLINE float div_s_rare(float a, float b) { return to_f(single(div(to_d(a), to_d(b)))); }
-QILIN_COLD_OUTLINE float madd_s_rare(float a, float c, float b, bool subtract) {
+QILIN_RARE float add_s_rare(float a, float b) { return to_f(single(add(to_d(a), to_d(b)))); }
+QILIN_RARE float sub_s_rare(float a, float b) { return to_f(single(sub(to_d(a), to_d(b)))); }
+QILIN_RARE float mul_s_rare(float a, float c) { return to_f(single(mul(to_d(a), round25(to_d(c))))); }
+QILIN_RARE float div_s_rare(float a, float b) { return to_f(single(div(to_d(a), to_d(b)))); }
+QILIN_RARE float madd_s_rare(float a, float c, float b, bool subtract) {
     return to_f(single(madd_single(to_d(a), to_d(c), to_d(b), subtract)));
 }
 QILIN_INLINE float add_s(float a, float b) {
@@ -671,23 +798,24 @@ QILIN_OUTLINE void psq_store_quantized(Cpu& c, uint32_t ea, unsigned i, bool w, 
     write(ea, fp::quantize(type, scale, ps0));
     if (!w) write(ea + n, fp::quantize(type, scale, ps1));
 }
-QILIN_INLINE void psq_load(Cpu& c, uint32_t ea, unsigned i, bool w, double& ps0, double& ps1) {
-    if (((c.gqr[i] >> 16) & 7) == 0) [[likely]] {  // floats: lfs's conversion, two at a time
-        const double v0 = fp::load_single(read32(c, ea));
-        const double v1 = w ? 1.0 : fp::load_single(read32(c, ea + 4));
-        ps0 = v0;
-        ps1 = v1;
+QILIN_INLINE void psq_load(Mem m, uint32_t ea, unsigned i, bool w, double& ps0, double& ps1) {
+    if (((m.c.gqr[i] >> 16) & 7) == 0) [[likely]] {  // floats: lfs's conversion, two at a time
+        if (w) {
+            ps0 = fp::load_single(read32(m, ea)), ps1 = 1.0;
+            return;
+        }
+        const uint64_t v = read64(m, ea);
+        ps0 = fp::load_single(static_cast<uint32_t>(v >> 32)), ps1 = fp::load_single(static_cast<uint32_t>(v));
         return;
     }
-    psq_load_quantized(c, ea, i, w, ps0, ps1);
+    psq_load_quantized(m.c, ea, i, w, ps0, ps1);
 }
-QILIN_INLINE void psq_store(Cpu& c, uint32_t ea, unsigned i, bool w, double ps0, double ps1) {
-    if ((c.gqr[i] & 7) == 0) [[likely]] {
-        write32(c, ea, fp::store_single_ftz(ps0));
-        if (!w) write32(c, ea + 4, fp::store_single_ftz(ps1));
-        return;
+QILIN_INLINE void psq_store(Mem m, uint32_t ea, unsigned i, bool w, double ps0, double ps1) {
+    if ((m.c.gqr[i] & 7) == 0) [[likely]] {
+        if (w) return write32(m, ea, fp::store_single_ftz(ps0));
+        return write64(m, ea, uint64_t{fp::store_single_ftz(ps0)} << 32 | fp::store_single_ftz(ps1));
     }
-    psq_store_quantized(c, ea, i, w, ps0, ps1);
+    psq_store_quantized(m.c, ea, i, w, ps0, ps1);
 }
 
 // Single mode's psq_l and psq_st (fp's single mode, above): floats move as their bits.
@@ -726,23 +854,25 @@ QILIN_OUTLINE void psq_load_quantized_s(Cpu& c, uint32_t ea, unsigned i, bool w,
     ps0 = v0;
     ps1 = v1;
 }
-QILIN_INLINE void psq_load_s(Cpu& c, uint32_t ea, unsigned i, bool w, float& ps0, float& ps1) {
-    if (((c.gqr[i] >> 16) & 7) == 0) [[likely]] {
-        const float v0 = fp::ffrom(read32(c, ea));
-        const float v1 = w ? 1.0f : fp::ffrom(read32(c, ea + 4));
+QILIN_INLINE void psq_load_s(Mem m, uint32_t ea, unsigned i, bool w, float& ps0, float& ps1) {
+    if (((m.c.gqr[i] >> 16) & 7) == 0) [[likely]] {
+        if (w) {
+            ps0 = fp::ffrom(read32(m, ea)), ps1 = 1.0f;
+            return;
+        }
+        const uint64_t v = read64(m, ea);
+        ps0 = fp::ffrom(static_cast<uint32_t>(v >> 32)), ps1 = fp::ffrom(static_cast<uint32_t>(v));
+        return;
+    }
+    if (i != 0 && ((m.c.gqr[i] >> 16) & 7) == 7) {  // s16 (not at GQR0, the float pair: see psq_store_s): the SDK's "fast cast" of a short, a movie's DCT coefficients
+        const float k = fp::pow2f(-fp::signed_scale((m.c.gqr[i] >> 24) & 63));
+        const float v0 = static_cast<float>(static_cast<int16_t>(read16(m, ea))) * k;
+        const float v1 = w ? 1.0f : static_cast<float>(static_cast<int16_t>(read16(m, ea + 2))) * k;
         ps0 = v0;
         ps1 = v1;
         return;
     }
-    if (((c.gqr[i] >> 16) & 7) == 7) {  // s16: the SDK's "fast cast" of a short, and a movie's DCT coefficients
-        const float k = fp::pow2f(-fp::signed_scale((c.gqr[i] >> 24) & 63));
-        const float v0 = static_cast<float>(static_cast<int16_t>(read16(c, ea))) * k;
-        const float v1 = w ? 1.0f : static_cast<float>(static_cast<int16_t>(read16(c, ea + 2))) * k;
-        ps0 = v0;
-        ps1 = v1;
-        return;
-    }
-    psq_load_quantized_s(c, ea, i, w, ps0, ps1);
+    psq_load_quantized_s(m.c, ea, i, w, ps0, ps1);
 }
 // One float to store as a quantised integer: scaled, clamped, truncated (fp::quantize's rule).
 QILIN_INLINE uint32_t quantize_s(float value, float k, float lo, float hi) {
@@ -778,13 +908,29 @@ QILIN_INLINE uint32_t psq_bits_s(float f) {  // a value in the single-subnormal 
     const uint32_t b = fp::fbits(f);
     return (b & 0x7F800000u) ? b : b & 0x80000000u;
 }
-QILIN_INLINE void psq_store_s(Cpu& c, uint32_t ea, unsigned i, bool w, float ps0, float ps1) {
-    if ((c.gqr[i] & 7) == 0) [[likely]] {
-        write32(c, ea, psq_bits_s(ps0));
-        if (!w) write32(c, ea + 4, psq_bits_s(ps1));
+QILIN_INLINE void psq_store_s(Mem m, uint32_t ea, unsigned i, bool w, float ps0, float ps1) {
+    const uint32_t g = m.c.gqr[i];
+    if ((g & 7) == 0) [[likely]] {
+        if (w) return write32(m, ea, psq_bits_s(ps0));
+        return write64(m, ea, uint64_t{psq_bits_s(ps0)} << 32 | psq_bits_s(ps1));
+    }
+    // u8 here too, where the GQR isn't the SDK's float pair (GQR0; `i` is a constant, so
+    // the test costs nothing there): a movie's pixels, 96 pairs in each decoded row
+    // (GQR6), and JSystem's GQR2. Both bytes at once where both are plain memory.
+    if (i != 0 && (g & 7) == 4) {
+        const float k = fp::pow2f(fp::signed_scale((g >> 8) & 63));
+        const uint32_t b0 = quantize_s(ps0, k, 0.0f, 255.0f);
+        if (w) return write8(m, ea, b0);
+        const uint32_t b1 = quantize_s(ps1, k, 0.0f, 255.0f);
+        if (is_slow(ea) || is_slow(ea + 1)) [[unlikely]] {
+            write8(m, ea, b0);
+            return write8(m, ea + 1, b1);
+        }
+        const uint16_t s = static_cast<uint16_t>(b0 | b1 << 8);  // (b0 at ea: memory order)
+        std::memcpy(m.base + ea, &s, 2);
         return;
     }
-    psq_store_quantized_s(c, ea, i, w, ps0, ps1);
+    psq_store_quantized_s(m.c, ea, i, w, ps0, ps1);
 }
 
 }  // namespace qilin::rt

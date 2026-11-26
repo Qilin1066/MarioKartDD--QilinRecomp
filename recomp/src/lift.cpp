@@ -26,6 +26,18 @@ uint32_t rot_mask(unsigned mb, unsigned me) {
 
 std::string hex(uint32_t v) { return std::format("0x{:08X}u", v); }
 
+// `x` rotated left by n and masked, as the plainest expression: a shift where the mask
+// leaves out the bits the rotation brought round, no mask where it keeps everything.
+std::string rotated(const std::string& x, unsigned n, uint32_t mask) {
+    const uint32_t low = n ? (1u << n) - 1 : 0;  // the bits that came round from the top
+    std::string v;
+    if (n == 0) v = x;
+    else if (!(mask & low)) v = std::format("({} << {})", x, n), mask = (mask == ~low) ? 0xFFFFFFFFu : mask;
+    else if (!(mask & ~low)) v = std::format("({} >> {})", x, 32 - n), mask = (mask == low) ? 0xFFFFFFFFu : mask;
+    else v = std::format("rotl32({}, {}u)", x, n);
+    return mask == 0xFFFFFFFFu ? v : std::format("{} & {}", v, hex(mask));
+}
+
 // " + 16u" or " - 16u": an offset added to an address, as a reader would write it.
 std::string plus(int32_t v) {
     return v < 0 ? std::format(" - {}u", 0u - static_cast<uint32_t>(v)) : std::format(" + {}u", static_cast<uint32_t>(v));
@@ -343,6 +355,80 @@ SingleInfo analyse_single(const LiftInput& f) {
     return info;
 }
 
+// The registers whose local may differ from the Cpu's copy ("dirty"): only those need writing
+// back. A local is clean where it was loaded from the Cpu (on entry, after a call reads the
+// callee's part back) or written back, until the function writes it: then nothing need store
+// it again before a call or a way out. Bits: g, GPR n is bit n, CR field n bit 32 + n; f, ps0
+// of FPR n bit n, ps1 bit 32 + n (double mode's locals); LR, CTR, XER's SO, OV and CA bits 40-44 of g.
+struct Regs {
+    uint64_t g = 0, f = 0;
+    Regs& operator|=(const Regs& o) { return g |= o.g, f |= o.f, *this; }
+    bool operator==(const Regs&) const = default;
+};
+
+// The locals an emitted line assigns (`r3 = ...`, `cr0 = ...`, `f1 = t;`, `ctr -= 1u` is a special's):
+// what the text says, so it can't disagree with the code it describes. Out-parameters are noted
+// by the emitter (psq_load's halves).
+Regs assigned(const std::string& line) {
+    Regs d;
+    auto ident = [](char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'; };
+    for (size_t p = line.find('='); p != std::string::npos; p = line.find('=', p + 1)) {
+        if (p + 1 < line.size() && line[p + 1] == '=') {  // ==
+            ++p;
+            continue;
+        }
+        size_t e = p;  // the end of the target: before " = " or " op= "
+        if (e > 0 && std::string_view("+-|&^").contains(line[e - 1])) --e;
+        if (e == 0 || line[e - 1] != ' ') continue;  // (so not <=, >=, !=: the space comes before the operator)
+        size_t b = --e;  // the identifier: [b, e)
+        while (b > 0 && ident(line[b - 1])) --b;
+        if (b == e || (b > 0 && (line[b - 1] == '.' || line[b - 1] == ':' || line[b - 1] == '>' || line[b - 1] == ']'))) continue;
+        const std::string_view id = std::string_view(line).substr(b, e - b);
+        auto number = [&](size_t from, unsigned& n) {
+            if (from >= id.size()) return false;
+            n = 0;
+            for (size_t k = from; k < id.size(); ++k) {
+                if (id[k] < '0' || id[k] > '9') return false;
+                n = n * 10 + static_cast<unsigned>(id[k] - '0');
+            }
+            return true;
+        };
+        unsigned n;
+        constexpr std::string_view kSpecials[] = {"lr", "ctr", "so", "ov", "ca"};
+        for (unsigned k = 0; k < 5; ++k)
+            if (id == kSpecials[k]) d.g |= uint64_t{1} << (40 + k);
+        if (id.starts_with("cr") && number(2, n) && n < 8) d.g |= uint64_t{1} << (32 + n);
+        else if (id[0] == 'r' && number(1, n) && n < 32) d.g |= uint64_t{1} << n;
+        else if (id[0] == 'f' && number(1, n) && n < 32) d.f |= uint64_t{1} << n;
+        else if (id[0] == 'p' && number(1, n) && n < 32) d.f |= uint64_t{1} << (32 + n);
+    }
+    if (line.contains("add_carry(") || line.contains("sraw(")) d.g |= uint64_t{1} << 44;  // (CA, an out-parameter)
+    return d;
+}
+
+// Each instruction's successors in the function (calls go on to the next instruction).
+std::vector<std::vector<size_t>> successors(const LiftInput& f) {
+    const size_t n = f.insns.size();
+    std::map<uint32_t, size_t> index;
+    for (size_t k = 0; k < n; ++k) index[f.insns[k].first] = k;
+    std::map<uint32_t, const JumpTable*> tables;
+    for (const JumpTable& t : f.jtabs) tables[t.at] = &t;
+    std::vector<std::vector<size_t>> succ(n);
+    for (size_t k = 0; k < n; ++k) {
+        const auto& [a, in] = f.insns[k];
+        bool next = !Cfg::is_terminator(in);
+        if ((in.op == Op::b || in.op == Op::bc) && !in.lk())
+            if (const auto it = index.find(in.branch_target(a)); it != index.end()) succ[k].push_back(it->second);
+        if (const auto it = tables.find(a); it != tables.end()) {
+            for (uint32_t t : it->second->targets)
+                if (const auto ti = index.find(t); ti != index.end()) succ[k].push_back(ti->second);
+            next = false;
+        }
+        if (next && k + 1 < n && f.insns[k + 1].first == a + 4) succ[k].push_back(k + 1);
+    }
+    return succ;
+}
+
 class Emitter {
 public:
     // With `single`, the function in single mode (the caller has checked it can be).
@@ -375,6 +461,9 @@ public:
                 for (uint32_t t : it->second->targets) labels_.insert(t);
         }
         std::string body;
+        defs_.assign(f_.insns.size(), Regs{});
+        kind_.assign(f_.insns.size(), kPlain);
+        callee_.assign(f_.insns.size(), 0);
         for (size_t k = 0; k < f_.insns.size(); ++k) {
             const auto& [a, in] = f_.insns[k];
             cur_ = k;
@@ -385,6 +474,8 @@ public:
                 out.why_at = a;
                 return out;
             }
+            uses_memory_ = uses_memory_ || line.contains("(m, ");
+            defs_[k] |= assigned(line);
             body += line;
             if (single_ && single_->call[k]) body += after_call();
             if (resume_ && resume_->resume[k]) body += std::format("R_{}:\n", resume_->resume[k]);
@@ -409,7 +500,8 @@ public:
             enter += " default: break; }\n";
         }
         body += polls_;  // (the body ends in a return or a jump: nothing falls into the safe points' blocks)
-        out.code = std::format("{}void {}(Cpu& c{}) {{\n{}{}{}}}\n", twin_ ? "static " : "", name_,
+        find_dirty();
+        out.code = std::format("{}void {}(Cpu& c{}) {{\n{}{}{}}}\n", twin_ ? "QILIN_TWIN static " : "", name_,
                                resume_ ? ", unsigned resume" : "", prologue(), enter, body);
         out.ok = true;
         return out;
@@ -467,6 +559,7 @@ private:
             for (unsigned n : fprs_) p += std::format("    double f{0} = c.ps0[{0}];\n", n);
             for (unsigned n : ps1s_) p += std::format("    double p{0} = c.ps1[{0}];\n", n);
         }
+        if (uses_memory_) p += "    const Mem m{c.mem, c};\n";  // (cpu.hpp, Mem)
         if (specials_.contains("lr")) p += "    uint32_t lr = c.lr;\n";
         if (specials_.contains("ctr")) p += "    uint32_t ctr = c.ctr;\n";
         if (specials_.contains("so")) p += "    uint32_t so = c.xer_so;\n";
@@ -474,6 +567,49 @@ private:
         if (specials_.contains("ca")) p += "    uint32_t ca = c.xer_ca;\n";
         return p;
     }
+    // What an instruction does to the Cpu's copy of the registers (find_dirty): nothing; a call
+    // that reads back the callee's part (callee_); one that reads back everything.
+    enum Kind : uint8_t { kPlain, kCall, kReadAll };
+    // The dirty registers before each instruction, forwards to a fixed point over the function's
+    // paths (a union: dirty on some path is dirty). Nothing is dirty on entry; an instruction
+    // nothing leads to (there should be none) assumes everything is.
+    void find_dirty() {
+        const size_t n = f_.insns.size();
+        const auto succ = successors(f_);
+        std::vector<bool> reached(n, false);
+        if (n) reached[0] = true;
+        for (size_t k = 0; k < n; ++k)
+            for (size_t t : succ[k]) reached[t] = true;
+        din_.assign(n, Regs{});
+        for (size_t k = 0; k < n; ++k)
+            if (!reached[k]) din_[k] = Regs{~uint64_t{0}, ~uint64_t{0}};
+        auto after = [&](size_t k) {
+            Regs d = din_[k];
+            d |= defs_[k];
+            if (kind_[k] == kReadAll) return Regs{};
+            if (kind_[k] == kCall) {
+                if (const RegSet* t = regs_of(callee_[k])) {
+                    d.g &= ~(uint64_t{t->gpr} | uint64_t{t->other & 0x1FFFu} << 32);  // (CR fields, then LR, CTR, SO, OV, CA)
+                    d.f &= ~(uint64_t{t->fpr0} | uint64_t{t->fpr1} << 32);
+                } else {
+                    d = Regs{};
+                }
+            }
+            return d;
+        };
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (size_t k = 0; k < n; ++k) {
+                const Regs d = after(k);
+                for (size_t t : succ[k]) {
+                    Regs u = din_[t];
+                    u |= d;
+                    if (!(u == din_[t])) din_[t] = u, changed = true;
+                }
+            }
+        }
+    }
+
     // Written back before anything outside the function can see the state
     // (calls, returns, traps); read again after a call. The text is a
     // placeholder until the function's uses are known.
@@ -483,7 +619,7 @@ private:
         return t && !t->all ? t : nullptr;
     }
     std::string sync_out(uint64_t except = 0, uint32_t callee = 0) {
-        const std::string head = callee ? std::format("@OUT:{:08X}@", callee) : std::string("@OUT@");
+        const std::string head = callee ? std::format("@OUT:{:08X}#{}@", callee, cur_) : std::format("@OUT#{}@", cur_);
         if (!single_) return head;
         // Single mode: the halves written on every path here go back as doubles, those written on
         // some paths if this run wrote them, the rest are the registers' own still.
@@ -553,32 +689,35 @@ public:
     // The text that writes the registers back, and the text that reads them again: all of the
     // function's, or (around a call) those in `only`. The stack pointer goes back either way:
     // an interrupt's handler, at a safe point inside the callee, puts its frame below it.
-    std::pair<std::string, std::string> sync_texts(const RegSet* only) const {
+    // `dirty`: write back only these (the rest hold what the Cpu has already); null: all.
+    std::pair<std::string, std::string> sync_texts(const RegSet* only, const Regs* dirty = nullptr) const {
         std::string out_s, in_s;
+        auto changed = [&](uint64_t bits, uint64_t bit) { return !dirty || (bits & bit); };
         for (unsigned n : gprs_) {
             const bool in = !only || (only->gpr & (1u << n));
-            if (in || n == 1) out_s += std::format("c.r[{0}] = r{0}; ", n);
+            if ((in || n == 1) && changed(dirty ? dirty->g : 0, uint64_t{1} << n)) out_s += std::format("c.r[{0}] = r{0}; ", n);
             if (in) in_s += std::format("r{0} = c.r[{0}]; ", n);
         }
         for (unsigned n : fprs_) {
             if (single_) break;  // (single mode writes its halves back at each way out: sync_out)
             if (only && !(only->fpr0 & (1u << n))) continue;
-            out_s += std::format("c.ps0[{0}] = f{0}; ", n);
+            if (changed(dirty ? dirty->f : 0, uint64_t{1} << n)) out_s += std::format("c.ps0[{0}] = f{0}; ", n);
             in_s += std::format("f{0} = c.ps0[{0}]; ", n);
         }
         for (unsigned n : ps1s_) {
             if (single_) break;
             if (only && !(only->fpr1 & (1u << n))) continue;
-            out_s += std::format("c.ps1[{0}] = p{0}; ", n);
+            if (changed(dirty ? dirty->f : 0, uint64_t{1} << (32 + n))) out_s += std::format("c.ps1[{0}] = p{0}; ", n);
             in_s += std::format("p{0} = c.ps1[{0}]; ", n);
         }
         uint32_t keep = 0xFFFFFFFFu;
         std::string merged;
         for (unsigned n : crs_) {
             if (only && !(only->other & (1u << n))) continue;
+            in_s += std::format("cr{0} = (c.cr >> {1}) & 15u; ", n, 28 - 4 * n);
+            if (!changed(dirty ? dirty->g : 0, uint64_t{1} << (32 + n))) continue;
             keep &= ~(15u << (28 - 4 * n));
             merged += std::format(" | (cr{} << {})", n, 28 - 4 * n);
-            in_s += std::format("cr{0} = (c.cr >> {1}) & 15u; ", n, 28 - 4 * n);
         }
         if (!merged.empty()) out_s += std::format("c.cr = (c.cr & {}){}; ", hex(keep), merged);
         unsigned bit = 8;
@@ -586,7 +725,7 @@ public:
             const bool in = specials_.contains(s) && (!only || (only->other & (1u << bit)));
             const char* field = bit < 10 ? "" : "xer_";
             if (in) {
-                out_s += std::format("c.{1}{0} = {0}; ", s, field);
+                if (changed(dirty ? dirty->g : 0, uint64_t{1} << (32 + bit))) out_s += std::format("c.{1}{0} = {0}; ", s, field);
                 in_s += std::format("{0} = c.{1}{0}; ", s, field);
             }
             ++bit;
@@ -594,20 +733,39 @@ public:
         return {out_s, in_s};
     }
 
+    // The placeholders: @OUT#k@ and @OUT:callee#k@ (write back before instruction k's way out
+    // or call, as k may leave them), @IN@ and @IN:callee@ (read back), @SP@ (the stack pointer).
     std::string expand(const std::string& code) const {
-        const auto [out_s, in_s] = sync_texts(nullptr);
-        std::string r = code;
+        std::string r;
+        r.reserve(code.size() * 2);
         const std::string sp = gprs_.contains(1) ? "c.r[1] = r1; " : "";
-        // Around calls: the callee's part.
-        for (uint32_t callee : callees_) {
-            const std::string out_ph = std::format("@OUT:{:08X}@", callee), in_ph = std::format("@IN:{:08X}@", callee);
-            if (!r.contains(out_ph)) continue;
-            const auto [o, i] = sync_texts(regs_of(callee));
-            for (auto [ph, with] : {std::pair{out_ph, o}, std::pair{in_ph, i}})
-                for (size_t p; (p = r.find(ph)) != std::string::npos;) r.replace(p, ph.size(), with);
+        std::map<uint32_t, std::string> reads;  // per callee (0: all)
+        for (size_t at = 0;;) {
+            const size_t p = code.find('@', at);
+            if (p == std::string::npos) {
+                r.append(code, at, std::string::npos);
+                break;
+            }
+            const size_t q = code.find('@', p + 1);
+            r.append(code, at, p - at);
+            const std::string_view ph = std::string_view(code).substr(p + 1, q - p - 1);
+            at = q + 1;
+            uint32_t callee = 0;
+            if (const size_t colon = ph.find(':'); colon != std::string_view::npos)
+                callee = static_cast<uint32_t>(std::stoul(std::string(ph.substr(colon + 1, 8)), nullptr, 16));
+            if (ph == "SP") {
+                r += sp;
+            } else if (ph.starts_with("IN")) {
+                auto it = reads.find(callee);
+                if (it == reads.end()) it = reads.emplace(callee, sync_texts(callee ? regs_of(callee) : nullptr).second).first;
+                r += it->second;
+            } else {  // OUT
+                const size_t k = std::stoul(std::string(ph.substr(ph.find('#') + 1)));
+                Regs dirty = din_[k];
+                dirty |= defs_[k];
+                r += sync_texts(callee ? regs_of(callee) : nullptr, &dirty).first;
+            }
         }
-        for (auto [ph, with] : {std::pair{std::string("@OUT@"), out_s}, std::pair{std::string("@IN@"), in_s}, std::pair{std::string("@SP@"), sp}})
-            for (size_t p; (p = r.find(ph)) != std::string::npos;) r.replace(p, ph.size(), with);
         // A function that touches no state (a lone blr) leaves its parameter unnamed.
         static constexpr std::string_view kParam = "(Cpu& c) {\n";
         if (const size_t p = r.find(kParam); p != std::string::npos) {
@@ -709,7 +867,7 @@ private:
                 // The register is the Cpu's from here; fetched again as a float if it's read as one.
                 // (sync_out only where there is a fetch: it notes the "written" flags it reads.)
                 const std::string again = single_->need[cur_] ? fetch(single_->need[cur_], sync_out(bit)) : std::string();
-                line(std::format("{{ const uint32_t ea = {}; c.ps0[{}] = fp::from_bits(read64(c, ea));{}{}{} }}", ea, d, update,
+                line(std::format("{{ const uint32_t ea = {}; c.ps0[{}] = fp::from_bits(read64(m, ea));{}{}{} }}", ea, d, update,
                                  wrote(bit, false), again));
                 return true;
             }
@@ -717,7 +875,7 @@ private:
             std::string value = std::format("c.ps0[{}]", d);
             if (single_->must[cur_] & bit) value = std::format("fp::to_d({})", F(d));
             else if (single_->may[cur_] & bit) flags_read_ |= bit, value = std::format("((written & 0x{:X}ull) ? fp::to_d({}) : c.ps0[{}])", bit, F(d), d);
-            line(std::format("{{ const uint32_t ea = {}; write64(c, ea, fp::bits({}));{} }}", ea, value, update));
+            line(std::format("{{ const uint32_t ea = {}; write64(m, ea, fp::bits({}));{} }}", ea, value, update));
             return true;
         }
         // A store taking a half as the register stands (SingleInfo::store_cpu): its double, from
@@ -737,13 +895,13 @@ private:
             std::string ea, s;
             if (in.op == Op::stfs || in.op == Op::stfsx || in.op == Op::stfsu || in.op == Op::stfsux) {
                 ea = u ? (x ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm())) : (x ? ea_x() : ea_d());
-                s = std::format("write32(c, ea, fp::store_single({}));", dv(d));
+                s = std::format("write32(m, ea, fp::store_single({}));", dv(d));
             } else {
                 const unsigned i = x ? in.psqx_i() : in.psq_i(), w = x ? in.psqx_w() : in.psq_w();
                 const std::string base = u ? R(a) : RA0(a);
                 ea = x ? (base == "0u" ? R(b) : std::format("{} + {}", base, R(b)))
                        : (base == "0u" ? std::format("{}u", static_cast<uint32_t>(in.psq_d())) : base + plus(in.psq_d()));
-                s = std::format("psq_store(c, ea, {}, {}, {}, {});", i, w != 0, dv(d), w ? std::string("0.0") : dv(32 + d));
+                s = std::format("psq_store(m, ea, {}, {}, {}, {});", i, w != 0, dv(d), w ? std::string("0.0") : dv(32 + d));
             }
             line(std::format("{{ const uint32_t ea = {}; {}{} }}", ea, s, u ? std::format(" {} = ea;", R(a)) : ""));
             return true;
@@ -766,19 +924,19 @@ private:
             line(std::format("{} = fp::compare_s({}, {});", CR(in.crfd()), F(a), F(b)));
             return true;
         case Op::ps_cmpu1: case Op::ps_cmpo1: line(std::format("{} = fp::compare_s({}, {});", CR(in.crfd()), P(a), P(b))); return true;
-        case Op::lfs: return fill(out, d, std::format("fp::ffrom(read32(c, {}))", ea_d()));
-        case Op::lfsx: return fill(out, d, std::format("fp::ffrom(read32(c, {}))", ea_x()));
+        case Op::lfs: return fill(out, d, std::format("fp::ffrom(read32(m, {}))", ea_d()));
+        case Op::lfsx: return fill(out, d, std::format("fp::ffrom(read32(m, {}))", ea_x()));
         case Op::lfsu: case Op::lfsux: {
             const std::string ea = in.op == Op::lfsux ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm());
-            line(std::format("{{ const uint32_t ea = {}; const float t = fp::ffrom(read32(c, ea)); {} = t; {} = t; {} = ea;{} }}", ea, F(d), P(d), R(a),
+            line(std::format("{{ const uint32_t ea = {}; const float t = fp::ffrom(read32(m, ea)); {} = t; {} = t; {} = ea;{} }}", ea, F(d), P(d), R(a),
                              wrote(FP(d))));
             return true;
         }
-        case Op::stfs: line(std::format("write32(c, {}, fp::fbits({}));", ea_d(), F(d))); return true;
-        case Op::stfsx: line(std::format("write32(c, {}, fp::fbits({}));", ea_x(), F(d))); return true;
+        case Op::stfs: line(std::format("write32(m, {}, fp::fbits({}));", ea_d(), F(d))); return true;
+        case Op::stfsx: line(std::format("write32(m, {}, fp::fbits({}));", ea_x(), F(d))); return true;
         case Op::stfsu: case Op::stfsux: {
             const std::string ea = in.op == Op::stfsux ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm());
-            line(std::format("{{ const uint32_t ea = {}; write32(c, ea, fp::fbits({})); {} = ea; }}", ea, F(d), R(a)));
+            line(std::format("{{ const uint32_t ea = {}; write32(m, ea, fp::fbits({})); {} = ea; }}", ea, F(d), R(a)));
             return true;
         }
         case Op::psq_l: case Op::psq_lu: case Op::psq_lx: case Op::psq_lux:
@@ -791,8 +949,8 @@ private:
             const std::string ea = x ? (base == "0u" ? R(b) : std::format("{} + {}", base, R(b)))
                                      : (base == "0u" ? std::format("{}u", static_cast<uint32_t>(in.psq_d())) : base + plus(in.psq_d()));
             std::string s = std::format("{{ const uint32_t ea = {}; ", ea);
-            s += load ? std::format("psq_load_s(c, ea, {}, {}, {}, {});{}", i, w != 0, F(d), P(d), wrote(FP(d)))
-                      : std::format("psq_store_s(c, ea, {}, {}, {}, {});", i, w != 0, F(d), w ? std::string("0.0f") : P(d));
+            s += load ? std::format("psq_load_s(m, ea, {}, {}, {}, {});{}", i, w != 0, F(d), P(d), wrote(FP(d)))
+                      : std::format("psq_store_s(m, ea, {}, {}, {}, {});", i, w != 0, F(d), w ? std::string("0.0f") : P(d));
             if (u) s += std::format(" {} = ea;", R(a));
             line(s + " }");
             return true;
@@ -885,8 +1043,8 @@ private:
         case Op::fcmpu: case Op::fcmpo: case Op::ps_cmpu0: case Op::ps_cmpo0:
             return line(std::format("{} = fp::compare({}, {});", CR(in.crfd()), v(a), v(b)));
         case Op::ps_cmpu1: case Op::ps_cmpo1: return line(std::format("{} = fp::compare({}, {});", CR(in.crfd()), vp(a), vp(b)));
-        case Op::stfs: case Op::stfsx: case Op::stfsu: case Op::stfsux: return mem(std::format("write32(c, ea, fp::store_single({}));", v(d)));
-        case Op::stfiwx: return mem(std::format("write32(c, ea, static_cast<uint32_t>(fp::bits({})));", v(d)));
+        case Op::stfs: case Op::stfsx: case Op::stfsu: case Op::stfsux: return mem(std::format("write32(m, ea, fp::store_single({}));", v(d)));
+        case Op::stfiwx: return mem(std::format("write32(m, ea, static_cast<uint32_t>(fp::bits({})));", v(d)));
         default:
             error_ = std::format("single mode: {} with a double in the Cpu", ppc::spec(in.op).name);
             return false;
@@ -962,11 +1120,16 @@ private:
         case Op::extsb: arith(a, std::format("static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>({})))", R(d))); return true;
         case Op::extsh: arith(a, std::format("static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>({})))", R(d))); return true;
         // ---------------------------------------------------------------- rotate and shift
-        case Op::rlwinm: arith(a, std::format("std::rotl({}, {}) & {}", R(d), b, hex(rot_mask(in.mb(), in.me())))); return true;
-        case Op::rlwnm: arith(a, std::format("std::rotl({}, static_cast<int>({} & 31u)) & {}", R(d), R(b), hex(rot_mask(in.mb(), in.me())))); return true;
+        case Op::rlwinm: arith(a, rotated(R(d), b, rot_mask(in.mb(), in.me()))); return true;
+        case Op::rlwnm: {
+            const uint32_t m = rot_mask(in.mb(), in.me());
+            const std::string v = std::format("rotl32({}, {})", R(d), R(b));
+            arith(a, m == 0xFFFFFFFFu ? v : std::format("{} & {}", v, hex(m)));
+            return true;
+        }
         case Op::rlwimi: {
             const uint32_t m = rot_mask(in.mb(), in.me());
-            arith(a, std::format("(std::rotl({}, {}) & {}) | ({} & {})", R(d), b, hex(m), R(a), hex(~m)));
+            arith(a, std::format("({}) | ({} & {})", rotated(R(d), b, m), R(a), hex(~m)));
             return true;
         }
         case Op::slw: arith(a, std::format("slw({}, {})", R(d), R(b))); return true;
@@ -974,38 +1137,38 @@ private:
         case Op::sraw: arith(a, std::format("sraw({}, {}, {})", R(d), R(b), CA())); return true;
         case Op::srawi: arith(a, std::format("sraw({}, {}u, {})", R(d), b, CA())); return true;
         // ---------------------------------------------------------------- loads and stores
-        case Op::lbz: arith(d, std::format("read8(c, {})", ea_d())); return true;
-        case Op::lhz: arith(d, std::format("read16(c, {})", ea_d())); return true;
-        case Op::lha: arith(d, std::format("static_cast<uint32_t>(static_cast<int16_t>(read16(c, {})))", ea_d())); return true;
-        case Op::lwz: arith(d, std::format("read32(c, {})", ea_d())); return true;
-        case Op::lbzx: arith(d, std::format("read8(c, {})", ea_x())); return true;
-        case Op::lhzx: arith(d, std::format("read16(c, {})", ea_x())); return true;
-        case Op::lhax: arith(d, std::format("static_cast<uint32_t>(static_cast<int16_t>(read16(c, {})))", ea_x())); return true;
-        case Op::lwzx: arith(d, std::format("read32(c, {})", ea_x())); return true;
-        case Op::lhbrx: arith(d, std::format("std::byteswap(static_cast<uint16_t>(read16(c, {})))", ea_x())); return true;
-        case Op::lwbrx: arith(d, std::format("std::byteswap(read32(c, {}))", ea_x())); return true;
+        case Op::lbz: arith(d, std::format("read8(m, {})", ea_d())); return true;
+        case Op::lhz: arith(d, std::format("read16(m, {})", ea_d())); return true;
+        case Op::lha: arith(d, std::format("static_cast<uint32_t>(static_cast<int16_t>(read16(m, {})))", ea_d())); return true;
+        case Op::lwz: arith(d, std::format("read32(m, {})", ea_d())); return true;
+        case Op::lbzx: arith(d, std::format("read8(m, {})", ea_x())); return true;
+        case Op::lhzx: arith(d, std::format("read16(m, {})", ea_x())); return true;
+        case Op::lhax: arith(d, std::format("static_cast<uint32_t>(static_cast<int16_t>(read16(m, {})))", ea_x())); return true;
+        case Op::lwzx: arith(d, std::format("read32(m, {})", ea_x())); return true;
+        case Op::lhbrx: arith(d, std::format("std::byteswap(static_cast<uint16_t>(read16(m, {})))", ea_x())); return true;
+        case Op::lwbrx: arith(d, std::format("std::byteswap(read32(m, {}))", ea_x())); return true;
         case Op::lbzu: case Op::lhzu: case Op::lhau: case Op::lwzu:
         case Op::lbzux: case Op::lhzux: case Op::lhaux: case Op::lwzux: {
             const bool x = in.op == Op::lbzux || in.op == Op::lhzux || in.op == Op::lhaux || in.op == Op::lwzux;
             const std::string ea = x ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm());
             std::string load;
             switch (in.op) {
-            case Op::lbzu: case Op::lbzux: load = "read8(c, ea)"; break;
-            case Op::lhzu: case Op::lhzux: load = "read16(c, ea)"; break;
-            case Op::lhau: case Op::lhaux: load = "static_cast<uint32_t>(static_cast<int16_t>(read16(c, ea)))"; break;
-            default: load = "read32(c, ea)"; break;
+            case Op::lbzu: case Op::lbzux: load = "read8(m, ea)"; break;
+            case Op::lhzu: case Op::lhzux: load = "read16(m, ea)"; break;
+            case Op::lhau: case Op::lhaux: load = "static_cast<uint32_t>(static_cast<int16_t>(read16(m, ea)))"; break;
+            default: load = "read32(m, ea)"; break;
             }
             line(std::format("{{ const uint32_t ea = {}; {} = {}; {} = ea; }}", ea, R(d), load, R(a)));
             return true;
         }
-        case Op::stb: line(std::format("write8(c, {}, {});", ea_d(), R(d))); return true;
-        case Op::sth: line(std::format("write16(c, {}, {});", ea_d(), R(d))); return true;
-        case Op::stw: line(std::format("write32(c, {}, {});", ea_d(), R(d))); return true;
-        case Op::stbx: line(std::format("write8(c, {}, {});", ea_x(), R(d))); return true;
-        case Op::sthx: line(std::format("write16(c, {}, {});", ea_x(), R(d))); return true;
-        case Op::stwx: line(std::format("write32(c, {}, {});", ea_x(), R(d))); return true;
-        case Op::sthbrx: line(std::format("write16(c, {}, std::byteswap(static_cast<uint16_t>({})));", ea_x(), R(d))); return true;
-        case Op::stwbrx: line(std::format("write32(c, {}, std::byteswap({}));", ea_x(), R(d))); return true;
+        case Op::stb: line(std::format("write8(m, {}, {});", ea_d(), R(d))); return true;
+        case Op::sth: line(std::format("write16(m, {}, {});", ea_d(), R(d))); return true;
+        case Op::stw: line(std::format("write32(m, {}, {});", ea_d(), R(d))); return true;
+        case Op::stbx: line(std::format("write8(m, {}, {});", ea_x(), R(d))); return true;
+        case Op::sthx: line(std::format("write16(m, {}, {});", ea_x(), R(d))); return true;
+        case Op::stwx: line(std::format("write32(m, {}, {});", ea_x(), R(d))); return true;
+        case Op::sthbrx: line(std::format("write16(m, {}, std::byteswap(static_cast<uint16_t>({})));", ea_x(), R(d))); return true;
+        case Op::stwbrx: line(std::format("write32(m, {}, std::byteswap({}));", ea_x(), R(d))); return true;
         case Op::stbu: case Op::sthu: case Op::stwu: case Op::stbux: case Op::sthux: case Op::stwux: {
             const bool x = in.op == Op::stbux || in.op == Op::sthux || in.op == Op::stwux;
             const std::string ea = x ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm());
@@ -1013,27 +1176,27 @@ private:
             line(std::format("{{ const uint32_t ea = {}; {}(c, ea, {}); {} = ea; }}", ea, w, R(d), R(a)));
             return true;
         }
-        case Op::lmw: {
-            std::string s = std::format("{{ const uint32_t ea = {};", ea_d());
-            for (unsigned r = d; r < 32; ++r) s += std::format(" {} = read32(c, ea + {}u);", R(r), 4 * (r - d));
-            line(s + " }");
-            return true;
-        }
-        case Op::stmw: {
-            std::string s = std::format("{{ const uint32_t ea = {};", ea_d());
-            for (unsigned r = d; r < 32; ++r) s += std::format(" write32(c, ea + {}u, {});", 4 * (r - d), R(r));
-            line(s + " }");
+        // One check for all the words (cpu.hpp, is_slow_n); the slow way goes through the Cpu's registers.
+        case Op::lmw: case Op::stmw: {
+            const bool load = in.op == Op::lmw;
+            std::string fast, slow;
+            for (unsigned r = d; r < 32; ++r) {
+                fast += load ? std::format(" {} = get32(m, ea + {}u);", R(r), 4 * (r - d)) : std::format(" put32(m, ea + {}u, {});", 4 * (r - d), R(r));
+                slow += load ? std::format(" {0} = c.r[{1}];", R(r), r) : std::format(" c.r[{1}] = {0};", R(r), r);
+            }
+            slow = load ? std::format(" load_words_slow(c, ea, {});{}", d, slow) : std::format("{} store_words_slow(c, ea, {});", slow, d);
+            line(std::format("{{ const uint32_t ea = {}; if (is_slow_n(ea, {}u)) [[unlikely]] {{{} }} else {{{} }} }}", ea_d(), 4 * (32 - d), slow, fast));
             return true;
         }
         case Op::lwarx:
-            line(std::format("{{ const uint32_t ea = {}; {} = read32(c, ea); c.reserve = 1; c.reserved = ea; }}", ea_x(), R(d)));
+            line(std::format("{{ const uint32_t ea = {}; {} = read32(m, ea); c.reserve = 1; c.reserved = ea; }}", ea_x(), R(d)));
             return true;
         case Op::stwcx_rc:
-            line(std::format("{{ const uint32_t ea = {0}; if (c.reserve && c.reserved == ea) {{ write32(c, ea, {1}); {2} = 2u | {3}; }} "
+            line(std::format("{{ const uint32_t ea = {0}; if (c.reserve && c.reserved == ea) {{ write32(m, ea, {1}); {2} = 2u | {3}; }} "
                              "else {{ {2} = {3}; }} c.reserve = 0; }}",
                              ea_x(), R(d), CR(0), SO()));
             return true;
-        case Op::dcbz: line(std::format("zero_block(c, {});", ea_x())); return true;
+        case Op::dcbz: line(std::format("zero_block(m, {});", ea_x())); return true;
         case Op::dcbf: case Op::dcbst: case Op::dcbt: case Op::dcbtst: case Op::icbi:
         case Op::sync: case Op::isync: case Op::eieio:
             line("/* cache or ordering hint: nothing to do on a coherent host */");
@@ -1127,6 +1290,7 @@ private:
                 if (in.aa() && f_.outside_image && f_.outside_image(t)) {
                     // `bla` into low memory (exception-vector code, copied there at run time): the dispatcher's.
                     line(std::format("{} = {}; {} c.hooks->call(c, {}); {}", LR(), hex(pc + 4), sync_out(), hex(t), sync_in()));
+                    kind_[cur_] = kReadAll;
                     return true;
                 }
                 if (!f_.is_function || !f_.is_function(t)) {
@@ -1134,10 +1298,12 @@ private:
                     return false;
                 }
                 line(std::format("{} = {}; {}", LR(), hex(pc + 4), call_to(t)));
+                kind_[cur_] = kCall, callee_[cur_] = t;
                 return true;
             }
             if (present_.contains(t)) {
-                line(idle_loop(pc, t) ? idle_then(t) : back_to(pc, t));
+                if (idle_loop(pc, t)) line(idle_then(t)), kind_[cur_] = kReadAll;
+                else line(back_to(pc, t));
                 return true;
             }
             std::string s;
@@ -1178,6 +1344,7 @@ private:
             if (in.lk()) {
                 line(std::format("{{ const uint32_t t = {0}; {1}{0} = {2}; if ({3}) {{ {4} c.hooks->call(c, t & ~3u); {5} }} }}", LR(), pre,
                                  hex(pc + 4), cond, sync_out(), sync_in()));
+                if (cond == "true") kind_[cur_] = kReadAll;
                 return true;
             }
             line(cond == "true" ? std::format("{}{} return;", pre, sync_out()) : std::format("{}if ({}) {{ {} return; }}", pre, cond, sync_out()));
@@ -1195,6 +1362,7 @@ private:
             const std::string cond = condition(in, pre);
             if (in.lk()) {
                 line(std::format("{}{} = {}; if ({}) {{ {} c.hooks->call(c, {} & ~3u); {} }}", pre, LR(), hex(pc + 4), cond, sync_out(), CTR(), sync_in()));
+                if (cond == "true") kind_[cur_] = kReadAll;
                 return true;
             }
             line(std::format("{}if ({}) {{ {} c.hooks->call(c, {} & ~3u); return; }}", pre, cond, sync_out(), CTR()));
@@ -1232,29 +1400,29 @@ private:
         case Op::fsel: line(std::format("{} = {} >= -0.0 ? {} : {};", F(d), F(a), F(in.rc_reg()), F(b))); return true;
         case Op::fcmpu: case Op::fcmpo: line(std::format("{} = fp::compare({}, {});", CR(in.crfd()), F(a), F(b))); return true;
         // FP loads and stores: lfs fills both halves (the manual's bit conversion), lfd only ps0.
-        case Op::lfs: return fill(out, d, std::format("fp::load_single(read32(c, {}))", ea_d()));
-        case Op::lfsx: return fill(out, d, std::format("fp::load_single(read32(c, {}))", ea_x()));
-        case Op::lfd: line(std::format("{} = fp::from_bits(read64(c, {}));", F(d), ea_d())); return true;
-        case Op::lfdx: line(std::format("{} = fp::from_bits(read64(c, {}));", F(d), ea_x())); return true;
+        case Op::lfs: return fill(out, d, std::format("fp::load_single(read32(m, {}))", ea_d()));
+        case Op::lfsx: return fill(out, d, std::format("fp::load_single(read32(m, {}))", ea_x()));
+        case Op::lfd: line(std::format("{} = fp::from_bits(read64(m, {}));", F(d), ea_d())); return true;
+        case Op::lfdx: line(std::format("{} = fp::from_bits(read64(m, {}));", F(d), ea_x())); return true;
         case Op::lfsu: case Op::lfsux: case Op::lfdu: case Op::lfdux: {
             const bool x = in.op == Op::lfsux || in.op == Op::lfdux, s1 = in.op == Op::lfsu || in.op == Op::lfsux;
             const std::string ea = x ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm());
             if (s1)
-                line(std::format("{{ const uint32_t ea = {}; const double t = fp::load_single(read32(c, ea)); {} = t; {} = t; {} = ea; }}", ea, F(d), P(d), R(a)));
+                line(std::format("{{ const uint32_t ea = {}; const double t = fp::load_single(read32(m, ea)); {} = t; {} = t; {} = ea; }}", ea, F(d), P(d), R(a)));
             else
-                line(std::format("{{ const uint32_t ea = {}; {} = fp::from_bits(read64(c, ea)); {} = ea; }}", ea, F(d), R(a)));
+                line(std::format("{{ const uint32_t ea = {}; {} = fp::from_bits(read64(m, ea)); {} = ea; }}", ea, F(d), R(a)));
             return true;
         }
-        case Op::stfs: line(std::format("write32(c, {}, fp::store_single({}));", ea_d(), F(d))); return true;
-        case Op::stfsx: line(std::format("write32(c, {}, fp::store_single({}));", ea_x(), F(d))); return true;
-        case Op::stfd: line(std::format("write64(c, {}, fp::bits({}));", ea_d(), F(d))); return true;
-        case Op::stfdx: line(std::format("write64(c, {}, fp::bits({}));", ea_x(), F(d))); return true;
-        case Op::stfiwx: line(std::format("write32(c, {}, static_cast<uint32_t>(fp::bits({})));", ea_x(), F(d))); return true;
+        case Op::stfs: line(std::format("write32(m, {}, fp::store_single({}));", ea_d(), F(d))); return true;
+        case Op::stfsx: line(std::format("write32(m, {}, fp::store_single({}));", ea_x(), F(d))); return true;
+        case Op::stfd: line(std::format("write64(m, {}, fp::bits({}));", ea_d(), F(d))); return true;
+        case Op::stfdx: line(std::format("write64(m, {}, fp::bits({}));", ea_x(), F(d))); return true;
+        case Op::stfiwx: line(std::format("write32(m, {}, static_cast<uint32_t>(fp::bits({})));", ea_x(), F(d))); return true;
         case Op::stfsu: case Op::stfsux: case Op::stfdu: case Op::stfdux: {
             const bool x = in.op == Op::stfsux || in.op == Op::stfdux, s1 = in.op == Op::stfsu || in.op == Op::stfsux;
             const std::string ea = x ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm());
             line(std::format("{{ const uint32_t ea = {}; {}; {} = ea; }}", ea,
-                             s1 ? std::format("write32(c, ea, fp::store_single({}))", F(d)) : std::format("write64(c, ea, fp::bits({}))", F(d)), R(a)));
+                             s1 ? std::format("write32(m, ea, fp::store_single({}))", F(d)) : std::format("write64(m, ea, fp::bits({}))", F(d)), R(a)));
             return true;
         }
         // ---------------------------------------------------------------- paired singles
@@ -1268,8 +1436,9 @@ private:
             const std::string ea = x ? (base == "0u" ? R(b) : std::format("{} + {}", base, R(b)))
                                      : (base == "0u" ? std::format("{}u", static_cast<uint32_t>(in.psq_d())) : base + plus(in.psq_d()));
             std::string s = std::format("{{ const uint32_t ea = {}; ", ea);
-            s += load ? std::format("psq_load(c, ea, {}, {}, {}, {});", i, w != 0, F(d), P(d))
-                      : std::format("psq_store(c, ea, {}, {}, {}, {});", i, w != 0, F(d), P(d));
+            s += load ? std::format("psq_load(m, ea, {}, {}, {}, {});", i, w != 0, F(d), P(d))
+                      : std::format("psq_store(m, ea, {}, {}, {}, {});", i, w != 0, F(d), P(d));
+            if (load) defs_[cur_].f |= uint64_t{1} << d | uint64_t{1} << (32 + d);  // (out-parameters: not assignments in the text)
             if (u) s += std::format(" {} = ea;", R(a));
             line(s + " }");
             return true;
@@ -1336,6 +1505,10 @@ private:
     std::set<unsigned> gprs_, crs_, fprs_, ps1s_;
     std::set<std::string> specials_;
     uint64_t flags_read_ = 0;
+    bool uses_memory_ = false;  // a load or store: the function takes the guest's base (Mem) on entry
+    std::vector<Regs> defs_, din_;   // per instruction: the locals it assigns; those dirty before it
+    std::vector<Kind> kind_;
+    std::vector<uint32_t> callee_;   // per kCall instruction
     std::string polls_;  // the safe points' blocks, after the body
     std::string error_;
 };
