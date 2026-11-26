@@ -48,17 +48,22 @@ struct KeySource {
 GcPad map_gc_pad(const BoundControls& bound, const qilin::host::PadState& pad, const KeySource& keys, unsigned stick_deadzone,
                  unsigned trigger_threshold, uint8_t& clicks);
 
+// The console's reset button (the settings' [controls] reset): held while any
+// of its inputs is, a pad's input on any connected controller of `pads`.
+bool reset_held(const std::vector<BoundInput>& bound, const qilin::host::PadState* pads, unsigned count, const KeySource& keys);
+
 // A script for one port (MKDD_INPUT for the first, MKDD_INPUT2 to MKDD_INPUT4):
 // items separated by commas, each `what@seconds` or `what@seconds+duration`
 // (0.2 s without one), in seconds of game time:
 //   A B X Y Z L R Start Up Down Left Right   a button (L and R: the trigger all the way, with its click)
 //   Stick:x:y   C:x:y                        a stick held there, -128 to 127 each way (y up)
 //   LT:n   RT:n                              a trigger at n, 0 to 255, without its click
+//   Reset                                    the console's reset button (script_reset), whichever port's script
 // "Start@12,A@14.5,Stick:-100:0@20+3,R@20+3".
 struct ScriptStep {
     double at = 0, duration = 0.2;
     uint16_t buttons = 0;
-    bool stick = false, c = false, lt = false, rt = false;
+    bool stick = false, c = false, lt = false, rt = false, reset = false;
     int8_t x = 0, y = 0;
     uint8_t trigger = 0;
 };
@@ -66,5 +71,7 @@ struct ScriptStep {
 bool parse_input_script(const std::string& text, std::vector<ScriptStep>& out, std::string& error);
 // The steps due at `now`, onto `pad`.
 void apply_input_script(const std::vector<ScriptStep>& script, double now, GcPad& pad);
+// Whether the script holds the reset button at `now`.
+bool script_reset(const std::vector<ScriptStep>& script, double now);
 
 }  // namespace mkdd

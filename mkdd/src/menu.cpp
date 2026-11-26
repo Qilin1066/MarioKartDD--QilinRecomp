@@ -230,11 +230,13 @@ void Menu::close() {
 }
 
 // An input presses one control: a key or the mouse one in all (the keyboard
-// is everybody's), a pad's input one of its player's.
+// is everybody's), a pad's input one of its player's. The reset button's pad
+// inputs are any controller's, so they leave every player's controls.
 void Menu::bind(const Binding& b) {
     note_.clear();
+    const bool reset = capture_ == kCaptureReset;
     for (unsigned p = 0; p < kPlayers; ++p) {
-        if (b.kind == Binding::kPad && p != player_) continue;
+        if (b.kind == Binding::kPad && p != player_ && !reset) continue;
         for (unsigned c = 0; c < kControlCount; ++c) {
             auto& list = s_.players[p].controls[c];
             const auto it = std::find(list.begin(), list.end(), b);
@@ -247,7 +249,11 @@ void Menu::bind(const Binding& b) {
             list.erase(it);
         }
     }
-    s_.players[player_].controls[capture_].push_back(b);
+    if (const auto it = std::find(s_.reset.begin(), s_.reset.end(), b); it != s_.reset.end()) {
+        if (!reset) note_ = binding_label(b) + " moved here from Reset (console button).";
+        s_.reset.erase(it);
+    }
+    (reset ? s_.reset : s_.players[player_].controls[capture_]).push_back(b);
     controls_changed_ = true;
     capture_ = -1;
     wait_release_ = true;
@@ -573,6 +579,46 @@ void Menu::controls_page() {
         }
         ImGui::EndTable();
     }
+    // The console's reset button, everybody's.
+    if (ImGui::BeginTable("console", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Console", ImGuiTableColumnFlags_WidthStretch, 0.28f);
+        ImGui::TableSetupColumn("Pressed by", ImGuiTableColumnFlags_WidthStretch, 0.57f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch, 0.15f);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Reset (console button)");
+        ImGui::TableNextColumn();
+        if (capture_ == kCaptureReset) {
+            const uint64_t left = capture_until_ > SDL_GetTicks() ? (capture_until_ - SDL_GetTicks() + 999) / 1000 : 0;
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Press a key, any pad's button, or click... (Esc: cancel, %u s)", unsigned(left));
+        } else {
+            if (s_.reset.empty()) ImGui::TextDisabled("unused");
+            for (size_t i = 0; i < s_.reset.size(); ++i) {
+                ImGui::PushID(int(i) + 1000);
+                if (i) ImGui::SameLine();
+                if (ImGui::SmallButton(binding_label(s_.reset[i]).c_str())) {
+                    s_.reset.erase(s_.reset.begin() + std::ptrdiff_t(i));
+                    controls_changed_ = true;
+                    note_.clear();
+                    ImGui::PopID();
+                    break;
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::TableNextColumn();
+        ImGui::BeginDisabled(capture_ >= 0);
+        if (ImGui::SmallButton("Add##reset")) {
+            capture_ = kCaptureReset;
+            capture_until_ = SDL_GetTicks() + kCaptureMs;
+            capture_held_ = display_.buttons();
+            note_.clear();
+            io.ConfigFlags = (io.ConfigFlags & ~ImGuiConfigFlags_NavEnableGamepad) | ImGuiConfigFlags_NoMouse;
+        }
+        ImGui::EndDisabled();
+        ImGui::EndTable();
+    }
     if (!note_.empty()) ImGui::TextUnformatted(note_.c_str());
     if (ImGui::Button("Back to the defaults")) {
         // (Keys the first player's defaults name leave whoever had them: a key presses one control.)
@@ -591,6 +637,8 @@ void Menu::controls_page() {
     ImGui::TextWrapped("Pad inputs are the player's own controller's, by an Xbox pad's names; by default its buttons are the GameCube's by "
                        "position (pad X is B, pad B is X), a shoulder button is Z and the triggers are L and R. A stick or trigger on the "
                        "sticks, L or R is analogue; a key or button there presses all the way. A key presses one control.");
+    ImGui::TextWrapped("Reset is the console's button: held while pressed, and the game's own reset follows (back to its start; a race "
+                       "or cup being played is lost). Unused by default for that reason.");
     ImGui::TextDisabled("F1 or Esc (controller: Back + Start): this menu. F3: frame times. F9: capture frames for a report. F11 or Alt+Enter: full screen.");
 }
 

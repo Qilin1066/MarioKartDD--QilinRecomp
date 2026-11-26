@@ -109,6 +109,9 @@ struct Settings {
     unsigned stick_threshold = 50;    // a stick's direction bound to a button presses it past this, 5-95
     unsigned trigger_threshold = 50;  // L and R click (their digital press) past this much of a trigger's travel, 5-95
     unsigned rumble_strength = 100;   // 0-100
+    // The console's reset button, held while one of these is (a pad's input on any controller).
+    // None by default: a stray press throws away the race or cup being played.
+    std::vector<Binding> reset;
     Player players[kPlayers];         // [player1] to [player4]
     // [console]: what the game reads as the GameCube's own settings (its SRAM). The os layer
     // answers OSGetLanguage, OSGetSoundMode, OSGetProgressiveMode and OSGetEuRgb60Mode from these;

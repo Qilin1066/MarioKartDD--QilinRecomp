@@ -85,7 +85,8 @@ private:
     uint64_t banner_until_ = 0;
     // Setting a control by pressing it.
     unsigned player_ = 0;        // whose controls the page shows
-    int capture_ = -1;           // the Control being set, or -1
+    int capture_ = -1;           // the Control being set (kCaptureReset: the reset button), or -1
+    static constexpr int kCaptureReset = int(kControlCount);
     uint64_t capture_until_ = 0;
     uint32_t capture_held_ = 0;  // the pad's buttons held when it began (they don't count)
     bool wait_release_ = false;  // after a pad button was taken: gamepad navigation back once it's let go

@@ -198,6 +198,36 @@ int main() {
         check(!mkdd::parse_input_script("Stick:200:0@1", script, e) && !mkdd::parse_input_script("Stick:1@1", script, e) &&
                   !mkdd::parse_input_script("LT:256@1", script, e) && !mkdd::parse_input_script("Stick:1:2:3@1", script, e),
               "sticks and triggers out of range or misshapen are refused");
+        check(mkdd::parse_input_script("Reset@5+1,A@5", script, e) && !mkdd::script_reset(script, 4.9) && mkdd::script_reset(script, 5.5) &&
+                  !mkdd::script_reset(script, 6.0) && at(5.1).buttons == mkdd::kGcA && at(5.5).buttons == 0,
+              "a script holds the reset button for its duration, apart from the controller");
+    }
+    {
+        // The console's reset button: its inputs looked up as a player's are.
+        mkdd::Settings s = d;
+        std::string e;
+        check(mkdd::parse_settings("[controls]\nreset = key:Backspace, pad:Back\n", s, e), "a reset binding reads");
+        std::vector<std::string> reset_keys;
+        mkdd::Player holder;
+        holder.controls[0] = s.reset;
+        const mkdd::BoundControls bound = bind_player(holder, reset_keys);
+        std::set<std::string> held;
+        mkdd::KeySource k;
+        k.key_down = [&](int code) { return code >= 0 && held.count(reset_keys[size_t(code)]) != 0; };
+        host::PadState pads[2];
+        pads[0].connected = pads[1].connected = true;
+        check(!mkdd::reset_held(bound.controls[0], pads, 2, k), "nothing pressed: not held");
+        held.insert("Backspace");
+        check(mkdd::reset_held(bound.controls[0], pads, 2, k), "its key holds it");
+        held.clear();
+        pads[1].buttons = host::kPadBack;
+        check(mkdd::reset_held(bound.controls[0], pads, 2, k), "its pad button on any controller holds it");
+        pads[1].connected = false;
+        check(!mkdd::reset_held(bound.controls[0], pads, 2, k), "but not on one that isn't connected");
+        pads[0].buttons = host::kPadStart;
+        k.mouse = true;
+        check(!mkdd::reset_held(bound.controls[0], pads, 2, k), "other inputs don't");
+        check(!mkdd::reset_held(mkdd::BoundControls{}.controls[0], pads, 2, k), "unbound, nothing holds it");
     }
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");
     return g_failures ? 1 : 0;
