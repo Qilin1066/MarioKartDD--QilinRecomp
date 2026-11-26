@@ -17,10 +17,13 @@
 //   32-byte blocks, 3A blocks left.
 //
 // The DSP's program is run, not imitated: the game's microcode is lifted to
-// C++ at build time (recomp/src/dsp) and runs on dsp_core.hpp's DSP, on the
-// guest thread that touches these registers, each time the CPU gives it
-// something to do (a mail sent or taken, the interrupt, the halt released)
-// and until it can only wait again. Only the DSP's ROM is ours: its task
+// C++ at build time (recomp/src/dsp) and runs on dsp_core.hpp's DSP each time
+// the CPU gives it something to do (a mail sent or taken, the interrupt, the
+// halt released) and until it can only wait again: inside the register access,
+// on the game's thread, so the game's busy-waits end at once and a run is the
+// same every time. MKDD_DSP_THREAD=1 runs it on a host thread of its own
+// instead ("the DSP's thread", below): an experiment, off by default, because
+// it only pays where a core is free for it (docs/audio.md has the numbers). Only the DSP's ROM is ours: its task
 // loader (the mails 80F3xxxx that hand it a microcode; the entry at 0x80B5 a
 // microcode jumps to when the CPU switches tasks; reset at 0x8000), which
 // finds the lifted program by the image's hash, and the stub
@@ -44,8 +47,14 @@
 // After Dolphin's DSP.cpp, AudioInterface.cpp and its notes on the ROM: the
 // register map and the loader's protocol are facts taken from there; no code is.
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -53,6 +62,7 @@
 #include "dsp_core.hpp"
 #include "hw.hpp"
 #include "os.hpp"
+#include "priority.hpp"
 
 namespace mkdd {
 namespace rt = qilin::rt;
@@ -66,12 +76,13 @@ constexpr uint16_t kFlags = kAid | kAram | kDspFlag;
 constexpr uint16_t kMicrocodeBits = 0x0C07;  // reset, assert, halt, init code, init: the DSP's side
 
 AudioStats g_stats;
+bool g_trace = false;  // MKDD_AUDIO_DUMP or MKDD_AUDIO_TRACE
 AudioSink g_sink = nullptr;
 void* g_sink_user = nullptr;
 
 // The DSP's side.
 enum class Microcode { Rom, Init, Lifted };
-Microcode g_ucode = Microcode::Rom;
+std::atomic<Microcode> g_ucode{Microcode::Rom};
 dsp::Core g_core;
 std::unique_ptr<uint8_t[]> g_aram;
 uint16_t g_dsp_bits = kHalt | kInit;  // control as the DSP keeps it
@@ -131,12 +142,105 @@ void raise_flag(uint16_t flag) {
     update_line();
 }
 
+// --- the DSP's thread ---
+//
+// One worker runs the microcode whenever the game's side has kicked it, and parks when the
+// microcode can only wait. What the game can see of the DSP stays exact where the game looks:
+// a read of either mailbox's "waiting" bit first lets the DSP get as far as it can by itself
+// (settle_until), so a busy-wait on a mail ends on its first poll, as when the microcode ran
+// inside the register access. What changes is only when the DSP's interrupt arrives: when the
+// work is done, at the game thread's next safe point, instead of at once.
+// After working, the worker spins for a moment before it sleeps: the game's side sends its
+// mails in bursts, and waking a sleeping thread for each would cost more than the work.
+
+bool g_threaded = false;
+std::mutex g_dsp_mutex;
+std::condition_variable g_dsp_wake;
+bool g_dsp_asleep = false;                // (under the mutex) the worker waits on g_dsp_wake
+std::atomic<bool> g_dsp_work{false};      // something for the microcode to look at
+std::atomic<bool> g_dsp_busy{false};      // work pending or the worker inside the microcode
+std::atomic<bool> g_dsp_irq{false};       // the microcode asked for the CPU's interrupt
+std::atomic<uint64_t> g_dsp_ns{0}, g_dsp_runs{0}, g_dsp_mails_out{0};
+uint64_t g_settle_ns = 0, g_settle_worst_ns = 0, g_wakes = 0;  // (the game's thread's)
+
+void run_core() {
+    g_dsp_runs.fetch_add(1, std::memory_order_relaxed);
+    if (g_trace) {
+        const auto t0 = std::chrono::steady_clock::now();
+        g_core.run();
+        g_dsp_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()),
+                           std::memory_order_relaxed);
+    } else {
+        g_core.run();
+    }
+}
+
+void dsp_thread() {
+    set_this_thread_priority(Priority::high);
+    for (;;) {
+        if (g_dsp_work.exchange(false)) {
+            run_core();
+            if (!g_dsp_work.load()) g_dsp_busy.store(false);
+            // (A kick between those two lines sets busy again after work: see kick().)
+            if (g_dsp_work.load()) g_dsp_busy.store(true);
+            continue;
+        }
+        // Nothing to do: stay awake for a quarter of a millisecond, then sleep.
+        const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(250);
+        bool found = false;
+        while (std::chrono::steady_clock::now() < until) {
+            for (int i = 0; i < 64 && !found; ++i) found = g_dsp_work.load(std::memory_order_relaxed);
+            if (found) break;
+            std::this_thread::yield();
+        }
+        if (found) continue;
+        std::unique_lock lock(g_dsp_mutex);
+        g_dsp_asleep = true;
+        g_dsp_wake.wait(lock, [] { return g_dsp_work.load(); });
+        g_dsp_asleep = false;
+    }
+}
+// The game's side changed something the microcode may be waiting for.
+void kick() {
+    g_dsp_busy.store(true);
+    g_dsp_work.store(true);
+    bool asleep;
+    {
+        std::lock_guard lock(g_dsp_mutex);
+        asleep = g_dsp_asleep;
+    }
+    if (asleep) {
+        ++g_wakes;
+        g_dsp_wake.notify_one();
+    }
+}
+// Wait until `done()` or the DSP can do no more by itself.
+template <class Done>
+void settle_until(Done done) {
+    if (!g_threaded || done() || !g_dsp_busy.load()) return;
+    const auto t0 = g_trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    for (unsigned spins = 0; !done() && g_dsp_busy.load(); ++spins)
+        if (spins > 200) std::this_thread::yield();
+    if (g_trace) {
+        const uint64_t ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+        g_settle_ns += ns;
+        g_settle_worst_ns = std::max(g_settle_worst_ns, ns);
+    }
+}
+// Stop the worker inside the microcode, wherever it is, for a change it must not run across (reset).
+void settle_stopped() {
+    if (!g_threaded) return;
+    g_core.stop = true;
+    settle_until([] { return false; });
+    g_core.stop = false;
+}
+
 // --- the DSP's side ---
 
 constexpr uint16_t kAssert = 1u << 1;
 
 void mail_from_dsp(uint32_t mail) {
-    ++g_stats.mails_out;
+    g_dsp_mails_out.fetch_add(1, std::memory_order_relaxed);
     g_core.dsp_mail = mail | 0x80000000u;
 }
 
@@ -163,15 +267,13 @@ void load_image(Cpu* c, const dsp::Program* p, uint32_t address) {
     for (uint32_t i = 0; i < p->bytes / 2; ++i) g_core.iram[i] = static_cast<uint16_t>((image[2 * i] << 8) | image[2 * i + 1]);
 }
 
-// Run the microcode until it can only wait for the CPU (or halts).
+// Have the microcode run until it can only wait for the CPU (or halts): on its thread, or here.
 void run_dsp() {
     if (g_core.halted) return;
     if (g_greeting) mail_from_dsp(std::exchange(g_greeting, 0));
     if (g_ucode != Microcode::Lifted) return;
-    ++g_stats.dsp_runs;
-    g_core.run();
-    if (!g_core.ext_int) g_dsp_bits &= ~kAssert;  // taken
-    if (g_core.halted) g_dsp_bits |= kHalt;        // the microcode's own HALT
+    if (g_threaded) kick();
+    else run_core();
 }
 
 void rom_mail(Cpu& c, uint32_t mail) {
@@ -198,6 +300,7 @@ void rom_mail(Cpu& c, uint32_t mail) {
                 rt::fatal(&c, "the DSP was given a microcode that was not lifted into this build (hash %08X, %u bytes at %08X)", hash,
                           g_rom_length, g_rom_iram);
             rt::log("dsp: microcode %08X (%s) booted at %04X", hash, p->name, mail & 0xFFFF);
+            settle_stopped();
             g_ucode = Microcode::Lifted;
             const bool halted = g_core.halted;
             g_core.boot(p, static_cast<uint16_t>(mail));
@@ -244,6 +347,7 @@ bool rom_entry(void*, dsp::Core& core, uint16_t address) {
 
 void mail_to_dsp(Cpu& c, uint32_t mail) {
     ++g_stats.mails_in;
+    if (g_trace) dsp::trace::mail_to_dsp(mail, g_ucode == Microcode::Lifted);
     switch (g_ucode) {
         case Microcode::Rom: rom_mail(c, mail); break;
         case Microcode::Init: break;
@@ -255,15 +359,18 @@ void mail_to_dsp(Cpu& c, uint32_t mail) {
 }
 
 uint16_t read_mail_low() {
-    const uint16_t low = static_cast<uint16_t>(g_core.dsp_mail);
-    if (g_core.dsp_mail & 0x80000000u) {
-        g_core.dsp_mail &= 0x7FFFFFFFu;
+    const uint32_t mail = g_core.dsp_mail.load();
+    if (mail & 0x80000000u) {
+        if (g_trace) dsp::trace::mail_from_dsp(mail);
+        g_core.dsp_mail.fetch_and(0x7FFFFFFFu);
         run_dsp();  // it may have been waiting for exactly this
     }
-    return low;
+    return static_cast<uint16_t>(mail);
 }
 
 uint16_t microcode_control_write(uint16_t v) {
+    if (g_trace && (v & (kReset | kAssert) || ((v ^ g_dsp_bits) & (kHalt | kInit)))) dsp::trace::event("control written", v);
+    if ((v & (kReset | kHalt)) || ((g_dsp_bits & kInit) && !(v & kInit))) settle_stopped();
     if (v & kReset) {
         set_microcode(Microcode::Rom);
         v &= ~kReset;
@@ -279,6 +386,7 @@ uint16_t microcode_control_write(uint16_t v) {
         if (g_ucode == Microcode::Lifted) {
             g_core.ext_int = true;
             ++g_stats.command_lists;
+            if (g_trace) dsp::trace::interrupt_dsp(g_core.cpu_mail);
         } else {
             g_dsp_bits &= ~kAssert;
         }
@@ -288,6 +396,9 @@ uint16_t microcode_control_write(uint16_t v) {
 }
 uint16_t microcode_control_read() {
     if ((g_dsp_bits & kInitCode) && time_base() >= g_init_code_clear) g_dsp_bits &= ~kInitCode;
+    if (g_ucode == Microcode::Lifted) {  // the interrupt reads set until the microcode takes it; HALT may be its own
+        g_dsp_bits = static_cast<uint16_t>((g_dsp_bits & ~(kAssert | kHalt)) | (g_core.ext_int ? kAssert : 0) | (g_core.halted ? kHalt : 0));
+    }
     return g_dsp_bits;
 }
 
@@ -321,7 +432,7 @@ void play(Cpu* c, uint32_t source, uint32_t blocks) {
     ++g_stats.dma_periods;
     const uint32_t frames = blocks * 8;
     g_stats.frames += frames;
-    if (!g_sink) return;
+    if (!g_sink && !g_trace) return;
     const uint8_t* p = dsp::physical(c, source, blocks * 32);
     static thread_local std::vector<int16_t> out;
     out.resize(size_t(frames) * 2);
@@ -330,12 +441,14 @@ void play(Cpu* c, uint32_t source, uint32_t blocks) {
         out[2 * i] = s(4 * i + 2);
         out[2 * i + 1] = s(4 * i);
     }
-    g_sink(out.data(), frames, g_dma_rate, g_sink_user);
+    if (g_trace) dsp::trace::samples(out.data(), frames, g_dma_rate);
+    if (g_sink) g_sink(out.data(), frames, g_dma_rate, g_sink_user);
 }
 
 bool dma_on() { return (g_dma_control & 0x8000) != 0; }
 
 void poll() {
+    if (g_dsp_irq.load(std::memory_order_relaxed) && g_dsp_irq.exchange(false)) raise_flag(kDspFlag);
     if (active() && !g_line_posted) {  // raised while the OS had it masked
         const uint32_t mask = interrupt_mask();
         for (uint16_t flag : {kAid, kAram, kDspFlag})
@@ -369,9 +482,14 @@ uint64_t deadline() {
 
 uint16_t dsp_read16(Cpu& c, uint32_t off) {
     switch (off) {
-        case 0x00: return static_cast<uint16_t>(g_core.cpu_mail >> 16);
-        case 0x02: return static_cast<uint16_t>(g_core.cpu_mail);
-        case 0x04: return static_cast<uint16_t>(g_core.dsp_mail >> 16);
+        // The "waiting" bits are what the game busy-waits on: first let the DSP get as far as it can.
+        case 0x00:
+            settle_until([] { return !(g_core.cpu_mail.load(std::memory_order_relaxed) & 0x80000000u); });
+            return static_cast<uint16_t>(g_core.cpu_mail.load() >> 16);
+        case 0x02: return static_cast<uint16_t>(g_core.cpu_mail.load());
+        case 0x04:
+            settle_until([] { return (g_core.dsp_mail.load(std::memory_order_relaxed) & 0x80000000u) != 0; });
+            return static_cast<uint16_t>(g_core.dsp_mail.load() >> 16);
         case 0x06: return read_mail_low();
         case 0x0A: return (g_control & ~kMicrocodeBits) | (microcode_control_read() & kMicrocodeBits);
         case 0x30: return static_cast<uint16_t>(g_dma_source >> 16);
@@ -416,7 +534,10 @@ void dsp_write16(Cpu& c, uint32_t off, uint16_t v) {
                 g_dma_blocks = v & 0x7FFF;
                 if (!g_dma_blocks) rt::fatal(&c, "the audio DMA was started with 0 blocks");
                 g_dma_t0 = time_base();
+                if (g_trace) dsp::trace::event("audio DMA started: source", g_dma_source), dsp::trace::event("audio DMA started: blocks", g_dma_blocks);
                 raise_flag(kAid);
+            } else if (g_trace && was != dma_on()) {
+                dsp::trace::event("audio DMA control written", v);
             }
             return;
         }
@@ -472,6 +593,7 @@ void ai_write(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
     switch (a & 0x1F) {
         case 0x00: {
             if (v & 4) rt::fatal(&c, "the AI's sample-counter interrupt was enabled (%08X): not handled", v);
+            if (g_trace && ((v ^ g_ai_control) & 0x42)) dsp::trace::event("AI control written (rates changed)", v);
             const uint32_t counter = ai_counter();
             if ((v ^ g_ai_control) & 1) ai_counter_restart(counter);  // run or stop, keeping the count
             g_ai_control = (v & 0x57) & ~0x08u;
@@ -483,7 +605,10 @@ void ai_write(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
             }
             return;
         }
-        case 0x04: g_ai_volume = v; return;
+        case 0x04:
+            if (g_trace) dsp::trace::event("AI volume written", v);
+            g_ai_volume = v;
+            return;
         case 0x08: ai_counter_restart(v); return;
         case 0x0C: g_ai_timing = v; return;
         default: rt::fatal(&c, "store of %08X to AI register %08X: not handled", v, a);
@@ -512,8 +637,25 @@ void init_audio() {
     add_timer_source(poll, deadline);
     g_core.aram = aram_base();
     g_core.memory = [](void*, uint32_t address, uint32_t bytes) { return dsp::physical(nullptr, address, bytes); };
-    g_core.irq = [](void*) { raise_flag(kDspFlag); };
+    static bool started = false;  // (once: a restart of the game comes here again)
+    if (!started) {
+        started = true;
+        const char* threaded = std::getenv("MKDD_DSP_THREAD");
+        g_threaded = threaded && threaded[0] == '1';
+        if (g_threaded) std::thread(dsp_thread).detach();
+    }
+    settle_stopped();
+    if (g_threaded) {
+        g_core.irq = [](void*) {  // (on the DSP's thread: the game's thread raises it at its next safe point)
+            g_dsp_irq.store(true);
+            wake_idle();
+        };
+    } else {
+        g_core.irq = [](void*) { raise_flag(kDspFlag); };
+    }
     g_core.rom = rom_entry;
+    g_trace = dsp::trace::init();
+    if (g_trace) g_core.dma_hook = [](void*, unsigned control, unsigned at, unsigned words, const uint8_t* p) { dsp::trace::dma(control, at, words, p); };
     g_core.fatal = [](void*, const char* message) { rt::fatal(nullptr, "%s", message); };
     set_microcode(Microcode::Rom);
 }
@@ -529,6 +671,14 @@ void set_audio_sink(AudioSink sink, void* user) {
     g_sink = sink;
     g_sink_user = user;
 }
-const AudioStats& audio_stats() { return g_stats; }
+const AudioStats& audio_stats() {
+    g_stats.dsp_runs = g_dsp_runs.load(std::memory_order_relaxed);
+    g_stats.dsp_ns = g_dsp_ns.load(std::memory_order_relaxed);
+    g_stats.mails_out = g_dsp_mails_out.load(std::memory_order_relaxed);
+    g_stats.settle_ns = g_settle_ns;
+    g_stats.wakes = g_wakes;
+    g_stats.settle_worst_ns = std::exchange(g_settle_worst_ns, 0);
+    return g_stats;
+}
 
 }  // namespace mkdd

@@ -27,6 +27,10 @@ void set_audio_sink(AudioSink sink, void* user);
 // command_lists: times the CPU interrupted the DSP (a command or a release of channels).
 struct AudioStats {
     uint64_t dma_periods = 0, frames = 0, command_lists = 0, voices = 0, mails_in = 0, mails_out = 0, dsp_runs = 0;
+    uint64_t dsp_ns = 0;  // host time spent in the microcode (measured only while tracing: dsp_trace.cpp)
+    // With the DSP on its own thread: the game thread's time waiting on it (while tracing), the
+    // times it had to be woken from sleep, and the longest wait (ns).
+    uint64_t settle_ns = 0, wakes = 0, settle_worst_ns = 0;
     uint32_t ucode_crc = 0;
 };
 const AudioStats& audio_stats();
@@ -40,6 +44,17 @@ uint8_t* aram_base();
 namespace dsp {
 // Guest memory at a physical address (the segment bits are ignored).
 uint8_t* physical(qilin::rt::Cpu* c, uint32_t address, uint32_t size);
+
+// Development: MKDD_AUDIO_DUMP and MKDD_AUDIO_TRACE (dsp_trace.cpp). init() is true if either is set.
+namespace trace {
+bool init();
+void event(const char* what, uint32_t value);
+void samples(const int16_t* left_right, size_t frames, unsigned rate);
+void dma(unsigned control, unsigned at, unsigned words, const uint8_t* main);
+void mail_from_dsp(uint32_t mail);
+void mail_to_dsp(uint32_t mail, bool lifted);
+void interrupt_dsp(uint32_t waiting_mail);
+}  // namespace trace
 }  // namespace dsp
 
 }  // namespace mkdd

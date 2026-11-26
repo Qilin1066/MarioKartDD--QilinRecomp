@@ -85,6 +85,13 @@ void arithmetic() {
     CHECK_EQ(asrn(sr, -0x100, 0x7C), -0x10);
     CHECK_EQ(asrn(-0x100, 0x7C), -0x10);
     CHECK_EQ(lsrn(sr, 0x100, 0x40), 0x100);
+    // LSRN and ASRN (ac0 by ac1.m) have the opposite sense: a plain count is a right shift.
+    CHECK_EQ(lsrn_ac(sr, 0x100, 0x04), 0x10);
+    CHECK_EQ(lsrn_ac(0x100, 0x7C), 0x1000);
+    CHECK_EQ(lsrn_ac(-1, 0x01), 0x7FFFFFFFFFll);
+    CHECK_EQ(asrn_ac(sr, -0x100, 0x04), -0x10);
+    CHECK_EQ(asrn_ac(-0x100, 0x7C), -0x1000);
+    CHECK_EQ(lsrn_ac(0x100, 0x00), 0x100);
 
     // Accumulator parts and the two modes.
     int64_t a = set_ach(0, 0x12FF);

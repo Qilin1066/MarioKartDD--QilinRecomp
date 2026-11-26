@@ -408,6 +408,7 @@ endif()
 
 # The game's runtime: everything in mkdd but the code lifted from main.dol.
 set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/interp.cpp mkdd/src/mtxtag.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
+list(APPEND mkdd_runtime_sources mkdd/src/dsp_trace.cpp)  # (MKDD_AUDIO_DUMP, MKDD_AUDIO_TRACE)
 list(APPEND mkdd_runtime_sources mkdd/src/input.cpp)  # the controller ports (input.hpp)
 list(APPEND mkdd_runtime_sources mkdd/src/enhance.cpp mkdd/src/hud.cpp)  # the widened picture (enhance.hpp)
 

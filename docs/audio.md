@@ -142,6 +142,7 @@ Details that matter (`dsp_core.hpp`):
 - Flags are computed as documented, where anything can read them (see "Cost"); logic instructions on `acX.m` set them from the 16 bits.
 - 40-bit mode (`SET40`): loads to `acX.m` sign-extend and clear, stores from it saturate.
 - Multiplies double unless `M0`; with `SET15`, an `ax?.l` operand of the `MULX` family is unsigned.
+- The variable shifts: `LSRNRX`, `ASRNRX`, `LSRNR`, `ASRNR` shift left by a plain count and right with bit 6 set; `LSRN` and `ASRN` the other way round.
 - `MOVPZ`, `MULxMVZ`, `ADDPAXZ` round the product to even.
 - Address registers step with Dolphin's formulas for the wrap registers (verified in the test against plain masking for power-of-two rings).
 - Extensions: loads and stores happen with the values from before the instruction; a load into the accumulator the instruction itself writes is refused at lift time (hardware ORs the two; nothing here does it).
@@ -151,7 +152,7 @@ Details that matter (`dsp_core.hpp`):
 
 On the guest thread, synchronously: whenever the CPU sends a mail, takes one, raises the external interrupt or releases the halt, the lifted function runs until the DSP halts or **provably waits**: at a taken backward jump, if nothing was stored and no device was touched since the same jump was last taken, and every register is the same as then, only the CPU can change what happens next, so the function returns with the program counter at the jump's target. This finds the mail waits, the wait for channels and the main loop without knowing them. The external interrupt is taken on entry and wherever the microcode has just set the enable bit (`SBSET #5`, `RTI`).
 
-So the CPU's busy-waits on the mailbox end on their first poll, a sub-frame is mixed inside the register write that released its last channel group, and everything is deterministic. The base's AX emulation ran on the guest thread in the same way. Moving the DSP to its own host thread is possible (the core has no global state) but then the lifted CPU code's polling loops need a way to sleep; not done.
+So the CPU's busy-waits on the mailbox end on their first poll, a sub-frame is mixed inside the register write that released its last channel group, and everything is deterministic. The base's AX emulation ran on the guest thread in the same way. Running the DSP on its own host thread exists as an experiment ("In the game", below).
 
 ### Cost
 
@@ -170,7 +171,29 @@ Two things in the lifter bought this (the first version, with the registers in t
 - **Registers in locals.** The generated function copies the registers into a local structure and writes them back where it leaves; with them in the core, every store to data memory forced the compiler to reload them.
 - **Flags only where wanted.** A backward data-flow pass over the lifted code finds the status flags wanted after each instruction; of 571 instructions that set flags, 97 have theirs computed.
 
-What would buy more, if the Pi needs it: hand-written replacements for the ADPCM frame decoder (`07EB`) and the mixing loop (`0CA9`), checked against the lifted code with `mkdd_dsp_check`'s outputs; then a host thread for the DSP.
+What would buy more, if the Pi needs it: hand-written replacements for the ADPCM frame decoder (`07EB`) and the mixing loop (`0CA9`), checked against the lifted code with `mkdd_dsp_check`'s outputs.
+
+## In the game
+
+Checked on 2026-11-26 with the game built from the merged tree, headless, 200 to 230 s a run, with `MKDD_AUDIO_TRACE=1` and `MKDD_AUDIO_DUMP=<file.wav>` (`dsp_trace.cpp`: the first register traffic one by one, then every 5 s of sound what the DSP was asked to do and the level of what came out; the dump is everything the audio DMA played). One run without a controller, one with a script pressing A and Start through the title and menus into what plays after them.
+
+- **Start-up as assumed.** `__OSInitAudioSystem`: control `0805`, the stub's `80544348` read, halt, `08AC`, `0805`. `DSPInit`: control `0900`; the ROM's `8071FEED` read; the five `80F3xxxx` pairs (image `00343680`, `1D20` bytes, start 0); `DCD10000`, `F3551111`. `AIInit` then measures the stream clock against the time base (some fifteen rounds of reset, run, read) and is satisfied; the DMA rate ends at 32 kHz (control bit 6 set) and the AI volume is written 0 (JAudio plays nothing through the disc-streaming path).
+- **The clock holds.** Every 5 s: 286 DMA buffers of 560 frames, 286 `DsyncFrame`s done (`DCD10005`), 2,002 sub-frames, 8,008 channel releases: seven sub-frames a frame, four releases a sub-frame, one frame per DMA buffer, as JAudio expects. A frame was missed only where the host stalled (twice in 230 s, on a PC busy with other builds).
+- **What the game uses.** Sources: 4-bit ADPCM (code 9) for nearly everything, up to 62 voices at once; PCM8 (8) for some effects; PCM16 (16), two looping voices, for streamed music, which `JASAramStream` plays through a ring in ARAM. Never seen: 2-bit ADPCM, the main-memory sources 32/33, any oscillator, any filter mode but 0, the one-pole filter, a task switch, a command other than `DsetupTable` and `DsyncFrame`. Mixers go to `0D00`, `0D60` and the two effect buses `0DC0`, `0E20`; many voices use the auto-mixer instead. All four effect lines are on from the start.
+- **The Nintendo logo's voice** is in the dump 0.46 s in: its loudest 6,000 samples correlate at 0.88 with the reference decode (two voices play at once there, with reverb).
+- **The output is sane**: no non-finite value, 4 clipped samples in 228 s, DC within 0.3% of full scale, silence only where no voice is active, no step at the sub-frame period (the mean sample-to-sample step at 80-sample boundaries equals the mean elsewhere), and a music-like spectrum (falling 20 dB from 100 Hz to 16 kHz) under the streamed music.
+- **Found this way and fixed: `LSRN`'s direction.** The first run had white noise where the streamed music should be. The PCM16 path turns a byte address into a word address with `LSRN` by 1; lifted as the manual words it (a left shift) it read from four times the address. `LSRN` and `ASRN` shift right by a plain count (as Dolphin's interpreter has them); the RX and R forms go the other way. `mkdd_dsp_check --format 3` now plays 16-bit data exactly (same 0.9999 as the ADPCM).
+- **Not the DSP's, for the os agent:** without a controller the game falls silent 22 s in and stays so: no voice is started and no stream opened after the loading scene, although frames and sub-frames go on and the THP library has announced itself. With the scripted presses the same build goes on to menus and music. So the opening movie's sound never starts, and nothing on the sound side is waiting.
+
+### Cost in the game
+
+The microcode's time against the sound's time, same PC (busy with other builds while this ran, so these are on the high side): 1.0% with no voice (the four effect lines and the buses), 3.3% around 14 voices, 4.9% around 23, 6.6% at 32 on average and 62 at most. The game's own thread worked 0.7 to 1.3 ms a retrace in the quiet scenes, of which the microcode is 0.15 to 0.25 ms: a fifth of very little.
+
+### The DSP on its own thread: tried, not the default
+
+`MKDD_DSP_THREAD=1` runs the microcode on a host thread (`dsp.cpp`, "the DSP's thread"). The game's side then only posts: a mail or the interrupt kicks the worker; a read of either mailbox's "waiting" bit first lets the worker get as far as it can, so the game's busy-waits still end on their first poll; the microcode looks at the interrupt and at a stop request on every backward jump, and its interrupt to the CPU is raised at the game thread's next safe point. The core's shared state is atomic for this and the lifted code is the same in both modes (`mkdd_dsp_check`'s regression set is bit-identical).
+
+It is off by default because it only pays when a core is free. With one free, the game thread's work in the quiet scenes fell from 1.25 to 0.68 ms a retrace. On the same PC with every core taken by builds, the worker was not scheduled when kicked: it was woken from sleep 2,000 times in 5 s, the game's thread spent 4.9 of those 5 s waiting for it, and only 100 to 120 of 286 frames were done. A protocol of some sixty short exchanges a frame between two threads is at the scheduler's mercy; run in place it costs 1 to 7% of one desktop core and cannot fall behind. Whether it pays on a Raspberry Pi 4 has to be measured there, with the game's and the renderer's threads running.
 
 ## The hardware under it (`dsp.cpp`)
 
@@ -193,7 +216,7 @@ What would buy more, if the Pi needs it: hand-written replacements for the ADPCM
 
   The second WAV is the same wave from `dsp_waves.py`'s own decoder; the two correlate at 0.9999 (the difference is the resampler's filter), the voice ends in the frame its length says, and the ARAM reads equal the wave's bytes.
 
-Not tested yet: `dsp.cpp`'s registers under the lifted JAudio (the game does not reach its sound initialisation yet), task switching through `0x80B5`, the effect lines, streams.
+Not exercised by anything yet: task switching through `0x80B5`, 2-bit ADPCM, the main-memory sources 32/33, the oscillators in the game, the FIR, biquad and one-pole filters with real parameters.
 
 ### What to listen for
 
