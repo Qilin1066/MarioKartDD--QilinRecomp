@@ -35,7 +35,9 @@ void run_after(uint64_t ticks, std::function<void(rt::Cpu&)> work) {
         g_source = true;
         add_timer_source(poll, deadline);
     }
-    g_due.emplace(std::pair{time_base() + ticks, g_sequence++}, std::move(work));
+    const uint64_t at = time_base() + ticks;
+    g_due.emplace(std::pair{at, g_sequence++}, std::move(work));
+    note_deadline(at);  // the poll clock: a lifted loop running when it comes
 }
 
 uint64_t ticks_from_us(uint64_t us) { return us * kTimerHz / 1000000; }
