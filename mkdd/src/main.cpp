@@ -715,6 +715,9 @@ int main(int argc, char** argv) {
         // between: the frames as they come, with no tick of latency added.)
         const bool between = mkdd::interp::between_frames() && (mkdd::interp::unlimited() || present_hz > 60.5);
         if (between != was_between) {
+            renderer->discard_held();
+            arrived_ns = next_present_ns = 0;
+            vi_pending = false;
             rt::log(between ? "frame rate: pictures between the game's frames (%s)" : "frame rate: the game's own%s",
                     !between ? "" : mkdd::interp::unlimited() ? "unlimited, no vsync" : "the display's refresh rate");
             was_between = between;
@@ -951,3 +954,5 @@ int main(int argc, char** argv) {
         }
     }
 }
+
+

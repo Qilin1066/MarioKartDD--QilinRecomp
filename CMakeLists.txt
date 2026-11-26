@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(MarioKartDDQilinRecomp VERSION 0.1.0 LANGUAGES C CXX)
+project(MarioKartDDQilinRecomp VERSION 0.1.1 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -298,6 +298,12 @@ if(QILIN_HOST)
 endif()
 
 # ---- Tests (no game files needed) ----
+add_executable(mkdd_interp_test mkdd/tests/interp_test.cpp mkdd/src/interp.cpp mkdd/src/hud.cpp)
+target_include_directories(mkdd_interp_test PRIVATE mkdd/src host/include runtime/include)
+target_link_libraries(mkdd_interp_test PRIVATE qilin_warnings)
+qilin_tool(mkdd_interp_test)
+add_test(NAME mkdd_interp_test COMMAND mkdd_interp_test)
+
 add_executable(qilin_tests recomp/tests/tests.cpp)
 target_link_libraries(qilin_tests PRIVATE qilin_core qilin_rt qilin_warnings)
 qilin_tool(qilin_tests)
@@ -674,3 +680,5 @@ if(QILIN_POWERSHELL)
     add_test(NAME mkdd_powershell_syntax_test COMMAND ${QILIN_POWERSHELL} -NoProfile -ExecutionPolicy Bypass
              -File ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/powershell_syntax_test.ps1)
 endif()
+
+

@@ -4,6 +4,20 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-26
+
+### Fixed
+
+- Widescreen HUD placement preserves each render state's interpolation metadata. Repositioning the HUD no longer silently disables pictures between frames.
+- Split-screen matrix pairing counts matching objects separately for each camera. An object appearing or disappearing in one player's view no longer disrupts the other players' interpolation.
+- Returning to original frame rate, switching interpolation modes or changing anisotropic filtering clears held frames and replay descriptors after their GPU work finishes. Resuming interpolation starts with consecutive frames rather than blending towards an old race picture or using destroyed samplers.
+- The current camera widening is published atomically for the renderer, removing a data race while changing aspect ratio.
+
+### Tests
+
+- Added GPU-free integration checks for widescreen HUD placement with interpolation, and independent visibility changes in two- and four-player frames.
+- Added rendered regression checks for switching frame-rate modes, resuming interpolation and changing filtering with a replay in flight.
+
 ## [0.1.0] - 2026-11-26
 
 The first release. The project was started from PunchOutWii--QilinRecomp v0.22.0 and converted to the GameCube and to Mario Kart: Double Dash!! (USA, `GM4E01`, revision 0). The game boots and plays in headless and offscreen runs with scripted input: the menus, a whole 50cc Mushroom Cup, time trials with ghosts, split screen, co-op, Versus and Battle, with sound and memory cards. None of it has yet been seen in a real window, heard, or played with a real controller. Built and tested on Windows x64 with MSVC; Linux, macOS and ARM64 are compile-checked with Clang only, and CI has not run yet.
@@ -53,3 +67,5 @@ The first release. The project was started from PunchOutWii--QilinRecomp v0.22.0
 ### Removed
 
 - The Wii Remote: its sideways mapping, its pointer (mouse and right stick) and its speaker; the Wii's console settings (language list, widescreen); the migration of settings and data folders from older versions of the Wii project.
+
+

@@ -90,7 +90,7 @@ private:
     void pair_textures(const gx::Frame& prev, const gx::Frame& cur);
     struct Key {
         uint64_t key;  // tag and id
-        uint32_t slot, index;
+        uint32_t slot, view, index;
     };
     struct Pose {  // a matrix as rotation (a quaternion), scale and translation
         float q[4], s[3], t[3];
@@ -132,3 +132,5 @@ private:
 void blend_matrix(const float a[12], const float b[12], float t, float out[12]);
 
 }  // namespace mkdd::interp
+
+

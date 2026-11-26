@@ -52,6 +52,7 @@ constexpr float kOriginal = 4.0f / 3.0f;  // the shape the unwidened frame is sh
 std::atomic<float> g_wanted{1.0f};  // the settings' (main thread)
 std::atomic<float> g_shown{1.0f};   // the newest finished frame's
 float g_widening = 1.0f;            // what the getters give and the cameras hold (the game's thread)
+std::atomic<float> g_current{1.0f};  // the same value published for the renderer's thread
 
 float peekf(uint32_t a) { return std::bit_cast<float>(rt::peek32(a)); }
 void pokef(uint32_t a, float f) { rt::poke32(a, std::bit_cast<uint32_t>(f)); }
@@ -102,7 +103,7 @@ void set_aspect(float aspect, Hud hud) {
 float shown_aspect() { return kOriginal * g_shown.load(std::memory_order_relaxed); }
 
 bool in_race() { return rt::peek32(kRaceMgr) != 0; }
-float widening() { return g_widening; }
+float widening() { return g_current.load(std::memory_order_relaxed); }
 
 float end_frame() {
     const bool race = in_race();
@@ -111,6 +112,7 @@ float end_frame() {
     if (const float wanted = g_wanted.load(std::memory_order_relaxed); wanted != g_widening) {
         if (race) rescale_cameras(wanted / g_widening);
         g_widening = wanted;
+        g_current.store(wanted, std::memory_order_relaxed);
     }
     return drawn;
 }
@@ -127,3 +129,5 @@ void draw_every_tick() {
 std::span<const rt::Provided> replacements() { return kReplacements; }
 
 }  // namespace mkdd::enhance
+
+

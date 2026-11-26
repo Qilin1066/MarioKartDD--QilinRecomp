@@ -297,14 +297,15 @@ bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
     }
     if (!any) return false;
     if (g_probe) ++g_probe->blendable;
-    // Loads pair by tag and slot: the n-th of a kind in each frame, where both have as many.
+    // Pair within each view: one player's visibility must not change another
+    // player's counts or shift its n-th load to a different object.
     const auto keys_of = [](const gx::Frame& f, std::vector<Key>& keys) {
         keys.clear();
         for (size_t i = 0; i < f.loads.size(); ++i)
             if (f.loads[i].tag != 0 && f.loads[i].view != gx::kNoView)
-                keys.push_back({(uint64_t(f.loads[i].tag) << 32) | f.loads[i].id, f.loads[i].slot, uint32_t(i)});
+                keys.push_back({(uint64_t(f.loads[i].tag) << 32) | f.loads[i].id, f.loads[i].slot, f.loads[i].view, uint32_t(i)});
         std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
-            return a.key != b.key ? a.key < b.key : a.slot != b.slot ? a.slot < b.slot : a.index < b.index;
+            return a.key != b.key ? a.key < b.key : a.slot != b.slot ? a.slot < b.slot : a.view != b.view ? a.view < b.view : a.index < b.index;
         });
     };
     keys_of(prev, prev_keys_), keys_of(cur, cur_keys_);
@@ -312,8 +313,9 @@ bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
     for (size_t c = 0; c < cur_keys_.size();) {
         const uint64_t key = cur_keys_[c].key;
         const uint32_t slot = cur_keys_[c].slot;
-        const auto before = [&](const Key& k) { return k.key != key ? k.key < key : k.slot < slot; };
-        const auto same_kind = [&](const Key& k) { return k.key == key && k.slot == slot; };
+        const uint32_t view = cur_keys_[c].view;
+        const auto before = [&](const Key& k) { return k.key != key ? k.key < key : k.slot != slot ? k.slot < slot : k.view < view; };
+        const auto same_kind = [&](const Key& k) { return k.key == key && k.slot == slot && k.view == view; };
         size_t c_end = c;
         while (c_end < cur_keys_.size() && same_kind(cur_keys_[c_end])) ++c_end;
         while (p < prev_keys_.size() && before(prev_keys_[p])) ++p;
@@ -543,3 +545,5 @@ double phase(uint64_t arrived_ns, uint64_t now_ns) {
 }
 
 }  // namespace mkdd::interp
+
+

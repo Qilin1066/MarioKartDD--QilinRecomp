@@ -451,6 +451,7 @@ struct Renderer::Impl {
         const float a = std::clamp(float(level), 1.0f, gpu.max_anisotropy);
         if (a == anisotropy) return;
         vkDeviceWaitIdle(gpu.device);  // the samplers may be in use
+        discard_held();  // replay descriptor sets still name the old samplers
         for (auto& [k, v] : samplers) vkDestroySampler(gpu.device, v, nullptr);
         samplers.clear();
         anisotropy = a;
@@ -1756,6 +1757,7 @@ struct Renderer::Impl {
     }
 
     void render(gx::Frame& f) {
+        if (!keep_replay) discard_held();  // returning to real frames ends the old interpolation history
         apply_scale();
         collect_specialized();
         poll_readbacks();  // the last frame's, if the GPU is done with it
@@ -2081,6 +2083,21 @@ struct Renderer::Impl {
 
     // ---- pictures between frames (interp.hpp)
 
+    void discard_held() {
+        // Replay commands read the held frame's slot buffers and descriptors.
+        // Finish them before an ordinary frame can reuse either slot.
+        if (held) {
+            const VkFence fences[2] = {between[0].fence, between[1].fence};
+            check(vkWaitForFences(gpu.device, 2, fences, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+        }
+        if (held_prev) gx::recycle_frame(std::move(held_prev));
+        if (held) gx::recycle_frame(std::move(held));
+        replay.clear();
+        can_blend = can_replay = false;
+        blender = {};
+        why_not = -1;
+    }
+
     // The frame just drawn is kept, with the one before it, for render_between.
     void render_held(std::unique_ptr<gx::Frame> f) {
         // MKDD_INTERP_LOG: what the pictures between cost, every 600 frames (with interp.cpp's lines in its file).
@@ -2361,6 +2378,7 @@ void Renderer::render_held(std::unique_ptr<gx::Frame> frame) {
 const host::Image* Renderer::render_between(float phase) { return impl_->render_between(phase); }
 void Renderer::take_real_copy() { impl_->take_real_copy(); }
 const gx::Frame* Renderer::held() const { return impl_->held.get(); }
+void Renderer::discard_held() { impl_->discard_held(); }
 const interp::Blender::Counts& Renderer::pairing() const { return impl_->blender.counts(); }
 double Renderer::between_gpu_ms() const {
     return impl_->between_gpu_timed ? double(impl_->between_gpu_ns) / 1e6 / double(impl_->between_gpu_timed) : 0.0;
@@ -2383,3 +2401,5 @@ const host::Image* Renderer::xfb(uint32_t address) const {
 }
 
 }  // namespace mkdd
+
+

@@ -38,6 +38,8 @@ public:
     // The frame held (the newer), what the pairing of its matrices with the frame before's
     // found, and the GPU's time for a picture between, averaged over those timed so far.
     const gx::Frame* held() const;
+    // A frame-rate mode or sampler change ends replay history; waits for its GPU work.
+    void discard_held();
     const interp::Blender::Counts& pairing() const;
     double between_gpu_ms() const;
     // The EFB's scale from the next frame drawn (1 to 8): it is made again at
@@ -83,3 +85,5 @@ private:
 };
 
 }  // namespace mkdd
+
+

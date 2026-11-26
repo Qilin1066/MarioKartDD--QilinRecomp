@@ -184,9 +184,18 @@ void place(gx::Frame& f) {
         for (unsigned c = 0; c < 4; ++c) row[c] *= k;
         row[3] += anchor * (1 - k);
         f.states.push(placed);
+        // A placed HUD state is still the same recorded state, with only its
+        // projection changed. Keep the parallel metadata complete: the blender
+        // refuses a frame with missing state information.
+        if (d.state < f.state_info.size()) {
+            const gx::StateInfo info = f.state_info[d.state];
+            f.state_info.push_back(info);
+        }
         made.push_back({d.state, to, anchor});
         d.state = to;
     }
 }
 
 }  // namespace mkdd::hud
+
+

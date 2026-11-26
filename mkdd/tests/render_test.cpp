@@ -1177,6 +1177,36 @@ void between_frames(Target& t, Stream& st) {
     check(t.between(0.5f).empty() && t.renderer.pairing().cuts == 1, "a camera cut gives no picture between");
 }
 
+// Leaving interpolation or changing filtering invalidates recorded GPU resources
+// and old frame history, even if no replacement frame is available yet.
+void replay_changes(Target& t, Stream& st, bool anisotropy) {
+    const auto frame = [&](float x, bool held) {
+        stream_begin(st);
+        perspective(st);
+        object(st, camera_at(0), model_at(x, 0), 0x80100000u);
+        st.end_frame();
+        st.send();
+        t.shown(held);
+    };
+    frame(0, true), frame(0.2f, true);
+    check(!t.between(0.5f).empty(), "replay history starts with consecutive frames");
+    frame(0.4f, false);
+    check(!t.renderer.held() && t.between(0.5f).empty(), "an ordinary frame discards old replay resources");
+    frame(0.6f, true);
+    check(t.between(0.5f).empty(), "resuming interpolation never blends across a gap in history");
+    frame(0.8f, true);
+    check(!t.between(0.5f).empty(), "the next consecutive frame resumes interpolation");
+    t.renderer.discard_held();
+    check(!t.renderer.held() && t.between(0.5f).empty(), "a mode change clears replay before a new frame arrives");
+    if (anisotropy) {
+        frame(1.0f, true), frame(1.2f, true);
+        check(!t.between(0.5f).empty(), "replay is ready before changing filtering");
+        t.renderer.set_anisotropy(2);
+        check(!t.renderer.held() && t.between(0.5f).empty(), "changing filtering discards descriptors using destroyed samplers");
+        t.renderer.set_anisotropy(1);
+    }
+}
+
 // Four views of one model (one tag, drawn four times): each view's camera is
 // blended by itself, and the one that cuts shows the newer frame's view.
 void between_four_views(Target& t, Stream& st) {
@@ -1821,6 +1851,7 @@ int main(int argc, char** argv) {
         z_before_alpha_test(t, st);
         address_bits(t, st);
         between_frames(t, st);
+        replay_changes(t, st, gpu.max_anisotropy >= 2.0f);
         between_four_views(t, st);
         between_textures(t, st);
         between_real_copy(t, st);
@@ -1857,3 +1888,5 @@ int main(int argc, char** argv) {
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");
     return g_failures ? 1 : 0;
 }
+
+
