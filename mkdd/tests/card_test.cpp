@@ -3,6 +3,7 @@
 // (results, free blocks, permissions), the time calls take, the order
 // asynchronous calls finish in, safe writes and the save history.
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -205,6 +206,47 @@ int main() {
     check(call("CARDCheckExAsync", 1, out, cb) == 0 && callbacks.empty(), "a check with nothing to repair still answers by callback");
     advance(cpu, 1);
     check(callbacks.size() == 1 && callbacks[0].a0 == 1 && callbacks[0].a1 == 0 && rt::peek32(out) == 0, "at the next chance");
+
+    // ---- a card pulled out while it writes: NOCARD, and the file as it was
+    const fs::path ghost = folder / "card-b" / "GM4E01-ghost.gci", ghost_out = folder / "card-b-out" / "GM4E01-ghost.gci";
+    const std::string ghost_before = bytes(ghost);
+    const size_t history_before = mkdd::save_backups(folder).size();
+    std::memset(rt::guest_ptr(buffer), 0x44, 0x2000);
+    callbacks.clear();
+    t = now;
+    check(call("CARDWriteAsync", info2, buffer, 0x2000, 0, cb) == 0, "a write to card B begins");
+    advance(cpu, ms(100));
+    fs::rename(folder / "card-b", folder / "card-b-out");
+    advance(cpu, ms(300));
+    check(callbacks.size() == 2 && callbacks[0] == Callback{cb, 1, 0xFFFFFFFDu, t + ms(300)} &&
+              callbacks[1] == Callback{detach_cb, 1, 0xFFFFFFFDu, t + ms(300)},
+          "pulled out 100 ms into it: the write's callback says NOCARD, then the detach callback");
+    check(bytes(ghost_out) == ghost_before && !fs::exists(ghost_out.string() + ".tmp") && mkdd::save_backups(folder).size() == history_before,
+          "the card holds the file as it was, and the history has nothing new");
+    fs::rename(folder / "card-b-out", folder / "card-b");
+    check(call("CARDFreeBlocks", 1, out, out + 4) == -3 && call("CARDMount", 1, buffer, detach_cb) == 0 && call("CARDFastOpen", 1, 0, info2) == 0 &&
+              call("CARDRead", info2, buffer2, 0x200, 0) == 0 && *rt::guest_ptr(buffer2) == 0xFF,
+          "put back, the card must be mounted again; the file reads as before the write");
+#if defined(_WIN32)
+    _putenv_s("MKDD_CARD_PULL_AT", "1");
+#else
+    setenv("MKDD_CARD_PULL_AT", "1", 1);
+#endif
+    call("CARDInit");  // (the hook counts the writes from here)
+    const fs::path other = folder / "card-a" / "GM4E01-Other.gci", other_out = folder / "card-a.pulled" / "GM4E01-Other.gci";
+    const std::string other_before = bytes(other);
+    std::memset(rt::guest_ptr(buffer), 0x55, 0x2000);
+    callbacks.clear();
+    t = now;
+    check(call("CARDWrite", info, buffer, 0x2000, 0x2000) == -3 && now - t == ms(300),
+          "MKDD_CARD_PULL_AT=1: card A pulled out halfway through a synchronous write, which says NOCARD when its time is over");
+    check(bytes(other_out) == other_before && !fs::exists(other_out.string() + ".tmp") && callbacks.empty() &&
+              call("CARDProbeEx", 0, out, out + 4) == -3,
+          "the file is as it was; no detach callback (none was given); the slot is empty");
+    fs::rename(folder / "card-a.pulled", folder / "card-a");
+    check(call("CARDMount", 0, buffer, 0) == 0 && call("CARDOpen", 0, name2, info) == 0 && call("CARDRead", info, buffer2, 0x2000, 0x2000) == 0 &&
+              std::memcmp(rt::guest_ptr(buffer2), other_before.data() + 64 + 0x2000, 0x2000) == 0,
+          "put back and mounted: the old contents");
 
     // ---- a card pulled out; a card formatted
     callbacks.clear();

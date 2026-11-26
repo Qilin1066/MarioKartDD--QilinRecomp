@@ -24,13 +24,18 @@
 // The API is the SDK's, results and all. A call that would use the card
 // takes the time a card takes (rough figures, below): the synchronous forms,
 // which are what the game uses from its own card thread, sleep the calling
-// thread; the asynchronous ones return and call back as an interrupt. The
-// host file is read or written when the call is made.
+// thread; the asynchronous ones return and call back as an interrupt. A read
+// fills the guest's buffer when the call is made; a change reaches the host
+// file when the card's time is over, and only if the card is still in: one
+// pulled out meanwhile ends the call with NOCARD, as the SDK's does, and the
+// files stay as they were (a real card would hold the sectors written so far).
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -265,14 +270,45 @@ bool rewrite(Entry& f, const std::array<uint8_t, kEntrySize>& entry, const uint8
 }
 
 // ---- how a call ends: at once with `result` (a refusal, or something that
-// needs no transfer), or after the card has worked for `ticks`.
+// needs no transfer), or after the card has worked for `ticks`; then, with
+// the card still in, `commit` makes the change on the host and gives the
+// result.
 struct Outcome {
     int32_t result;
     uint64_t ticks = 0;
     bool transfer = false;
+    std::function<int32_t()> commit;
 };
 Outcome refuse(int32_t result) { return {result}; }
 Outcome after(uint64_t ticks, int32_t result = kReady) { return {result, ticks, true}; }
+Outcome after(uint64_t ticks, std::function<int32_t()> commit) { return {kReady, ticks, true, std::move(commit)}; }
+// The file a change was asked of, if its card has stayed in since.
+Entry* entry_at(uint32_t slot, uint32_t no) {
+    auto& f = g_cards[slot].dir[no];
+    return g_cards[slot].mounted && f ? &*f : nullptr;
+}
+
+// Development (MKDD_CARD_PULL_AT=<n>[:<seconds>]): the card is pulled out
+// halfway through the nth CARDWrite of the run, its folder renamed to
+// card-a.pulled (or card-b.pulled) so that what it holds can be looked at;
+// with seconds, it goes back in (renamed back) that long after.
+uint32_t g_pull_at = 0, g_writes = 0;
+double g_pulled_for = 0;
+void pull_card(uint32_t slot) {
+    fs::path to = card_folder(slot);
+    to += ".pulled";
+    std::error_code ec;
+    fs::remove_all(to, ec);
+    fs::rename(card_folder(slot), to, ec);
+    rt::log("card: slot %c pulled out mid-write (MKDD_CARD_PULL_AT): it is now %s%s", 'A' + slot, to.string().c_str(),
+            ec ? (": " + ec.message()).c_str() : "");
+    if (ec || g_pulled_for <= 0) return;
+    run_after(ticks_from_us(static_cast<uint64_t>(g_pulled_for * 1e6)), [slot, to](Cpu&) {
+        std::error_code back;
+        fs::rename(to, card_folder(slot), back);
+        rt::log("card: slot %c put back in%s", 'A' + slot, back ? (": " + back.message()).c_str() : "");
+    });
+}
 
 void detach(uint32_t slot) {
     Card& k = g_cards[slot];
@@ -367,19 +403,21 @@ Outcome do_format(uint32_t slot) {
     if (k.mounted && !card_present(slot)) detach(slot);
     if (!k.mounted) return refuse(kNoCard);
     if (k.busy) return refuse(kBusy);
-    int32_t result = kReady;
-    for (auto& f : k.dir) {
-        if (!f) continue;
-        std::error_code ec;
-        f->kept = false;  // what it holds now is what is lost
-        if (!keep(*f) || !fs::remove(f->host, ec) || ec) {
-            rt::log("saves: %s couldn't be removed to format the card: it stays", f->host.string().c_str());
-            result = kIoError;
-            continue;
+    return after(write_ticks(5), [slot] {
+        int32_t result = kReady;
+        for (auto& f : g_cards[slot].dir) {
+            if (!f) continue;
+            std::error_code ec;
+            f->kept = false;  // what it holds now is what is lost
+            if (!keep(*f) || !fs::remove(f->host, ec) || ec) {
+                rt::log("saves: %s couldn't be removed to format the card: it stays", f->host.string().c_str());
+                result = kIoError;
+                continue;
+            }
+            f.reset();
         }
-        f.reset();
-    }
-    return after(write_ticks(5), result);
+        return result;
+    });
 }
 Outcome do_open(uint32_t slot, const std::string& name, uint32_t info) {
     Card* k = nullptr;
@@ -436,16 +474,19 @@ Outcome do_create(Cpu& c, uint32_t slot, const std::string& name, uint32_t size,
     f.host = folder / (base + kSuffix);
     for (unsigned n = 2; fs::exists(f.host, ec); ++n) f.host = folder / (base + "~" + std::to_string(n) + kSuffix);
     f.kept = true;  // nothing before it to keep
-    std::vector<uint8_t> image(kEntrySize + size, 0xFF);  // its blocks as a formatted card's: erased
-    std::memcpy(image.data(), f.e.data(), kEntrySize);
-    if (!replace_file(f.host, image)) {
-        rt::log("saves: %s couldn't be created", f.host.string().c_str());
-        return after(write_ticks(1), kIoError);
-    }
     const auto no = static_cast<uint32_t>(free - k->dir.begin());
     fill_info(info, slot, no, f);
-    *free = std::move(f);
-    return after(write_ticks(2));  // the block map, then the directory
+    return after(write_ticks(2), [slot, no, size, f = std::move(f)] {  // the block map, then the directory
+        if (!g_cards[slot].mounted) return kNoCard;
+        std::vector<uint8_t> image(kEntrySize + size, 0xFF);  // its blocks as a formatted card's: erased
+        std::memcpy(image.data(), f.e.data(), kEntrySize);
+        if (!replace_file(f.host, image)) {
+            rt::log("saves: %s couldn't be created", f.host.string().c_str());
+            return kIoError;
+        }
+        g_cards[slot].dir[no] = f;
+        return kReady;
+    });
 }
 // CARDRead works in 512-byte segments, CARDWrite in whole sectors.
 Outcome do_read(uint32_t info, uint32_t buffer, uint32_t length, uint32_t offset) {
@@ -476,24 +517,34 @@ Outcome do_write(Cpu& c, uint32_t info, uint32_t buffer, uint32_t length, uint32
     if (size <= offset || size < uint64_t{offset} + length) return refuse(kLimit);
     if (const int32_t r = writable(*f); r < 0) return refuse(r);
     const uint64_t ticks = write_ticks(length / kCardSectorSize + 1);  // its sectors, then the directory (the time)
-    Entry stamped;
-    stamped.e = f->e;
-    put32(stamped, kTime, now_seconds(c));
-    if (!keep(*f) || !rewrite(*f, stamped.e, rt::guest_ptr(buffer), offset, length)) return after(ticks, kIoError);
+    const uint32_t slot = rt::peek32(info + kInfoChan), no = rt::peek32(info + kInfoFile), time = now_seconds(c);
+    std::vector<uint8_t> data(rt::guest_ptr(buffer), rt::guest_ptr(buffer) + length);
     rt::poke32(info + kInfoOffset, offset + length);
-    return after(ticks);
+    if (g_pull_at && ++g_writes == g_pull_at) run_after(ticks / 2, [slot](Cpu&) { pull_card(slot); });
+    return after(ticks, [slot, no, offset, time, data = std::move(data)] {
+        Entry* f = entry_at(slot, no);
+        if (!f) return kNoCard;
+        Entry stamped;
+        stamped.e = f->e;
+        put32(stamped, kTime, time);
+        return keep(*f) && rewrite(*f, stamped.e, data.data(), offset, static_cast<uint32_t>(data.size())) ? kReady : kIoError;
+    });
 }
 Outcome do_delete(Card& k, uint32_t no) {
-    Entry& f = *k.dir[no];
-    if (const int32_t r = writable(f); r < 0) return refuse(r);
-    f.kept = false;
-    std::error_code ec;
-    if (!keep(f) || !fs::remove(f.host, ec) || ec) {
-        rt::log("saves: %s couldn't be deleted", f.host.string().c_str());
-        return after(write_ticks(2), kIoError);
-    }
-    k.dir[no].reset();
-    return after(write_ticks(2));  // the directory, then the block map
+    if (const int32_t r = writable(*k.dir[no]); r < 0) return refuse(r);
+    const auto slot = static_cast<uint32_t>(&k - g_cards.data());
+    return after(write_ticks(2), [slot, no] {  // the directory, then the block map
+        Entry* f = entry_at(slot, no);
+        if (!f) return kNoCard;
+        f->kept = false;
+        std::error_code ec;
+        if (!keep(*f) || !fs::remove(f->host, ec) || ec) {
+            rt::log("saves: %s couldn't be deleted", f->host.string().c_str());
+            return kIoError;
+        }
+        g_cards[slot].dir[no].reset();
+        return kReady;
+    });
 }
 Outcome do_delete_name(uint32_t slot, const std::string& name) {
     Card* k = nullptr;
@@ -588,8 +639,11 @@ Outcome do_set_status(Cpu& c, uint32_t slot, uint32_t no, uint32_t stat) {
     write_offsets(stat);
     if (icon == 0xFFFFFFFFu) put16(next, kIconSpeed, static_cast<uint16_t>((get16(next, kIconSpeed) & ~3u) | 1));
     put32(next, kTime, now_seconds(c));
-    if (!keep(f) || !rewrite(f, next.e)) return after(write_ticks(1), kIoError);
-    return after(write_ticks(1));
+    return after(write_ticks(1), [slot, no, e = next.e] {
+        Entry* f = entry_at(slot, no);
+        if (!f) return kNoCard;
+        return keep(*f) && rewrite(*f, e) ? kReady : kIoError;
+    });
 }
 Outcome do_rename(Cpu& c, uint32_t slot, uint32_t old_at, uint32_t new_at) {
     const uint8_t o = *rt::guest_ptr(old_at), n = *rt::guest_ptr(new_at);
@@ -607,53 +661,68 @@ Outcome do_rename(Cpu& c, uint32_t slot, uint32_t old_at, uint32_t new_at) {
     std::memset(next.e.data() + kName, 0, kNameLength);
     std::memcpy(next.e.data() + kName, new_name.data(), new_name.size());
     put32(next, kTime, now_seconds(c));
-    if (!rewrite(f, next.e)) return after(write_ticks(1), kIoError);
-    // The host file's name follows; it is only a label, so failing to change it loses nothing.
-    const fs::path to = card_folder(slot) / (host_name(f) + kSuffix);
-    std::error_code ec;
-    if (!fs::exists(to, ec)) {
-        fs::rename(f.host, to, ec);
-        if (!ec) f.host = to;
-    }
-    return after(write_ticks(1));
+    return after(write_ticks(1), [slot, no = static_cast<uint32_t>(no), e = next.e] {
+        Entry* f = entry_at(slot, no);
+        if (!f) return kNoCard;
+        if (!rewrite(*f, e)) return kIoError;
+        // The host file's name follows; it is only a label, so failing to change it loses nothing.
+        const fs::path to = card_folder(slot) / (host_name(*f) + kSuffix);
+        std::error_code ec;
+        if (!fs::exists(to, ec)) {
+            fs::rename(f->host, to, ec);
+            if (!ec) f->host = to;
+        }
+        return kReady;
+    });
 }
 
 // ---- ending a call
+// A transfer's result once the card's time is over: NOCARD if it was pulled out
+// meanwhile (and the detach callback told), else the change made.
+int32_t settle(uint32_t slot, const Outcome& o) {
+    Card& k = g_cards[slot];
+    const bool present = card_present(slot);
+    if (k.mounted && !present) detach(slot);
+    if (!present || (o.commit && !k.mounted)) return kNoCard;
+    return o.commit ? o.commit() : o.result;
+}
 void finish(Cpu& c, uint32_t slot, const Outcome& o, const char* who) {
+    int32_t result = o.result;
+    if (o.transfer && o.ticks) {
+        if (in_interrupt()) rt::fatal(&c, "%s from an interrupt: it would wait for the card there for ever", who);
+        Card& k = g_cards[slot];
+        k.busy = true;
+        run_after(o.ticks, [slot](Cpu& cc) {
+            g_cards[slot].busy = false;
+            wake_all(cc, kWaitKey + slot);
+        });
+        while (k.busy) wait_on(c, kWaitKey + slot);
+    }
+    if (o.transfer) result = settle(slot, o);
     if (devices_log()) {
         // (The game probes both slots every frame: only a change of answer is worth a line.)
         static int32_t probed[kSlots] = {1, 1};
         const bool probe = std::strcmp(who, "CARDProbeEx") == 0 && slot < kSlots;
-        if (!probe || probed[slot] != o.result)
-            rt::log("card: %s (slot %u) = %d%s", who, slot, o.result, o.transfer && o.ticks ? ", after the card's time" : "");
-        if (probe) probed[slot] = o.result;
+        if (!probe || probed[slot] != result)
+            rt::log("card: %s (slot %u) = %d%s", who, slot, result, o.transfer && o.ticks ? ", after the card's time" : "");
+        if (probe) probed[slot] = result;
     }
-    if (!o.transfer || o.ticks == 0) {
-        c.r[3] = static_cast<uint32_t>(o.result);
-        return;
-    }
-    if (in_interrupt()) rt::fatal(&c, "%s from an interrupt: it would wait for the card there for ever", who);
-    Card& k = g_cards[slot];
-    k.busy = true;
-    run_after(o.ticks, [slot](Cpu& cc) {
-        g_cards[slot].busy = false;
-        wake_all(cc, kWaitKey + slot);
-    });
-    while (k.busy) wait_on(c, kWaitKey + slot);
-    c.r[3] = static_cast<uint32_t>(o.result);
+    c.r[3] = static_cast<uint32_t>(result);
 }
 // The asynchronous forms: a refusal is returned; otherwise READY, and the
 // result goes to callback(slot, result) when the card is done.
-void finish_async(Cpu& c, uint32_t slot, const Outcome& o, uint32_t callback) {
-    if (devices_log()) rt::log("card: an asynchronous call (slot %u) = %d%s", slot, o.result, o.transfer ? ", by callback" : "");
+void finish_async(Cpu& c, uint32_t slot, Outcome o, uint32_t callback) {
     if (!o.transfer) {
+        if (devices_log()) rt::log("card: an asynchronous call (slot %u) = %d", slot, o.result);
         c.r[3] = static_cast<uint32_t>(o.result);
         return;
     }
     g_cards[slot].busy = true;
-    const int32_t result = o.result;
-    run_after(o.ticks, [slot, result, callback](Cpu& cc) {
+    const uint64_t ticks = o.ticks;
+    run_after(ticks, [slot, o = std::move(o), callback](Cpu& cc) {
         g_cards[slot].busy = false;
+        const int32_t result = settle(slot, o);
+        if (devices_log()) rt::log("card: an asynchronous call (slot %u) = %d, by callback", slot, result);
         wake_all(cc, kWaitKey + slot);
         if (callback) guest_callback(cc, callback, slot, static_cast<uint32_t>(result));
     });
@@ -663,6 +732,11 @@ uint32_t info_slot(uint32_t info) { return std::min(rt::peek32(info + kInfoChan)
 
 // ---- the API
 void CARDInit(Cpu&) {
+    if (const char* n = std::getenv("MKDD_CARD_PULL_AT")) {
+        char* rest = nullptr;
+        g_pull_at = static_cast<uint32_t>(std::strtoul(n, &rest, 10)), g_writes = 0;
+        if (*rest == ':') g_pulled_for = std::strtod(rest + 1, nullptr);
+    }
     std::error_code ec;
     fs::create_directories(card_folder(0), ec);
     if (ec) rt::fatal(nullptr, "can't create the memory card's folder %s: %s", card_folder(0).string().c_str(), ec.message().c_str());
