@@ -947,7 +947,7 @@ std::unique_ptr<Frame> next_frame(unsigned timeout_ms) {
 }
 
 void state_changed() { g_dirty = true, g_parts = kPartAll, cp_changed(); }
-void matrix_loaded(uint32_t address, const uint32_t* words, uint32_t tag, const float* view, uint32_t id) {
+void matrix_loaded(uint32_t address, const uint32_t* words, uint32_t tag, const float* view, uint32_t id, uint8_t context) {
     Frame& f = *g_frame;
     if (view) {
         // The frame's views, each once: a handful (a camera a player, and whatever 2D is drawn under).
@@ -965,7 +965,7 @@ void matrix_loaded(uint32_t address, const uint32_t* words, uint32_t tag, const 
     }
     if (address % 12 != 0 || address / 12 >= kMatrixSlots) return;  // a texture matrix, or not a whole slot
     Load& l = f.loads.emplace_back();
-    l.tag = tag, l.id = id, l.slot = uint16_t(address / 12), l.view = g_view;
+    l.tag = tag, l.id = id, l.context = context, l.slot = uint16_t(address / 12), l.view = g_view;
     std::memcpy(l.mv, words, 48);
     g_slot_load[l.slot] = uint32_t(f.loads.size() - 1);
     g_dirty = true, g_parts |= kPartPos;  // (the same matrix again is still another load: the state's info changes)
@@ -1224,7 +1224,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     bind_textures(r, d);
     d.primitive = g_primitive_serial;
     if (const uint32_t row = r.cp[0x30] & 63; row % 3 == 0 && row / 3 < kMatrixSlots && g_slot_load[row / 3] != kNoLoad)
-        d.tag = f.loads[g_slot_load[row / 3]].tag;
+        d.tag = f.loads[g_slot_load[row / 3]].tag, d.context = f.loads[g_slot_load[row / 3]].context;
     f.packets.push_back({Packet::kDraw, uint32_t(f.draws.size())});
     g_join = {type <= 4, uint32_t(f.draws.size()), has, small};
     f.draws.push_back(d);

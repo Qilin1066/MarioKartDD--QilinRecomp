@@ -77,6 +77,21 @@ void GXLoadPosMtxImm(Cpu& c) {
     load_position_matrix(c, c.r[3], c.r[4] << 2, (c.lr & ~3u) | 2u, kViewMatrix, id);
 }
 
+// Race2D's marks that follow a kart: the lifted function runs as it is (the plan's `wrap`),
+// and the matrices loaded while it does carry the context (its J2D panes' loads: the caller a
+// tag holds is J2D's own, the same for every picture on the screen).
+template <uint32_t Address>
+void follows_world_wrapper(Cpu& c) {
+    const uint8_t before = set_matrix_context(gx::kContextFollowsWorld);
+    rt::wrapped(Address)(c);
+    set_matrix_context(before);
+}
+const rt::Provided kWrappers[] = {
+    {0x8014573Cu, "Race2D::drawPlayerMark", follows_world_wrapper<0x8014573Cu>},
+    {0x80146CF0u, "Race2D::drawAlarm", follows_world_wrapper<0x80146CF0u>},
+    {0x80147B1Cu, "Race2D::drawBomb", follows_world_wrapper<0x80147B1Cu>},
+};
+
 const rt::Provided kReplacements[] = {
     {0x80067A64u, "J3DFifoLoadPosMtxImm", J3DFifoLoadPosMtxImm},
     {0x800C20D8u, "GXLoadPosMtxImm", GXLoadPosMtxImm},
@@ -88,14 +103,17 @@ std::span<const rt::Provided> replacements() {
     g_installed.store(true, std::memory_order_relaxed);
     return kReplacements;
 }
+std::span<const rt::Provided> wrappers() { return kWrappers; }
 bool installed() { return g_installed.load(std::memory_order_relaxed); }
 
 // The lens flare (TFlareLine::draw, 8026F5B0, 0x350 bytes) loads its own
 // matrices: its two calls to GXLoadPosMtxImm return to 8026F668 and 8026F794.
 // The marks over karts, the alarm and the bomb marks (Race2D::drawPlayerMark,
 // drawAlarm, drawBomb) can't be told this way: they draw through J2DPicture,
-// so the caller the tag holds is J2D's own, the same for every picture.
+// so the caller the tag holds is J2D's own, the same for every picture. Their
+// wrappers above give their loads a context instead.
 bool follows_world(const gx::Frame&, const gx::Draw& d) {
+    if (gx::draw_context(d) == gx::kContextFollowsWorld) return true;
     const uint32_t tag = gx::draw_tag(d);
     return (tag & 3u) == 2u && tag - 0x8026F5B0u < 0x350u;
 }

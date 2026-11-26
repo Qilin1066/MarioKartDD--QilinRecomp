@@ -18,6 +18,7 @@
 
 #include "gpu.hpp"
 #include "gx.hpp"
+#include "hud.hpp"
 #include "hw.hpp"
 #include "os.hpp"
 #include "recorder.hpp"
@@ -548,8 +549,8 @@ struct Stream {
     void call(uint32_t physical, uint32_t bytes) { u8(0x40), u32(physical), u32(bytes); }
     // A position matrix load with its tag and view, as mtxtag.cpp's loaders make them.
     static inline uint64_t sent = 0;  // bytes given to the decoder so far, by every Stream
-    void tagged(uint32_t address, const float mv[12], uint32_t tag, const float view[12]) {
-        mkdd::tag_matrix_at(sent + b.size(), tag, view);
+    void tagged(uint32_t address, const float mv[12], uint32_t tag, const float view[12], uint8_t context = 0) {
+        mkdd::tag_matrix_at(sent + b.size(), tag, view, 0, context);
         u8(0x10), u32((11u << 16) | address);
         for (int i = 0; i < 12; ++i) u32(f2u(mv[i]));
     }
@@ -1180,6 +1181,31 @@ void address_bits(Target& t, Stream& st) {
     check(near(at(px, 320, 264), 0, 255, 0), "address registers with a bit above the address set still reach the palette and the texture: " + rgb(at(px, 320, 264)));
 }
 
+// The HUD on a picture shown wider than drawn for (16:9, the HUD at the edges): a flat part
+// near a side is squeezed towards that side, but one whose matrix was loaded under the
+// "follows the 3D scene" context (Race2D's marks over karts: mtxtag.cpp's wrappers) is squeezed
+// about its own middle and stays over what it marks.
+void marks_follow(Target& t, Stream& st) {
+    mkdd::hud::set_place(mkdd::hud::Place::edges);
+    mkdd::hud::set_widening_source([]() -> float { return 4.0f / 3.0f; });
+    mkdd::hud::set_follows_world(mkdd::mtxtag::follows_world);
+    const float one[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    stream_begin(st);
+    st.tagged(0, one, 0x80045686u, one);                               // a J2D picture's load, as any on the screen
+    stream_quad(st, 40, 100, 80, 140, -0.5f, 0xFFFFFFFFu);
+    st.tagged(0, one, 0x80045686u, one, gx::kContextFollowsWorld);     // the same under Race2D::drawPlayerMark
+    stream_quad(st, 40, 300, 80, 340, -0.5f, 0xFFFFFFFFu);
+    st.end_frame();
+    st.send();
+    const auto px = t.shown();
+    mkdd::hud::set_widening_source([]() -> float { return 1.0f; });
+    const Blob plain = blob(px, 0, 100, 200, 140), mark = blob(px, 0, 300, 200, 340);
+    check(std::abs(plain.x - 45.0) < 1.0 && plain.w == 30, "a flat part near the left of a 16:9 picture is squeezed towards the edge: x " +
+                                                               num(plain.x) + ", " + std::to_string(plain.w) + " wide (45, 30)");
+    check(std::abs(mark.x - 60.0) < 1.0 && mark.w == 30, "a mark that follows a kart is squeezed where it is: x " + num(mark.x) + ", " +
+                                                             std::to_string(mark.w) + " wide (60, 30)");
+}
+
 // mkdd_render_test --bench [players] [frames] [vertices a strip] [pictures between]: what such a frame costs to decode and record,
 // and to draw (the renderer's own time on the CPU, and the GPU's where it has timestamps).
 int bench(host::Gpu& gpu, unsigned players, unsigned frames, unsigned strip, unsigned pictures) {
@@ -1315,6 +1341,7 @@ int main(int argc, char** argv) {
         between_frames(t, st);
         between_four_views(t, st);
         widened(t, st);
+        marks_follow(t, st);
         stream_begin(st), st.end_frame(), st.send();
         t.shown();
     }

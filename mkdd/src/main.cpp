@@ -364,6 +364,7 @@ int main(int argc, char** argv) {
     rt::provide(mkdd::exi_replacements());
     rt::provide(mkdd::ar_replacements());
     rt::provide(mkdd::enhance::replacements());
+    rt::provide(mkdd::mtxtag::wrappers());  // Race2D's marks over karts, flagged for the HUD's placing
     rt::provide(mkdd::mtxtag::replacements());  // the tagged matrix loaders: pictures between frames (interp.hpp)
     mkdd::hud::set_follows_world(mkdd::mtxtag::follows_world);
     mkdd::init_hardware();

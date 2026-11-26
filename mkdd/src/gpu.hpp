@@ -32,7 +32,9 @@ uint64_t fifo_wait_ns();
 void load_position_matrix(qilin::rt::Cpu& c, uint32_t matrix, uint32_t xf_address, uint32_t tag, uint32_t view, uint32_t id = 0);
 // The same tag for the tests, which write their own bytes: for the XF load that starts
 // `stream_offset` bytes into everything given to decode_commands so far.
-void tag_matrix_at(uint64_t stream_offset, uint32_t tag, const float view[12], uint32_t id = 0);
+void tag_matrix_at(uint64_t stream_offset, uint32_t tag, const float view[12], uint32_t id = 0, uint8_t context = 0);
+// The context (gx.hpp's kContext...) the matrices loaded from now on carry; returns the one before.
+uint8_t set_matrix_context(uint8_t context);
 // Commands given straight to the decoder on the calling thread, as the GPU
 // thread gives it the pipe's bursts (the tests and their bench: no registers
 // mapped, no GPU thread; a command may be split between calls).

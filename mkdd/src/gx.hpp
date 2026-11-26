@@ -170,11 +170,14 @@ struct Sampler {
 constexpr unsigned kMatrixSlots = 10;
 constexpr uint32_t kNoLoad = 0xFFFFFFFFu;
 constexpr uint16_t kNoView = 0xFFFFu;
+// A load's context: the game function it was made under, where a native wrapper says so.
+constexpr uint8_t kContextNone = 0, kContextFollowsWorld = 1;  // 1: a HUD mark that follows something in the 3D scene
 struct Load {
     uint32_t tag;
     // Which of the things one caller draws this is, where the loader can tell (mtxtag.cpp: a
     // particle's or a model's own address); 0 where it can't. Loads pair by tag, id and slot.
     uint32_t id;
+    uint8_t context;  // what was being drawn when it was loaded: kContext...
     uint16_t slot, view;  // view: index into the frame's views (kNoView: not known)
     float mv[12];         // the matrix loaded (model and view), three rows of four
 };
@@ -209,12 +212,15 @@ struct Draw {
     Sampler samplers[8];
     uint32_t primitive = 0;  // the decoder's serial number of the primitive it came from (MKDD_DFF's .prims)
     uint32_t tag = 0;        // who loaded the position matrix it draws with (Load::tag; of a joined draw, its first primitive's)
+    uint8_t context = 0;     // ... and under what (Load::context)
 };
 // Who loaded a draw's position matrix: a J3D shape packet's address, the
 // address GXLoadPosMtxImm was called from with bit 1 set (0x800C....2), an
 // indexed load's source address with bit 0 set, or 0 when not known (no tagged
 // loader in the build, or a matrix left from an earlier frame).
 inline uint32_t draw_tag(const Draw& d) { return d.tag; }
+// What its position matrix was loaded under (kContextNone, kContextFollowsWorld).
+inline uint8_t draw_context(const Draw& d) { return d.context; }
 
 // An EFB copy: to a texture in guest memory, or to an external frame buffer.
 struct Copy {
