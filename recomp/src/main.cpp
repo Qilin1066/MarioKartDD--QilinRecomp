@@ -58,7 +58,7 @@ int usage() {
                "  qilin coverage <main.dol> [--list]\n"
                "  qilin suspects <main.dol>\n"
                "  qilin polls   <main.dol>\n"
-               "  qilin lift    <main.dol> -o <dir> [--plan plan.tsv] [--files n] [--leaf-single]\n"
+               "  qilin lift    <main.dol> -o <dir> [--plan plan.tsv] [--files n] [--leaf-single] [--full-sync]\n"
                "  qilin --version\n");
     return 2;
 }
@@ -67,7 +67,7 @@ struct Args {
     std::string command, input;
     std::optional<std::string> out, json, plan;
     uint32_t base = 0, files = 0;
-    bool list = false, leaf_single = false;
+    bool list = false, leaf_single = false, full_sync = false;
 };
 
 uint32_t parse_u32(std::string_view s) {
@@ -98,6 +98,7 @@ Args parse_args(std::span<char*> argv) {
         else if (arg == "--files") a.files = parse_u32(value());
         else if (arg == "--list") a.list = true;
         else if (arg == "--leaf-single") a.leaf_single = true;
+        else if (arg == "--full-sync") a.full_sync = true;
         else if (arg.starts_with("-")) throw Failure{std::format("unknown option {}", arg)};
         else if (a.input.empty()) a.input = arg;
         else throw Failure{std::format("unexpected argument {}", arg)};
@@ -358,6 +359,18 @@ int cmd_lift(const Args& a) {
     std::string chunk, unlifted;
     std::map<std::string, size_t> reasons;
     size_t lifted = 0, stubs = 0, lifted_insns = 0, n = 0, files = 0, thunks = 0, dropped = 0, thunk_insns = 0, wrapped = 0;
+    // What each lifted function, with everything it calls, may touch of the Cpu: a call's
+    // write-backs and reads are cut down to that (lift.hpp, RegSet). Code the plan doesn't lift
+    // has no summary, which makes it, and whatever can reach it, "everything".
+    std::map<uint32_t, CallSummary> summaries;
+    if (!a.full_sync)
+        for (const auto& [start, f] : cfg.functions())
+            if (const PlanRange* r = plan_of(start); !r || r->plan == "lift") summaries[start] = summarize(lift_input(cfg, f));
+    const std::map<uint32_t, RegSet> effects = close_over_calls(summaries);
+    const auto callee_regs = [&effects](uint32_t callee) {
+        const auto it = effects.find(callee);
+        return it == effects.end() ? nullptr : &it->second;
+    };
     // A wrapped function is entered by calls only: a branch or a fall into it from another
     // function would reach the wrapper with that function's frame still up.
     for (const auto& [start, f] : cfg.functions()) {
@@ -381,6 +394,7 @@ int cmd_lift(const Args& a) {
         if (const PlanRange* r = plan_of(start); r && r->plan == "wrap") {
             // The address is the runtime's; the original is lifted beside the thunk, under its other name.
             LiftInput input = lift_input(cfg, f);
+            input.callee_regs = callee_regs;
             input.name = fn_name(start) + "_wrapped";
             const Lifted l = lift(input);
             if (!l.ok) throw Failure{std::format("can't wrap {:08X}: {} at {:08X}", start, l.why, l.why_at)};
@@ -405,6 +419,7 @@ int cmd_lift(const Args& a) {
         }
         LiftInput input = lift_input(cfg, f);
         input.single_leaf_only = a.leaf_single;  // (single mode as it was, to measure against)
+        input.callee_regs = callee_regs;         // (--full-sync: nothing known, everything goes back and forth)
         const Lifted l = lift(input);
         if (l.ok) {
             chunk += l.code + "\n";

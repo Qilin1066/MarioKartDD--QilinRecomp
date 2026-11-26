@@ -865,13 +865,41 @@ void test_fp_single_mode() {
     CHECK(saved.ok && saved.code.contains("static void fn_80003000_d(Cpu& c, unsigned resume)"));
     CHECK(saved.code.contains("switch (resume) { case 1: goto R_1; default: break; }") && saved.code.contains("R_1:\n"));
     CHECK(saved.code.contains("write64(c, ea, fp::bits(c.ps0[31]));"));
-    CHECK(saved.code.contains("if (!(int(fp::to_f_exact(c.ps0[31], f31)))) [[unlikely]] { fn_80003000_d(c, 1); return; }"));
+    CHECK(saved.code.contains("if (!(int(fp::to_f_exact(c.ps0[31], f31)))) [[unlikely]] { ") && saved.code.contains("fn_80003000_d(c, 1); return; }"));
     CHECK(saved.code.contains("c.ps0[31] = fp::from_bits(read64(c, ea));"));
     CHECK(saved.code.contains("c.ps0[1] = fp::to_d(f1); c.ps1[1] = fp::to_d(p1);  return;") && !saved.code.contains("written"));
     // lfd f1,0(r3); fadds f1,f1,f1; blr, and bl; frsp f1,f1; blr: a double used as a single
     // (a conversion's constant, a double a call returned): no single mode, it would never stay in it.
     CHECK(!with_calls({0xC8230000u, 0xEC21082Au, 0x4E800020u}).code.contains("float"));
     CHECK(!with_calls({0x48000101u, 0xFC200818u, 0x4E800020u}).code.contains("float"));
+    // Around a call, only what the callee (with all it calls) may touch goes back and is read
+    // again, and the stack pointer. The leaf: addi r3,r3,1; blr. Its caller: stwu r1,-16(r1);
+    // addi r31,r4,0; bl leaf; add r3,r3,r31; addi r1,r1,16; blr.
+    {
+        auto input = [](uint32_t start, std::initializer_list<uint32_t> words) {
+            LiftInput in;
+            in.start = start;
+            uint32_t a = start;
+            for (uint32_t w : words) in.insns.emplace_back(a, ppc::decode(w)), a += 4;
+            in.is_function = [](uint32_t) { return true; };
+            return in;
+        };
+        const LiftInput leaf = input(0x80003108, {0x38630001u, 0x4E800020u});
+        LiftInput caller = input(0x80003000, {0x9421FFF0u, 0x3BE40000u, 0x48000101u, 0x7C63FA14u, 0x38210010u, 0x4E800020u});
+        const LiftInput through_pointer = input(0x80003200, {0x4E800421u, 0x4E800020u});  // bctrl; blr
+        std::map<uint32_t, CallSummary> summaries{{leaf.start, summarize(leaf)}, {caller.start, summarize(caller)}, {through_pointer.start, summarize(through_pointer)}};
+        CHECK(summaries.at(leaf.start).own.gpr == 8u && !summaries.at(leaf.start).own.all);
+        CHECK(summaries.at(caller.start).callees == (std::set<uint32_t>{leaf.start}) && summaries.at(through_pointer.start).own.all);
+        const std::map<uint32_t, RegSet> sets = close_over_calls(summaries);
+        CHECK(sets.at(caller.start).gpr == (1u << 1 | 1u << 3 | 1u << 4 | 1u << 31) && (sets.at(caller.start).other & 0x100u));
+        caller.callee_regs = [&sets](uint32_t a) { return sets.contains(a) ? &sets.at(a) : nullptr; };
+        const Lifted l = lift(caller);
+        CHECK(l.ok && l.code.contains("lr = 0x8000300Cu; c.r[1] = r1; c.r[3] = r3;  fn_80003108(c); r3 = c.r[3]; "));
+        CHECK(l.code.contains("c.r[1] = r1; c.r[3] = r3; c.r[4] = r4; c.r[31] = r31; c.lr = lr;  return;"));
+        // A callee with no summary (replaced code), or one that calls through a pointer: everything.
+        caller.callee_regs = [&sets](uint32_t) { return &sets.at(0x80003200u); };
+        CHECK(lift(caller).code.contains("c.r[1] = r1; c.r[3] = r3; c.r[4] = r4; c.r[31] = r31; c.lr = lr;  fn_80003108(c); r1 = c.r[1]; r3 = c.r[3]; r4 = c.r[4]; r31 = c.r[31]; lr = c.lr; "));
+    }
     // lfs f1,0(r3); bcl 4,eq,elsewhere; blr: a conditional call: no single mode.
     CHECK(!with_calls({0xC0230000u, 0x40820101u, 0x4E800020u}).code.contains("float"));
 }
