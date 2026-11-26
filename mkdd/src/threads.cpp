@@ -21,7 +21,9 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <cstdio>
 #include <map>
+#include <string>
 #include <set>
 #include <memory>
 #include <mutex>
@@ -709,6 +711,26 @@ void init_threads(Cpu& main_cpu) {
     store(th.get());
     g_threads[t] = std::move(th);
     add_timer_source(poll_alarms, alarm_deadline);
+}
+
+void log_threads() {
+    for (const auto& [address, t] : g_threads) {
+        std::string stack;
+        uint32_t sp = t->cpu->r[1];
+        for (int depth = 0; depth < 12 && sp >= 0x80000000u && sp < 0x81800000u - 8; ++depth) {
+            const uint32_t next = rt::peek32(sp), lr = rt::peek32(sp + 4);
+            if (depth) {  // (the innermost frame's own LR slot isn't written yet)
+                char one[16];
+                std::snprintf(one, sizeof one, " %08X", lr);
+                stack += one;
+            }
+            if (next <= sp) break;
+            sp = next;
+        }
+        rt::log("thread %08X%s: state %u, priority %d (own %d), suspended %d, sleeps on %08X, entry %08X, lr %08X; stack:%s", address,
+                t.get() == g_current ? " (running)" : "", t->state, t->priority, t->base, t->suspend, t->waiting_on, t->entry, t->cpu->lr,
+                stack.c_str());
+    }
 }
 
 void wake_all(Cpu& c, uint32_t queue) {
