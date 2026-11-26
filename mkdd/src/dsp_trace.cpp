@@ -40,7 +40,6 @@ struct Window {
     unsigned max_voices = 0, voices_now = 0;
     uint64_t dsp_ns0 = 0, runs0 = 0, wakes0 = 0, settle0 = 0;
 } g_w;
-uint64_t g_total_frames = 0, g_total_clipped = 0, g_silent_windows = 0, g_windows = 0;
 
 void put32(FILE* f, uint32_t v) { std::fputc(v & 255, f), std::fputc((v >> 8) & 255, f), std::fputc((v >> 16) & 255, f), std::fputc(v >> 24, f); }
 void put16(FILE* f, unsigned v) { std::fputc(v & 255, f), std::fputc((v >> 8) & 255, f); }
@@ -70,8 +69,6 @@ void report() {
     const double n = g_w.frames ? double(g_w.frames) : 1;
     const double dc_l = g_w.sum[0] / n, dc_r = g_w.sum[1] / n;
     const double rms_l = std::sqrt(g_w.squares[0] / n), rms_r = std::sqrt(g_w.squares[1] / n);
-    ++g_windows;
-    if (g_w.peak == 0) ++g_silent_windows;
     rt::log("audio trace: %.2f s of sound in %llu DMA buffers; frames done %llu, sub-frames %llu, commands %llu, releases %llu, task switches %llu",
             seconds, static_cast<unsigned long long>(g_w.dma), static_cast<unsigned long long>(g_w.frames_done),
             static_cast<unsigned long long>(g_w.subframes), static_cast<unsigned long long>(g_w.commands),
@@ -137,11 +134,10 @@ void samples(const int16_t* lr, size_t frames, unsigned rate) {
         g_w.sum[0] += l, g_w.sum[1] += r;
         g_w.squares[0] += double(l) * l, g_w.squares[1] += double(r) * r;
         g_w.peak = std::max(g_w.peak, std::max(std::abs(l), std::abs(r)));
-        if (l == 32767 || l == -32768 || r == 32767 || r == -32768) ++g_w.clipped, ++g_total_clipped;
+        if (l == 32767 || l == -32768 || r == 32767 || r == -32768) ++g_w.clipped;
         if (l == 0 && r == 0) ++g_w.zero_frames;
     }
     g_w.frames += frames;
-    g_total_frames += frames;
     if (g_w.frames >= uint64_t(rate) * 5) {
         if (g_wav) wav_header();
         if (g_on) report();
