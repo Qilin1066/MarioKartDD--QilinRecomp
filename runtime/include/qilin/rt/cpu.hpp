@@ -613,6 +613,16 @@ QILIN_INLINE float madd_s(float a, float c, float b, bool subtract) {
     bool fast;
 #if defined(QILIN_FUSED_FLOAT)
     const float r = madd_fused(a, c, b, subtract, fast);
+#elif defined(QILIN_FMA_AT_RUN_TIME) && defined(_MSC_VER) && !defined(__clang__)
+    // (MSVC emits the intrinsic in place whatever the build's instruction set: one fused
+    // operation where the CPU has it, in place of a double product, a sum and the tie's check.)
+    float r;
+    if (g_fma) {
+        r = _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(c), _mm_set_ss(subtract ? -b : b)));
+        fast = ordinary(r);
+    } else {
+        r = madd_by_double(a, c, b, subtract, fast);
+    }
 #else
     const float r = madd_by_double(a, c, b, subtract, fast);
 #endif

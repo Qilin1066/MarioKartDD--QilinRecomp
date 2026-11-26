@@ -145,6 +145,7 @@ struct SingleInfo {
     std::vector<uint64_t> must, may;   // per instruction
     std::vector<uint64_t> def, kill, need;  // per instruction; need: the halves to fetch again after it
     std::vector<unsigned> resume;      // per instruction: where the double version takes over after it (0: nowhere)
+    std::vector<bool> call;            // per instruction: a call
     unsigned resumes = 0;
 };
 
@@ -160,6 +161,7 @@ SingleInfo analyse_single(const LiftInput& f) {
     std::map<uint32_t, const JumpTable*> tables;
     for (const JumpTable& t : f.jtabs) tables[t.at] = &t;
     std::vector<uint64_t> use(n), def(n), kill(n, 0);
+    info.call.assign(n, false);
     std::vector<std::vector<size_t>> succ(n), pred(n);
     bool any = false;
     for (size_t k = 0; k < n; ++k) {
@@ -179,7 +181,10 @@ SingleInfo analyse_single(const LiftInput& f) {
         // them ours on one path only: no single mode then; compilers don't emit one.)
         if (branch && in.lk() && !(in.op == Op::b && f.not_calls.contains(a)) && !(in.op == Op::bc && in.branch_target(a) == a + 4)) {
             if (f.single_leaf_only || (in.op != Op::b && (in.rd() & 0x14) != 0x14)) return info;
-            kill[k] = ~uint64_t{0};
+            kill[k] = ~uint64_t{0};  // ... or only the halves the callee, with all it calls, may touch
+            if (in.op == Op::b && f.callee_regs)
+                if (const RegSet* t = f.callee_regs(in.branch_target(a)); t && !t->all) kill[k] = uint64_t{t->fpr1} << 32 | t->fpr0;
+            info.call[k] = true;
         }
         bool next = !Cfg::is_terminator(in);
         if ((in.op == Op::b || in.op == Op::bc) && !in.lk()) {
@@ -288,7 +293,7 @@ public:
                 return out;
             }
             body += line;
-            if (single_ && single_->kill[k] == ~uint64_t{0}) body += after_call();
+            if (single_ && single_->call[k]) body += after_call();
             if (resume_ && resume_->resume[k]) body += std::format("R_{}:\n", resume_->resume[k]);
             const bool last = k + 1 == f_.insns.size();
             const uint32_t next = last ? 0 : f_.insns[k + 1].first;
@@ -379,11 +384,18 @@ private:
     // Written back before anything outside the function can see the state
     // (calls, returns, traps); read again after a call. The text is a
     // placeholder until the function's uses are known.
-    std::string sync_out(uint64_t except = 0) {
-        if (!single_) return "@OUT@";
+    // `callee`: before a call to it, only what it (and all it calls) may touch goes back.
+    const RegSet* regs_of(uint32_t callee) const {
+        const RegSet* t = callee && f_.callee_regs ? f_.callee_regs(callee) : nullptr;
+        return t && !t->all ? t : nullptr;
+    }
+    std::string sync_out(uint64_t except = 0, uint32_t callee = 0) {
+        const std::string head = callee ? std::format("@OUT:{:08X}@", callee) : std::string("@OUT@");
+        if (!single_) return head;
         // Single mode: the halves written on every path here go back as doubles, those written on
         // some paths if this run wrote them, the rest are the registers' own still.
-        std::string s = "@OUT@ ";
+        std::string s = head + " ";
+        if (const RegSet* t = regs_of(callee)) except |= ~(uint64_t{t->fpr1} << 32 | t->fpr0);
         for (unsigned h = 0; h < 64; ++h) {
             const uint64_t bit = uint64_t{1} << h;
             if (!(single_->may[cur_] & bit) || (except & bit)) continue;
@@ -418,9 +430,12 @@ private:
             }
         return std::format(" if (!({})) [[unlikely]] {{ {}{}; return; }}", all, out, twin(single_->resume[cur_]));
     }
-    // Single mode, after a call's line: every half is the Cpu's (the call wrote ours back).
+    // Single mode, after a call's line: the halves the callee may have touched are the Cpu's (the
+    // call wrote ours back). If the double version must take over, everything else goes back first:
+    // the call only wrote the callee's part.
     std::string after_call() {
-        const std::string s = wrote(~uint64_t{0}, false) + fetch(single_->need[cur_], "");
+        const uint64_t kill = single_->kill[cur_], need = single_->need[cur_];
+        const std::string s = wrote(kill, false) + (need ? fetch(need, sync_out(kill)) : std::string());
         return s.empty() ? s : "   " + s + "\n";
     }
     std::string sync_in() { return "@IN@"; }
@@ -429,44 +444,75 @@ public:
     // Single mode: the "written" flags some way out reads (the others needn't exist).
     uint64_t flags_read() const { return flags_read_; }
 
-    std::string expand(const std::string& code) const {
+    // The function's own registers (after run()), and whom it calls.
+    CallSummary summary() const {
+        CallSummary s;
+        for (unsigned n : gprs_) s.own.gpr |= 1u << n;
+        for (unsigned n : fprs_) s.own.fpr0 |= 1u << n;
+        for (unsigned n : ps1s_) s.own.fpr1 |= 1u << n;
+        for (unsigned n : crs_) s.own.other |= 1u << n;
+        unsigned bit = 8;
+        for (const char* name : {"lr", "ctr", "so", "ov", "ca"}) s.own.other |= specials_.contains(name) ? 1u << bit : 0u, ++bit;
+        s.callees = callees_;
+        return s;
+    }
+
+    // The text that writes the registers back, and the text that reads them again: all of the
+    // function's, or (around a call) those in `only`. The stack pointer goes back either way:
+    // an interrupt's handler, at a safe point inside the callee, puts its frame below it.
+    std::pair<std::string, std::string> sync_texts(const RegSet* only) const {
         std::string out_s, in_s;
         for (unsigned n : gprs_) {
-            out_s += std::format("c.r[{0}] = r{0}; ", n);
-            in_s += std::format("r{0} = c.r[{0}]; ", n);
+            const bool in = !only || (only->gpr & (1u << n));
+            if (in || n == 1) out_s += std::format("c.r[{0}] = r{0}; ", n);
+            if (in) in_s += std::format("r{0} = c.r[{0}]; ", n);
         }
         for (unsigned n : fprs_) {
             if (single_) break;  // (single mode writes its halves back at each way out: sync_out)
+            if (only && !(only->fpr0 & (1u << n))) continue;
             out_s += std::format("c.ps0[{0}] = f{0}; ", n);
             in_s += std::format("f{0} = c.ps0[{0}]; ", n);
         }
         for (unsigned n : ps1s_) {
             if (single_) break;
+            if (only && !(only->fpr1 & (1u << n))) continue;
             out_s += std::format("c.ps1[{0}] = p{0}; ", n);
             in_s += std::format("p{0} = c.ps1[{0}]; ", n);
         }
-        if (!crs_.empty()) {
-            uint32_t keep = 0xFFFFFFFFu;
-            std::string merged;
-            for (unsigned n : crs_) {
-                keep &= ~(15u << (28 - 4 * n));
-                merged += std::format(" | (cr{} << {})", n, 28 - 4 * n);
-                in_s += std::format("cr{0} = (c.cr >> {1}) & 15u; ", n, 28 - 4 * n);
-            }
-            out_s += std::format("c.cr = (c.cr & {}){}; ", hex(keep), merged);
+        uint32_t keep = 0xFFFFFFFFu;
+        std::string merged;
+        for (unsigned n : crs_) {
+            if (only && !(only->other & (1u << n))) continue;
+            keep &= ~(15u << (28 - 4 * n));
+            merged += std::format(" | (cr{} << {})", n, 28 - 4 * n);
+            in_s += std::format("cr{0} = (c.cr >> {1}) & 15u; ", n, 28 - 4 * n);
         }
-        for (const char* s : {"lr", "ctr"})
-            if (specials_.contains(s)) {
-                out_s += std::format("c.{0} = {0}; ", s);
-                in_s += std::format("{0} = c.{0}; ", s);
+        if (!merged.empty()) out_s += std::format("c.cr = (c.cr & {}){}; ", hex(keep), merged);
+        unsigned bit = 8;
+        for (const char* s : {"lr", "ctr", "so", "ov", "ca"}) {
+            const bool in = specials_.contains(s) && (!only || (only->other & (1u << bit)));
+            const char* field = bit < 10 ? "" : "xer_";
+            if (in) {
+                out_s += std::format("c.{1}{0} = {0}; ", s, field);
+                in_s += std::format("{0} = c.{1}{0}; ", s, field);
             }
-        for (const char* s : {"so", "ov", "ca"})
-            if (specials_.contains(s)) {
-                out_s += std::format("c.xer_{0} = {0}; ", s);
-                in_s += std::format("{0} = c.xer_{0}; ", s);
-            }
+            ++bit;
+        }
+        return {out_s, in_s};
+    }
+
+    std::string expand(const std::string& code) const {
+        const auto [out_s, in_s] = sync_texts(nullptr);
         std::string r = code;
         const std::string sp = gprs_.contains(1) ? "c.r[1] = r1; " : "";
+        // Around calls: the callee's part.
+        for (uint32_t callee : callees_) {
+            const std::string out_ph = std::format("@OUT:{:08X}@", callee), in_ph = std::format("@IN:{:08X}@", callee);
+            if (!r.contains(out_ph)) continue;
+            const auto [o, i] = sync_texts(regs_of(callee));
+            for (auto [ph, with] : {std::pair{out_ph, o}, std::pair{in_ph, i}})
+                for (size_t p; (p = r.find(ph)) != std::string::npos;) r.replace(p, ph.size(), with);
+        }
         for (auto [ph, with] : {std::pair{std::string("@OUT@"), out_s}, std::pair{std::string("@IN@"), in_s}, std::pair{std::string("@SP@"), sp}})
             for (size_t p; (p = r.find(ph)) != std::string::npos;) r.replace(p, ph.size(), with);
         // A function that touches no state (a lone blr) leaves its parameter unnamed.
@@ -527,7 +573,7 @@ private:
 
     std::string call_to(uint32_t target) {
         callees_.insert(target);
-        return std::format("{} {}(c); {}", sync_out(), fn_name(target), sync_in());
+        return std::format("{} {}(c); @IN:{:08X}@", sync_out(0, target), fn_name(target), target);
     }
 
     // A paired result: each half computed from the old values, then both written.
@@ -1104,6 +1150,33 @@ private:
 };
 
 }  // namespace
+
+CallSummary summarize(const LiftInput& f) {
+    Emitter e(f);
+    const Lifted l = e.run();
+    CallSummary s = e.summary();
+    // A stub, or a call through a pointer (the dispatcher's: anything may run): everything.
+    if (!l.ok || l.code.contains("c.hooks->call")) s.own.all = true;
+    return s;
+}
+
+std::map<uint32_t, RegSet> close_over_calls(const std::map<uint32_t, CallSummary>& summaries) {
+    std::map<uint32_t, RegSet> sets;
+    for (const auto& [a, s] : summaries) sets[a] = s.own;
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (const auto& [a, s] : summaries) {
+            RegSet r = sets[a];
+            for (uint32_t callee : s.callees) {
+                const auto it = sets.find(callee);
+                if (it == sets.end()) r.all = true;
+                else r.add(it->second);
+            }
+            if (!(r == sets[a])) sets[a] = r, changed = true;
+        }
+    }
+    return sets;
+}
 
 Lifted lift(const LiftInput& f) {
     Emitter e(f);
