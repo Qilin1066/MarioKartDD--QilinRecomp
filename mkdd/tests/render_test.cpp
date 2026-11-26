@@ -909,6 +909,48 @@ void z_on_time(Target& t, Stream& st) {
     check(gx::await_cpu_copy(kZTile), "... and a read with nothing on its way doesn't wait");
 }
 
+// GX's constant destination alpha (BP 0x42) beside a blend by the pixel's own alpha: the colour
+// is blended by the TEV's alpha, the alpha written is the constant, and only where the draw
+// wrote its colour (not where the depth test or the alpha test dropped it). With dual-source
+// blending one pass does it; without (`how`: a GPU like the Pi 4's), a second pass by stencil.
+// Red at the back, then a blue bar in front over the top, then a green quad over everything
+// behind it: TEV alpha 0x80 on the left half, 0 on the right (the alpha test drops it), the
+// constant 0x40. The EFB's alpha is read through A8 copies drawn as intensity at the bottom.
+void constant_alpha(Target& t, Stream& st, const char* how, uint32_t copies = kCopyTex) {  // (copies: a renderer's own addresses)
+    stream_begin(st);
+    st.bp(0x43, 1), st.bp(0x41, (1u << 3) | (1u << 4));                   // RGBA6_Z24, colour and alpha, no blending
+    stream_quad(st, 0, 0, 640, 528, -0.9f, 0xFF0000FFu);                  // red, alpha 0xFF
+    stream_quad(st, 0, 0, 640, 100, -0.2f, 0x0000FFFFu);                  // blue, nearer, alpha 0xFF
+    st.bp(0x41, 1u | (1u << 3) | (1u << 4) | (5u << 5) | (4u << 8));      // blend: source alpha, inverse source alpha
+    st.bp(0x42, 0x40u | (1u << 8));                                       // constant alpha 0x40
+    st.bp(0xF3, 0x10u | (4u << 16) | (7u << 19));                         // alpha test: greater than 0x10
+    stream_quad(st, 0, 0, 320, 528, -0.5f, 0x00FF0080u);
+    stream_quad(st, 320, 0, 640, 528, -0.5f, 0x00FF0000u);
+    st.bp(0x42, 0), st.bp(0xF3, (7u << 16) | (7u << 19)), st.bp(0x41, (1u << 3) | (1u << 4));
+    constexpr uint32_t kAt[3][2] = {{100, 200}, {400, 200}, {100, 20}};   // left, right, under the bar
+    for (uint32_t i = 0; i < 3; ++i) {
+        st.bp(0x49, kAt[i][0] | (kAt[i][1] << 10)), st.bp(0x4A, 63u | (63u << 10)), st.bp(0x4B, (copies + 0x1000 * i) >> 5), st.bp(0x4D, 1);
+        st.bp(0x52, (14u << 3) | (1u << 9));                              // A8, half scale
+    }
+    st.bp(0x40, 1u | (7u << 1) | (1u << 4));
+    for (uint32_t i = 0; i < 3; ++i) {
+        st.texture(copies + 0x1000 * i, 32, 32, 1);
+        st.bp(0xC0, 8u | (15u << 4) | (15u << 8) | (15u << 12) | (1u << 19));
+        stream_quad(st, 20.0f + 120.0f * float(i), 450, 80.0f + 120.0f * float(i), 500, -0.01f, 0xFFFFFFFFu, true);
+    }
+    st.end_frame();
+    st.send();
+    const auto px = t.shown();
+    const uint8_t *left = at(px, 150, 300), *right = at(px, 450, 300), *top = at(px, 150, 50);
+    check(near(left, 125, 129, 0, 8) && near(right, 255, 0, 0) && near(top, 0, 0, 255),
+          std::string(how) + ": a blend by the TEV's alpha under a constant alpha blends by the TEV's (125,129,0): " + rgb(left) + " | dropped " +
+              rgb(right) + " | behind " + rgb(top));
+    const uint8_t *a_left = at(px, 50, 475), *a_right = at(px, 170, 475), *a_top = at(px, 290, 475);
+    check(near(a_left, 0x41, 0x41, 0x41, 3) && near(a_right, 255, 255, 255, 3) && near(a_top, 255, 255, 255, 3),
+          std::string(how) + ": ... and writes the constant alpha (0x41) only where it drew: " + rgb(a_left) + " | dropped by the alpha test " +
+              rgb(a_right) + " | by the depth test " + rgb(a_top));
+}
+
 // Four players: each view's viewport and scissor take a quarter of the 608x448
 // picture, and a quad larger than the view stays inside it.
 void split_screen(Target& t, Stream& st) {
@@ -1499,6 +1541,7 @@ int picture_dff(host::Gpu& gpu, const char* path, const char* out, unsigned loop
     t.renderer.request_scale(scale);
     uint32_t xfb = 0;
     mkdd::replay_dff(path, loops, [&](gx::Frame& f) {
+        f.captured = std::getenv("MKDD_PROBE") != nullptr;  // (MKDD_PROBE follows a pixel through it)
         t.renderer.render(f);
         for (const gx::Copy& c : f.copies)
             if (c.to_xfb) xfb = c.dest;
@@ -1652,6 +1695,7 @@ int main(int argc, char** argv) {
         clear_by_z_texture(t, st);
         depth_copies(t, st);
         z_on_time(t, st);
+        if (gpu.dual_src_blend) constant_alpha(t, st, "dual-source blending");
         split_screen(t, st);
         indexed_matrices(t, st);
         lod_bias(t, st);
@@ -1677,6 +1721,16 @@ int main(int argc, char** argv) {
         logic_ops(t, g, true, "approximated");
         lines_and_points(t, g, false, "fallback");
         t.finish(g, false);
+    }
+    {
+        // As on a GPU without dual-source blending (a Pi 4's).
+        host::Gpu without = gpu;
+        without.dual_src_blend = false;
+        Target t(without);
+        Stream st;
+        constant_alpha(t, st, "a second pass by stencil", 0x00C00000u);
+        stream_begin(st), st.end_frame(), st.send();
+        t.shown();
     }
     gpu.destroy();
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");

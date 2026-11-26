@@ -176,6 +176,10 @@ layout(location = 1) in vec4 colors_1;
 layout(location = 2) in vec3 tex[8];
 layout(set = 1, binding = 0) uniform sampler2D samp[8];
 layout(location = 0) out vec4 ocol0;
+// The TEV's alpha for the blend's factors, where the alpha written is GX's constant (pc.flags
+// 0x200): with dual-source blending the renderer moves this to location 0, index 1 as it makes
+// the module (with_second_output). At location 1 there is no attachment: nothing is written.
+layout(location = 1) out vec4 ocol1;
 
 int iround(float x) { return int(round(x)); }
 ivec4 iround(vec4 x) { return ivec4(round(x)); }
@@ -565,9 +569,11 @@ void main() {
     if (rgba6) ocol0.rgb = vec3(TevResult.rgb >> 2) / 63.0;
     else ocol0.rgb = vec3(TevResult.rgb) / 255.0;
     uint dstalpha = bp(0x42u);
-    if ((dstalpha & 0x100u) != 0u && (pc.flags & 1u) == 0u)
+    float tev_alpha = rgba6 ? float(TevResult.a >> 2) / 63.0 : float(TevResult.a) / 255.0;
+    if ((dstalpha & 0x100u) != 0u && ((pc.flags & 1u) == 0u || (pc.flags & 0x200u) != 0u))
         ocol0.a = rgba6 ? float(bits(dstalpha, 0u, 8u) >> 2) / 63.0 : float(bits(dstalpha, 0u, 8u)) / 255.0;
-    else ocol0.a = rgba6 ? float(TevResult.a >> 2) / 63.0 : float(TevResult.a) / 255.0;
+    else ocol0.a = tev_alpha;
+    ocol1 = vec4(tev_alpha);
 
     // A logic op on a GPU without them, as blending: some need the output
     // forced or inverted (Dolphin's ApproximateLogicOpWithBlending).

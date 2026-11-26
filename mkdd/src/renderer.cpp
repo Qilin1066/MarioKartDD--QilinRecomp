@@ -187,6 +187,28 @@ std::vector<uint32_t> with_early_tests(const uint32_t* code, size_t bytes) {
     rt::fatal(nullptr, "render: a pixel shader with no execution mode to put early tests beside");
 }
 
+// gx.frag's second output (ocol1, an output at location 1) moved to location 0, index 1: the
+// blend's second source, with dual-source blending. (Its decoration is rewritten and an Index
+// one added beside it, rather than a second copy of every module in shaders.inc.)
+std::vector<uint32_t> with_second_output(std::vector<uint32_t> spv) {
+    std::set<uint32_t> outputs;
+    for (size_t i = 5; i < spv.size() && (spv[i] >> 16);) {
+        if ((spv[i] & 0xFFFFu) == 59 && i + 3 < spv.size() && spv[i + 3] == 3) outputs.insert(spv[i + 2]);  // OpVariable, Output
+        i += spv[i] >> 16;
+    }
+    for (size_t i = 5; i < spv.size() && (spv[i] >> 16);) {
+        const uint32_t op = spv[i] & 0xFFFFu, words = spv[i] >> 16;
+        if (op == 71 && words == 4 && spv[i + 2] == 30 && spv[i + 3] == 1 && outputs.contains(spv[i + 1])) {  // OpDecorate Location 1
+            spv[i + 3] = 0;
+            const uint32_t index[4] = {(4u << 16) | 71u, spv[i + 1], 32u, 1u};  // OpDecorate Index 1
+            spv.insert(spv.begin() + long(i + 4), index, index + 4);
+            return spv;
+        }
+        i += words;
+    }
+    rt::fatal(nullptr, "render: the pixel shader has no second output at location 1 to blend with");
+}
+
 VkShaderModule module(VkDevice dev, const uint32_t* code, size_t bytes) {
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize = bytes;
@@ -216,6 +238,17 @@ struct Renderer::Impl {
     float anisotropy = 1.0f;  // for filtered textures (set_anisotropy)
     bool true_color = false;  // set_true_color: the shaders' flag
     VkFormat depth_format = VK_FORMAT_D32_SFLOAT;
+    // GX's constant destination alpha with a blend that reads the pixel's own alpha (BP 0x42
+    // beside a blend by source alpha): with dual-source blending the shader gives the blend
+    // the TEV's alpha as a second output and writes the constant. Without (a Pi 4), the draw
+    // marks the pixels it writes in a stencil buffer beside the depth, and a second pass writes
+    // the constant alpha into exactly those (constant_alpha_pass). `stencil`: that buffer is
+    // there; the EFB's depth images then have views of both aspects to draw into.
+    bool dual = false;  // dual-source blending used (MKDD_NO_DUAL_SOURCE=1: not, as on a GPU without it)
+    bool stencil = false;
+    VkImageView efb_depth_rt = VK_NULL_HANDLE, efb_depth_between_rt = VK_NULL_HANDLE;
+    uint32_t stencil_ref = 0;    // the last draw's mark (0: the stencil not cleared yet this pass)
+    bool stencil_valid = false;  // the stencil's dynamic state is set on the command buffer
     Image efb, efb_depth, white;
     Image efb_other;  // made at the first change of pixel format: convert() draws into it, and the two swap
     Slot slots[2];
@@ -383,7 +416,30 @@ struct Renderer::Impl {
 
     // ---- setup
 
+    // An EFB depth image, and with a stencil its view of both aspects for drawing into (the
+    // image's own view, of the depth alone, is the one copies sample).
+    Image make_depth(uint32_t w, uint32_t h, VkImageView& both) {
+        Image im = Image::create(gpu, w, h, depth_format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        both = VK_NULL_HANDLE;
+        if (stencil) {
+            VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            vci.image = im.image;
+            vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vci.format = depth_format;
+            vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+            check(vkCreateImageView(gpu.device, &vci, nullptr, &both), "vkCreateImageView");
+        }
+        return im;
+    }
+    void destroy_depth(Image& im, VkImageView& both) {
+        if (both) vkDestroyImageView(gpu.device, both, nullptr);
+        both = VK_NULL_HANDLE;
+        im.destroy(gpu);
+    }
+    VkImageAspectFlags depth_aspects() const { return VK_IMAGE_ASPECT_DEPTH_BIT | (stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u); }
+
     void create() {
+        dual = gpu.dual_src_blend && !std::getenv("MKDD_NO_DUAL_SOURCE");
         start_specialization();
         {
             VkSemaphoreTypeCreateInfo ti{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
@@ -395,9 +451,18 @@ struct Renderer::Impl {
         VkFormatProperties fp;
         vkGetPhysicalDeviceFormatProperties(gpu.physical, VK_FORMAT_D32_SFLOAT, &fp);
         if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) depth_format = VK_FORMAT_X8_D24_UNORM_PACK32;
+        if (!dual) {  // the constant alpha's second pass needs a stencil buffer
+            for (VkFormat f : {VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT}) {
+                vkGetPhysicalDeviceFormatProperties(gpu.physical, f, &fp);
+                const VkFormatFeatureFlags want = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+                if ((fp.optimalTilingFeatures & want) == want) {
+                    depth_format = f, stencil = true;
+                    break;
+                }
+            }
+        }
         efb = Image::create(gpu, kEfbWidth * xscale, kEfbHeight * scale, kColor, kEfbUsage);
-        efb_depth = Image::create(gpu, kEfbWidth * xscale, kEfbHeight * scale, depth_format,
-                                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        efb_depth = make_depth(efb.width, efb.height, efb_depth_rt);
         white = Image::create(gpu, 1, 1, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         {
             uint32_t qn = 0;
@@ -437,21 +502,21 @@ struct Renderer::Impl {
             check(vkCreateDescriptorPool(gpu.device, &dpi, nullptr, &s.descriptors), "vkCreateDescriptorPool");
         }
         gx_vert = module(gpu.device, kGxVert, sizeof kGxVert);
-        gx_frag = module(gpu.device, kGxFrag, sizeof kGxFrag);
-        gx_frag_depth = module(gpu.device, kGxFragDepth, sizeof kGxFragDepth);
+        // The TEV's modules: with dual-source blending, their second output is the blend's second source.
+        const auto tev = [&](const uint32_t* code, size_t bytes, bool early_tests) {
+            std::vector<uint32_t> spv = early_tests ? with_early_tests(code, bytes) : std::vector<uint32_t>(code, code + bytes / 4);
+            if (dual) spv = with_second_output(std::move(spv));
+            return module(gpu.device, spv.data(), spv.size() * 4);
+        };
+        gx_frag = tev(kGxFrag, sizeof kGxFrag, false);
+        gx_frag_depth = tev(kGxFragDepth, sizeof kGxFragDepth, false);
         static constexpr struct {
             const uint32_t* code;
             size_t bytes;
         } kStages[16] = {{kGxFragStages1, sizeof kGxFragStages1}, {kGxFragStages2, sizeof kGxFragStages2}, {kGxFragStages3, sizeof kGxFragStages3}, {kGxFragStages4, sizeof kGxFragStages4}, {kGxFragStages5, sizeof kGxFragStages5}, {kGxFragStages6, sizeof kGxFragStages6}, {kGxFragStages7, sizeof kGxFragStages7}, {kGxFragStages8, sizeof kGxFragStages8}, {kGxFragStages9, sizeof kGxFragStages9}, {kGxFragStages10, sizeof kGxFragStages10}, {kGxFragStages11, sizeof kGxFragStages11}, {kGxFragStages12, sizeof kGxFragStages12}, {kGxFragStages13, sizeof kGxFragStages13}, {kGxFragStages14, sizeof kGxFragStages14}, {kGxFragStages15, sizeof kGxFragStages15}, {kGxFragStages16, sizeof kGxFragStages16}};
-        for (unsigned i = 0; i < 16; ++i) gx_frag_stages[i] = module(gpu.device, kStages[i].code, kStages[i].bytes);
-        {
-            const auto early = [&](const uint32_t* code, size_t bytes) {
-                const std::vector<uint32_t> spv = with_early_tests(code, bytes);
-                return module(gpu.device, spv.data(), spv.size() * 4);
-            };
-            gx_frag_early = early(kGxFrag, sizeof kGxFrag);
-            for (unsigned i = 0; i < 16; ++i) gx_frag_stages_early[i] = early(kStages[i].code, kStages[i].bytes);
-        }
+        for (unsigned i = 0; i < 16; ++i) gx_frag_stages[i] = tev(kStages[i].code, kStages[i].bytes, false);
+        gx_frag_early = tev(kGxFrag, sizeof kGxFrag, true);
+        for (unsigned i = 0; i < 16; ++i) gx_frag_stages_early[i] = tev(kStages[i].code, kStages[i].bytes, true);
         fs_vert = module(gpu.device, kFullscreenVert, sizeof kFullscreenVert);
         clear_frag = module(gpu.device, kClearFrag, sizeof kClearFrag);
         copy_frag = module(gpu.device, kCopyFrag, sizeof kCopyFrag);
@@ -491,14 +556,14 @@ struct Renderer::Impl {
         // First use: the EFB in GENERAL, cleared; the white texture filled.
         one_time([&](VkCommandBuffer cmd) {
             host::transition(cmd, efb.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-            host::transition(cmd, efb_depth.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            host::transition(cmd, efb_depth.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, depth_aspects());
             host::transition(cmd, white.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             const VkClearColorValue black{{0, 0, 0, 1}}, one{{1, 1, 1, 1}};
             const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             vkCmdClearColorImage(cmd, efb.image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &all);
             vkCmdClearColorImage(cmd, white.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &one, 1, &all);
             const VkClearDepthStencilValue far{1.0f, 0};
-            const VkImageSubresourceRange d{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            const VkImageSubresourceRange d{depth_aspects(), 0, 1, 0, 1};
             vkCmdClearDepthStencilImage(cmd, efb_depth.image, VK_IMAGE_LAYOUT_GENERAL, &far, 1, &d);
             host::transition(cmd, white.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         });
@@ -613,6 +678,9 @@ struct Renderer::Impl {
             dyn.insert(dyn.end(), {VK_DYNAMIC_STATE_CULL_MODE, VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
                                    VK_DYNAMIC_STATE_DEPTH_COMPARE_OP});
             dyn.push_back(VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY);  // list or strip (Vulkan 1.3: within the class)
+            if (stencil)  // (set_stencil: the constant alpha's marks)
+                dyn.insert(dyn.end(), {VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP, VK_DYNAMIC_STATE_STENCIL_REFERENCE,
+                                       VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK});
         }
         VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
         dy.dynamicStateCount = uint32_t(dyn.size());
@@ -621,6 +689,7 @@ struct Renderer::Impl {
         ri.colorAttachmentCount = 1;
         ri.pColorAttachmentFormats = &kColor;
         ri.depthAttachmentFormat = depth ? depth_format : VK_FORMAT_UNDEFINED;
+        ri.stencilAttachmentFormat = depth && stencil ? depth_format : VK_FORMAT_UNDEFINED;
         VkGraphicsPipelineCreateInfo pci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri};
         pci.stageCount = 2;
         pci.pStages = stages;
@@ -748,6 +817,8 @@ struct Renderer::Impl {
             gx::PipelineKey k;
             std::memcpy(&k, p + 1, sizeof k);
             k = base_key(k);
+            const auto src1 = [](uint8_t factor) { return factor >= VK_BLEND_FACTOR_SRC1_COLOR && factor <= VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA; };
+            if (!dual && (src1(k.src) || src1(k.dst))) k.src = k.dst = VK_BLEND_FACTOR_ONE;  // (remembered on a GPU with dual-source blending: not buildable here)
             if (kind == 0) {
                 if (uber_requested.insert({k}).second) uber.push_back({true, {k, 0}});
                 p += one, n -= one;
@@ -1124,14 +1195,99 @@ struct Renderer::Impl {
         color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         VkRenderingAttachmentInfo depth = color;
-        depth.imageView = efb_depth.view;
+        depth.imageView = stencil ? efb_depth_rt : efb_depth.view;
         VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
         ri.renderArea = {{0, 0}, {efb.width, efb.height}};
         ri.layerCount = 1;
         ri.colorAttachmentCount = 1;
         ri.pColorAttachments = &color;
         ri.pDepthAttachment = &depth;
+        if (stencil) ri.pStencilAttachment = &depth;
         vkCmdBeginRendering(cmd, &ri);
+        stencil_valid = false;
+    }
+    // The stencil's state for the draws that follow (GX pipelines and clears, where the EFB has
+    // a stencil): off, or a draw marking the pixels it writes with `ref`, or the second pass
+    // writing where they are marked.
+    enum class Stencil { kOff, kMark, kMarked };
+    void set_stencil(VkCommandBuffer cmd, Stencil how, uint32_t ref) {
+        if (!stencil) return;
+        vkCmdSetStencilTestEnable(cmd, how != Stencil::kOff);
+        const VkStencilFaceFlags both = VK_STENCIL_FACE_FRONT_AND_BACK;
+        if (how == Stencil::kMarked) vkCmdSetStencilOp(cmd, both, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_EQUAL);
+        else vkCmdSetStencilOp(cmd, both, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS);
+        vkCmdSetStencilReference(cmd, both, ref);
+        vkCmdSetStencilCompareMask(cmd, both, 0xFF);
+        vkCmdSetStencilWriteMask(cmd, both, how == Stencil::kMark ? 0xFFu : 0u);
+        stencil_valid = how == Stencil::kOff;
+    }
+    // A draw with GX's constant destination alpha and a blend by source alpha, without dual-source
+    // blending: it was drawn marking its pixels with the next mark (begin_mark, before it); now
+    // its constant alpha goes into exactly those, over the alpha the blend left. Rounded as the
+    // shader rounds it. (Inside the EFB's rendering; the state after is for set_stencil.)
+    uint32_t begin_mark(VkCommandBuffer cmd) {
+        if (stencil_ref == 0 || stencil_ref == 255) {  // the frame's first, or the marks have run out: start again
+            VkClearAttachment a{VK_IMAGE_ASPECT_STENCIL_BIT, 0, {}};
+            a.clearValue.depthStencil = {0.0f, 0};
+            const VkClearRect r{{{0, 0}, {efb.width, efb.height}}, 0, 1};
+            vkCmdClearAttachments(cmd, 1, &a, 1, &r);
+            stencil_ref = 0;
+        }
+        set_stencil(cmd, Stencil::kMark, ++stencil_ref);
+        return stencil_ref;
+    }
+    void constant_alpha_pass(VkCommandBuffer cmd, const gx::State* states, const gx::Draw& d, const VkRect2D& scissor) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, clear_pipeline(8u, false));  // (alpha alone, no blending)
+        set_stencil(cmd, Stencil::kMarked, stencil_ref);
+        vkCmdSetCullMode(cmd, VK_CULL_MODE_NONE);
+        vkCmdSetDepthTestEnable(cmd, VK_FALSE);
+        vkCmdSetDepthWriteEnable(cmd, VK_FALSE);
+        vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_ALWAYS);
+        vkCmdSetPrimitiveTopology(cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        const VkViewport vp{0, 0, float(efb.width), float(efb.height), 0, 1};
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+        const auto& bp = states[d.state].bp;
+        const uint32_t a = bp[0x42 / 4][0x42 % 4] & 0xFF;
+        const bool rgba6 = (bp[0x43 / 4][0x43 % 4] & 7) == 1 && !true_color;
+        FullscreenPush q{};
+        q.color[3] = rgba6 ? float(a >> 2) / 63.0f : float(a) / 255.0f;
+        vkCmdPushConstants(cmd, clear_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof q, &q);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    }
+    // How a draw blends, as drawn here: its pipeline key (with dual-source blending, factors of
+    // the second output where GX's constant alpha meets a blend by source alpha), the shader's
+    // flags, and whether its constant alpha needs the second pass.
+    struct DrawBlend {
+        gx::PipelineKey key;
+        uint32_t flags;
+        bool second_pass;
+    };
+    // (states: the frame's, as in the GPU's buffer.)
+    DrawBlend draw_blend(const gx::State* states, const gx::Draw& d) const {
+        DrawBlend b{d.pipeline, 0u, false};
+        const auto reads_src_alpha = [](uint8_t factor) { return factor == VK_BLEND_FACTOR_SRC_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; };
+        if (d.pipeline.blend && (reads_src_alpha(d.pipeline.src) || reads_src_alpha(d.pipeline.dst))) {
+            b.flags |= 1u;
+            const bool constant = ((states[d.state].bp[0x42 / 4][0x42 % 4] >> 8) & 1) && (d.pipeline.write_mask & 8);
+            if (constant && dual) {
+                const auto second = [](uint8_t& factor) {
+                    if (factor == VK_BLEND_FACTOR_SRC_ALPHA) factor = VK_BLEND_FACTOR_SRC1_ALPHA;
+                    else if (factor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA) factor = VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+                };
+                second(b.key.src), second(b.key.dst);
+                b.flags |= 0x200u;
+            } else if (constant && stencil && d.pipeline.depth_out != 2) {
+                b.second_pass = true;
+            } else if (constant) {
+                static bool said = false;
+                approximated(said, d.pipeline.depth_out == 2 ? "a constant alpha with blending by source alpha and Z before texturing isn't written: this GPU has no dual-source blending"
+                                                             : "a constant alpha with blending by source alpha isn't written: this GPU has neither dual-source blending nor a stencil format");
+            }
+        }
+        if (d.pipeline.logic && !gpu.logic_op) b.flags |= kLogicBlend[d.pipeline.logic - 1u].help << 4;
+        if (true_color) b.flags |= 0x100u;
+        return b;
     }
 
     static void barrier(VkCommandBuffer cmd) {  // everything before, before everything after
@@ -1340,6 +1496,7 @@ struct Renderer::Impl {
                 return;
             }
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, clear_pipeline(mask, c.clear_depth));
+            set_stencil(cmd, Stencil::kOff, 0);
             vkCmdSetCullMode(cmd, VK_CULL_MODE_NONE);
             vkCmdSetDepthTestEnable(cmd, c.clear_depth);
             vkCmdSetDepthWriteEnable(cmd, c.clear_depth);
@@ -1527,28 +1684,28 @@ struct Renderer::Impl {
         poll_readbacks();  // (made at the old scale: finished with it)
         // The EFB for pictures between frames is made again at the new size when next needed; the
         // frame held was drawn at the old one, so it has no more pictures between.
-        if (efb_between.image) efb_between.destroy(gpu), efb_depth_between.destroy(gpu);
+        if (efb_between.image) efb_between.destroy(gpu), destroy_depth(efb_depth_between, efb_depth_between_rt);
         can_blend = false;
         Image old = efb, old_depth = efb_depth;
+        VkImageView old_depth_rt = efb_depth_rt;
         scale = to, xscale = to_x;
         efb = Image::create(gpu, kEfbWidth * xscale, kEfbHeight * scale, kColor, kEfbUsage);
-        efb_depth = Image::create(gpu, kEfbWidth * xscale, kEfbHeight * scale, depth_format,
-                                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        efb_depth = make_depth(efb.width, efb.height, efb_depth_rt);
         one_time([&](VkCommandBuffer cmd) {
             host::transition(cmd, efb.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-            host::transition(cmd, efb_depth.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            host::transition(cmd, efb_depth.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, depth_aspects());
             VkImageBlit whole{};
             whole.srcSubresource = whole.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             whole.srcOffsets[1] = {int32_t(old.width), int32_t(old.height), 1};
             whole.dstOffsets[1] = {int32_t(efb.width), int32_t(efb.height), 1};
             vkCmdBlitImage(cmd, old.image, VK_IMAGE_LAYOUT_GENERAL, efb.image, VK_IMAGE_LAYOUT_GENERAL, 1, &whole, VK_FILTER_LINEAR);
             const VkClearDepthStencilValue far{1.0f, 0};
-            const VkImageSubresourceRange d{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            const VkImageSubresourceRange d{depth_aspects(), 0, 1, 0, 1};
             vkCmdClearDepthStencilImage(cmd, efb_depth.image, VK_IMAGE_LAYOUT_GENERAL, &far, 1, &d);
         });
         vkDeviceWaitIdle(gpu.device);  // the old images were read by that
         old.destroy(gpu);
-        old_depth.destroy(gpu);
+        destroy_depth(old_depth, old_depth_rt);
         if (efb_other.image) efb_other.destroy(gpu);
     }
 
@@ -1619,6 +1776,7 @@ struct Renderer::Impl {
         wr.pBufferInfo = &bufi;
         vkUpdateDescriptorSets(gpu.device, 1, &wr, 0, nullptr);
 
+        stencil_ref = 0;
         begin_efb(cmd);
         VkPipeline bound = VK_NULL_HANDLE;
         gx::PipelineKey blend_key{};  // the blend state last set (dynamic blend)
@@ -1707,14 +1865,15 @@ struct Renderer::Impl {
             }
             const gx::Draw& d = f.draws[pk.index];
             if (d.viewport[2] <= 0.0f || d.viewport[3] <= 0.0f || d.scissor[2] <= 0 || d.scissor[3] <= 0) continue;
-            VkPipeline p = gx_pipeline(d.pipeline, d.shape);
+            const DrawBlend db = draw_blend(static_cast<const gx::State*>(s.states.mapped), d);
+            VkPipeline p = gx_pipeline(db.key, d.shape);
             if (p != bound) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
                 bound = p;
             }
-            if (gpu.dynamic_blend && (!blend_set || std::memcmp(&d.pipeline, &blend_key, sizeof blend_key) != 0)) {
-                set_dynamic_blend(cmd, d.pipeline);  // kept across GX pipelines; copies and clears reset it below
-                blend_key = d.pipeline, blend_set = true;
+            if (gpu.dynamic_blend && (!blend_set || std::memcmp(&db.key, &blend_key, sizeof blend_key) != 0)) {
+                set_dynamic_blend(cmd, db.key);  // kept across GX pipelines; copies and clears reset it below
+                blend_key = db.key, blend_set = true;
             }
             if (need_bind || d.pipeline.small_vertices != bound_small) {
                 const VkBuffer buffers[2] = {s.vertices.buffer, s.vertices.buffer};
@@ -1800,12 +1959,10 @@ struct Renderer::Impl {
                 static bool said = false;
                 approximated(said, "draws with clipping off are cut at the near and far planes: this GPU has no depth clamp");
             }
-            Push push{d.state, d.has, 0u, sc, point, float(xscale)};
-            const auto reads_src_alpha = [](uint8_t factor) { return factor == VK_BLEND_FACTOR_SRC_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; };
-            if (d.pipeline.blend && (reads_src_alpha(d.pipeline.src) || reads_src_alpha(d.pipeline.dst))) push.flags |= 1u;
-            if (d.pipeline.logic && !gpu.logic_op) push.flags |= kLogicBlend[d.pipeline.logic - 1u].help << 4;
-            if (true_color) push.flags |= 0x100u;
+            const Push push{d.state, d.has, db.flags, sc, point, float(xscale)};
             vkCmdPushConstants(cmd, gx_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
+            if (db.second_pass) begin_mark(cmd);
+            else if (!stencil_valid) set_stencil(cmd, Stencil::kOff, 0);
             if (d.direct) {
                 // Lists and strips need no indices: the topology says which.
                 static constexpr VkPrimitiveTopology kList[3] = {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
@@ -1821,6 +1978,12 @@ struct Renderer::Impl {
                 vkCmdDrawIndexed(cmd, d.index_count, 1, d.first_index, 0, 0);
             }
             same_valid = true;
+            if (db.second_pass) {  // (its own pipeline and state: everything is set again for the next draw)
+                constant_alpha_pass(cmd, static_cast<const gx::State*>(s.states.mapped), d, r);
+                bound = VK_NULL_HANDLE, bound_textures = VK_NULL_HANDLE;
+                blend_set = same_valid = topology_valid = false;
+                need_bind = true;
+            }
         }
         if (probing) probe(probe_i);
         vkCmdEndRendering(cmd);
@@ -1938,11 +2101,10 @@ struct Renderer::Impl {
         blender.states(f, phase, static_cast<gx::State*>(s.states.mapped));
         if (!efb_between.image) {
             efb_between = Image::create(gpu, efb.width, efb.height, kColor, kEfbUsage);
-            efb_depth_between = Image::create(gpu, efb.width, efb.height, depth_format,
-                                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            efb_depth_between = make_depth(efb.width, efb.height, efb_depth_between_rt);
             one_time([&](VkCommandBuffer c) {
                 host::transition(c, efb_between.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-                host::transition(c, efb_depth_between.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+                host::transition(c, efb_depth_between.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, depth_aspects());
             });
         }
         check(vkResetFences(gpu.device, 1, &s.fence), "vkResetFences");
@@ -1967,8 +2129,9 @@ struct Renderer::Impl {
         const Slot& drawn = slots[slot];
         between_next = (between_next + 1) % 3;
         Image& picture = between_xfb[between_next];
-        std::swap(efb, efb_between), std::swap(efb_depth, efb_depth_between);  // (copies and clears go by these)
+        std::swap(efb, efb_between), std::swap(efb_depth, efb_depth_between), std::swap(efb_depth_rt, efb_depth_between_rt);  // (copies and clears go by these)
         barrier(cmd);
+        stencil_ref = 0;
         begin_efb(cmd);
         {
             VkClearAttachment a[2] = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, {}}, {VK_IMAGE_ASPECT_DEPTH_BIT, 0, {}}};
@@ -1995,9 +2158,10 @@ struct Renderer::Impl {
             VkRect2D r{{d.scissor[0] * int(xscale), d.scissor[1] * int(scale)}, {uint32_t(d.scissor[2]) * xscale, uint32_t(d.scissor[3]) * scale}};
             clamp_rect(r);
             if (r.extent.width == 0 || r.extent.height == 0) continue;
+            const DrawBlend db = draw_blend(static_cast<const gx::State*>(s.states.mapped), d);
             if (rp.pipeline != bound) vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp.pipeline), bound = rp.pipeline;
-            if (gpu.dynamic_blend && (fresh || std::memcmp(&d.pipeline, &blend_key, sizeof blend_key) != 0))
-                set_dynamic_blend(cmd, d.pipeline), blend_key = d.pipeline;
+            if (gpu.dynamic_blend && (fresh || std::memcmp(&db.key, &blend_key, sizeof blend_key) != 0))
+                set_dynamic_blend(cmd, db.key), blend_key = db.key;
             if (fresh || d.pipeline.small_vertices != bound_small) {
                 const VkBuffer buffers[2] = {drawn.vertices.buffer, drawn.vertices.buffer};
                 const VkDeviceSize offsets[2] = {d.pipeline.small_vertices ? small_at : 0, zeros_at};
@@ -2023,21 +2187,20 @@ struct Renderer::Impl {
             float point = 1.0f;
             if (d.pipeline.topology == 1 && gpu.wide_lines) vkCmdSetLineWidth(cmd, std::clamp(float(d.line_width) / 6.0f * sc, 1.0f, gpu.max_line_width));
             else if (d.pipeline.topology == 2) point = std::clamp(float(d.point_size) / 6.0f * sc, 1.0f, gpu.max_point_size);
-            Push push{d.state, d.has, 0u, sc, point, float(xscale)};
-            const auto reads_src_alpha = [](uint8_t factor) { return factor == VK_BLEND_FACTOR_SRC_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; };
-            if (d.pipeline.blend && (reads_src_alpha(d.pipeline.src) || reads_src_alpha(d.pipeline.dst))) push.flags |= 1u;
-            if (d.pipeline.logic && !gpu.logic_op) push.flags |= kLogicBlend[d.pipeline.logic - 1u].help << 4;
-            if (true_color) push.flags |= 0x100u;
+            const Push push{d.state, d.has, db.flags, sc, point, float(xscale)};
             vkCmdPushConstants(cmd, gx_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
+            if (db.second_pass) begin_mark(cmd);
+            else if (!stencil_valid) set_stencil(cmd, Stencil::kOff, 0);
             static constexpr VkPrimitiveTopology kStrip[3] = {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
                                                               VK_PRIMITIVE_TOPOLOGY_POINT_LIST};
             vkCmdSetPrimitiveTopology(cmd, d.direct == 2 ? kStrip[d.pipeline.topology] : kTopologyLists[d.pipeline.topology]);
             if (d.direct) vkCmdDraw(cmd, d.index_count, 1, d.first_index, 0);
             else vkCmdDrawIndexed(cmd, d.index_count, 1, d.first_index, 0, 0);
             fresh = false;
+            if (db.second_pass) constant_alpha_pass(cmd, static_cast<const gx::State*>(s.states.mapped), d, r), bound = VK_NULL_HANDLE, bound_textures = VK_NULL_HANDLE, fresh = true;
         }
         vkCmdEndRendering(cmd);
-        std::swap(efb, efb_between), std::swap(efb_depth, efb_depth_between);
+        std::swap(efb, efb_between), std::swap(efb_depth, efb_depth_between), std::swap(efb_depth_rt, efb_depth_between_rt);
         if (timestamps) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, timestamps, q + 1);
             between_timed[between_slot] = true;
@@ -2083,11 +2246,11 @@ struct Renderer::Impl {
         for (VkShaderModule m : gx_frag_stages_early) vkDestroyShaderModule(gpu.device, m, nullptr);
         if (timestamps) vkDestroyQueryPool(gpu.device, timestamps, nullptr);
         efb.destroy(gpu);
-        if (efb_between.image) efb_between.destroy(gpu), efb_depth_between.destroy(gpu);
+        if (efb_between.image) efb_between.destroy(gpu), destroy_depth(efb_depth_between, efb_depth_between_rt);
         for (Image& x : between_xfb)
             if (x.image) x.destroy(gpu);
         if (efb_other.image) efb_other.destroy(gpu);
-        efb_depth.destroy(gpu);
+        destroy_depth(efb_depth, efb_depth_rt);
         white.destroy(gpu);
     }
 };

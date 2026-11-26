@@ -26,7 +26,9 @@ layout(std430, set = 0, binding = 0) readonly buffer States {
 layout(push_constant) uniform Push {
     uint state;
     uint has;    // gx::Has
-    uint flags;  // 1: constant alpha can't be written (the blend reads source alpha);
+    uint flags;  // 1: the blend reads source alpha: the TEV's alpha is written (a constant
+                 // alpha then comes from a second pass, renderer.cpp), unless 0x200: the
+                 // constant is written and ocol1 carries the TEV's alpha (dual-source blending);
                  // bits 4-5: a logic op's help (1 output 0, 2 output 1, 3 invert the output);
                  // 0x100: true colour (eight bits a channel in an EFB with alpha, no dither)
     float scale; // EFB pixels to target pixels

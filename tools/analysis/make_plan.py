@@ -109,6 +109,8 @@ FUNCTIONS = {
     # The end of a pass's drawing: the recorder's frame ends as it begins (vi.cpp's wrapper),
     # a tick before the copy to the frame buffer that the next pass makes.
     "endRender__10JFWDisplayFv": ("wrap", "JSystem: JFWDisplay::endRender (the early frame end)"),
+    # The 2x2 Z the CPU reads: the wrapper waits until the copy is in memory (mtxtag.cpp, texture.hpp).
+    "getZValue__Q214ZCaptureScreen12ZCaptureNodeFv": ("wrap", "game: ZCaptureNode::getZValue (the Z read back on time)"),
     "OSReport": ("lift", "dolphin/os: OSReport (formats through MSL's vprintf)"),
     "__PADDisableRecalibration": ("lift", "dolphin/pad: __PADDisableRecalibration (a flag in low memory)"),
     "EXIGetType": ("lift", "dolphin/exi: EXIGetType (a table over EXIGetID)"),
