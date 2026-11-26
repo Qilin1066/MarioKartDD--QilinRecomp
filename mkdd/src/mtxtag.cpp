@@ -46,10 +46,35 @@ void J3DFifoLoadPosMtxImm(Cpu& c) {
     // The packet's address is a multiple of four: bits 0 and 1 mark the other kinds of tag.
     load_position_matrix(c, c.r[3], c.r[4] << 2, rt::peek32(kShapePacket) & ~3u, kViewMatrix);
 }
+// Call sites of GXLoadPosMtxImm that draw many things of a kind, one call each: which thing it
+// is stands in a register the caller keeps across the call (read from each function's code: the
+// register is set once, from an argument, and not written again before the call). With it a
+// particle or a course object pairs with itself in the frame before; without it only the n-th
+// load of the site with the n-th, which fails for all of them when one appears or goes (in the
+// demo races: nine particles in ten, and every simple model on one frame in ten).
+struct Site {
+    uint32_t lr;      // the return address
+    uint8_t reg;      // the register that tells
+    bool pointer;     // its value is the address of the thing's address (a list iterator)
+};
+constexpr Site kSites[] = {
+    {0x8007D3A0u, 31, false},  // JPADrawBillboard(work, particle): the particle, r4 kept in r31
+    {0x8007D4C0u, 31, false},  // JPADrawRotBillboard: r31
+    {0x8007DDA8u, 29, false},  // JPADrawDirection: r29
+    {0x8007E1B4u, 30, false},  // JPADrawRotDirection: r30
+    {0x8007E408u, 30, false},  // JPADrawDBillboard: r30
+    {0x80200140u, 31, true},   // stParticleDraw::drawParentBillBoard(iterator&): the list link the iterator is at
+    {0x80200870u, 31, true},   // stParticleDraw::drawParentDirectional
+    {0x80183758u, 27, false},  // ExModel::simpleDraw: the model (this), kept in r27
+};
+
 void GXLoadPosMtxImm(Cpu& c) {
     // Who called: one call site is one kind of thing drawn (a particle system's
     // draw, a 2D pane, the course). Bit 1 says so.
-    load_position_matrix(c, c.r[3], c.r[4] << 2, (c.lr & ~3u) | 2u, kViewMatrix);
+    uint32_t id = 0;
+    for (const Site& s : kSites)
+        if (s.lr == c.lr) id = s.pointer ? rt::peek32(c.r[s.reg]) : c.r[s.reg];
+    load_position_matrix(c, c.r[3], c.r[4] << 2, (c.lr & ~3u) | 2u, kViewMatrix, id);
 }
 
 const rt::Provided kReplacements[] = {

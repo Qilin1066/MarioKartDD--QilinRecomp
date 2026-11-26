@@ -162,6 +162,9 @@ constexpr uint32_t kNoLoad = 0xFFFFFFFFu;
 constexpr uint16_t kNoView = 0xFFFFu;
 struct Load {
     uint32_t tag;
+    // Which of the things one caller draws this is, where the loader can tell (mtxtag.cpp: a
+    // particle's or a model's own address); 0 where it can't. Loads pair by tag, id and slot.
+    uint32_t id;
     uint16_t slot, view;  // view: index into the frame's views (kNoView: not known)
     float mv[12];         // the matrix loaded (model and view), three rows of four
 };

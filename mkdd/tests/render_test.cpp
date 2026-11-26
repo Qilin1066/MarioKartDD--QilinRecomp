@@ -51,6 +51,7 @@ int g_failures = 0;
 
 void check(bool ok, const std::string& what) {
     std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
+    std::fflush(stdout);  // (kept if a later scenario stops the program)
     if (!ok) ++g_failures;
 }
 
@@ -942,9 +943,10 @@ void lod_bias(Target& t, Stream& st) {
 // ---- pictures between frames (interp.hpp)
 
 // A perspective projection for the scenes below: x and y of a point ten units ahead reach the
-// picture's edge at 5; near 1, far 100.
+// picture's edge at 5; near 1, far 400 (the cut and jump rules are in shares of the far
+// distance: a camera step over 1.56 here is a cut, a model's over 3.1 a jump).
 void perspective(Stream& st) {
-    st.xff(0x1020, {2.0f, 0.0f, 2.0f, 0.0f, -1.0f / 99.0f, -100.0f / 99.0f});
+    st.xff(0x1020, {2.0f, 0.0f, 2.0f, 0.0f, -1.0f / 399.0f, -400.0f / 399.0f});
     st.xf(0x1026, {0});
 }
 struct Mat {
@@ -1008,6 +1010,7 @@ void between_frames(Target& t, Stream& st) {
               std::to_string(pc.alone) + " alone (2, 1, 2)");
     const auto one = t.between(1.0f), zero = t.between(0.0f), half = t.between(0.5f);
     check(!one.empty() && one == b, "the picture at phase 1 is the frame's own, pixel for pixel");
+    if (half.empty()) return check(false, "no picture between the two frames");
     // At 0.5 the camera is at 0.2. The mover is at -1.5: x = 320 + 64 * -1.7 = 211.2 (the frames: 192 and 230.4).
     const Blob mover = blob(half, 100, 20, 300, 130);
     check(std::abs(mover.x - 211.2) < 1.0 && mover.n > 800, "half way, a moving object is half way: x " + num(mover.x) + " (211.2)");

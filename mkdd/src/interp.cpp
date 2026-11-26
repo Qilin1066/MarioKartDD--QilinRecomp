@@ -7,7 +7,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 
 namespace mkdd::interp {
 
@@ -146,7 +149,87 @@ void blend_matrix(const float a[12], const float b[12], float t, float out[12]) 
     matrix_of(q, s, tr, out);
 }
 
+// ---- MKDD_INTERP_LOG=<file>: what pairing finds, every 600 frames (ten seconds): how many
+// loads pair and why the rest don't, how far views and models move in a tick as a share of the
+// view's depth (the cut and jump rules are in those units), and the tags that pair worst.
+namespace {
+struct Probe {
+    FILE* out = nullptr;
+    uint64_t frames = 0, blendable = 0, loads = 0, paired = 0, jumped = 0, fresh = 0, miscounted = 0, other_view = 0, untagged = 0,
+             views = 0, cuts = 0, view_changes = 0;
+    uint32_t view_step[14] = {}, view_turn[8] = {}, model_move[14] = {};
+    double far_sum = 0;
+    float far_max = 0, step_max = 0;
+    struct Tag {
+        uint32_t paired = 0, miscounted = 0, fresh = 0, jumped = 0;
+    };
+    std::unordered_map<uint32_t, Tag> tags;
+    static unsigned bucket(float ratio) {  // [2^(i-15), 2^(i-14)); 0 below, 13 above 1/4
+        if (!(ratio > 0)) return 0;
+        return unsigned(std::clamp(int(std::floor(std::log2(ratio))) + 15, 0, 13));
+    }
+    void turn(float dot) {
+        const float degrees = 2.0f * std::acos(std::min(dot, 1.0f)) * 57.29578f;
+        static constexpr float kEdges[7] = {0.5f, 1, 2, 5, 10, 20, 45};
+        unsigned b = 0;
+        while (b < 7 && degrees >= kEdges[b]) ++b;
+        ++view_turn[b];
+    }
+    void flush() {
+        std::fprintf(out, "frames %llu (blendable %llu, view-count changes %llu): a frame %.1f loads: paired %.1f, jumped %.2f, new %.1f, "
+                          "count differs %.1f, view cut or other %.1f, untagged %.1f; views %.2f, cuts %llu\n",
+                     (unsigned long long)frames, (unsigned long long)blendable, (unsigned long long)view_changes, double(loads) / double(frames),
+                     double(paired) / double(frames), double(jumped) / double(frames), double(fresh) / double(frames),
+                     double(miscounted) / double(frames), double(other_view) / double(frames), double(untagged) / double(frames),
+                     double(views) / double(frames), (unsigned long long)cuts);
+        const auto row = [&](const char* name, const uint32_t* h, unsigned n) {
+            std::fprintf(out, "  %s:", name);
+            for (unsigned i = 0; i < n; ++i) std::fprintf(out, " %u", h[i]);
+            std::fprintf(out, "\n");
+        };
+        std::fprintf(out, "  far: mean %.0f, largest %.0f; largest view step %.1f\n", views ? far_sum / double(views) : 0.0, double(far_max), double(step_max));
+        row("view step / far, by powers of two from 2^-15 (first: none; last: over 1/4)", view_step, 14);
+        row("view turn, degrees <0.5 <1 <2 <5 <10 <20 <45 more", view_turn, 8);
+        row("model move / far, the same buckets", model_move, 14);
+        std::vector<std::pair<uint32_t, Tag>> worst(tags.begin(), tags.end());
+        std::sort(worst.begin(), worst.end(), [](const auto& a, const auto& b) {
+            return a.second.miscounted + a.second.fresh + a.second.jumped > b.second.miscounted + b.second.fresh + b.second.jumped;
+        });
+        for (size_t i = 0; i < worst.size() && i < 12; ++i) {
+            const Tag& t = worst[i].second;
+            if (t.miscounted + t.fresh + t.jumped == 0) break;
+            std::fprintf(out, "  tag %08X (%s): paired %u, count differs %u, new %u, jumped %u\n", worst[i].first,
+                         (worst[i].first & 1) ? "indexed" : (worst[i].first & 2) ? "caller" : "packet", t.paired, t.miscounted, t.fresh, t.jumped);
+        }
+        std::fprintf(out, "  %llu tags in all\n", (unsigned long long)tags.size());
+        std::fflush(out);
+        const auto keep = out;
+        *this = Probe{};
+        out = keep;
+    }
+};
+Probe* const g_probe = [] () -> Probe* {
+    const char* path = std::getenv("MKDD_INTERP_LOG");
+    FILE* f = path && *path ? std::fopen(path, "w") : nullptr;
+    if (!f) return nullptr;
+    auto* p = new Probe;
+    p->out = f;
+    return p;
+}();
+}  // namespace
+
 // ---- pairing
+
+// The rules for what isn't blended, from the attract mode's demo races (MKDD_INTERP_LOG,
+// 2026-11-26; docs/graphics.md has the distributions), as shares of the view's far distance:
+// a camera's eye moves about 1/4000 of it a tick in a race and never 1/500, and turns under
+// 10 degrees; at the demos' cuts it moves 1/64 to 1/16 or turns over 45 degrees. A model's
+// own movement is mostly under 1/2000 and tails off by 1/250; what is beyond is a rescue, a
+// cannon, or the n-th load of a tag not being the thing it was (two objects swapping places
+// in the draw order), and both are better drawn where the newer frame has them.
+constexpr float kCutTurn = 0.9848078f;   // the quaternions' dot at a turn of 20 degrees
+constexpr float kCutStep = 1.0f / 256.0f;
+constexpr float kJump = 1.0f / 128.0f;
 
 bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
     counts_ = {};
@@ -156,6 +239,12 @@ bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
     views_.resize(views);
     for (ViewPair& v : views_) v.blend = false;
     counts_.loads = uint32_t(loads), counts_.views = uint32_t(views);
+    if (g_probe) {
+        if (g_probe->frames >= 600) g_probe->flush();
+        ++g_probe->frames, g_probe->loads += loads, g_probe->views += views;
+        for (const gx::Load& l : cur.loads) g_probe->untagged += l.tag == 0 || l.view == gx::kNoView;
+        if (prev.views.size() != views) ++g_probe->view_changes;
+    }
     if (cur.state_info.size() != cur.states.size() || views == 0) return false;
     // Views pair by their order in the frame, which holds while there are as
     // many: a camera a player, drawn in the same order every frame. Another
@@ -190,35 +279,53 @@ bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
         step = std::sqrt(step);
         const float dot = std::fabs(pa.q[0] * pb.q[0] + pa.q[1] * pb.q[1] + pa.q[2] * pb.q[2] + pa.q[3] * pb.q[3]);
         const bool rigid = pa.rigid && pb.rigid && std::fabs(pa.s[0] - 1) < 1e-2f && std::fabs(pb.s[0] - 1) < 1e-2f && pa.s[2] > 0 && pb.s[2] > 0;
-        const bool cut = !rigid || dot < 0.8660254f || (step > 0.01f * far_z && last_step_[v] >= 0 && step > 6.0f * last_step_[v]) ||
-                         (last_step_[v] < 0 && far_z > 0 && step > 0.01f * far_z);
+        const bool cut = !rigid || dot < kCutTurn || (step > kCutStep * far_z && last_step_[v] >= 0 && step > 6.0f * last_step_[v]) ||
+                         (last_step_[v] < 0 && far_z > 0 && step > kCutStep * far_z);
+        if (g_probe) {
+            g_probe->far_sum += far_z, g_probe->far_max = std::max(g_probe->far_max, far_z), g_probe->step_max = std::max(g_probe->step_max, step);
+            ++g_probe->view_step[far_z > 0 ? Probe::bucket(step / far_z) : 0];
+            g_probe->turn(dot);
+            g_probe->cuts += cut;
+        }
         last_step_[v] = cut ? -1.0f : step;
         vp.blend = !cut;
         if (cut) ++counts_.cuts;
         any |= !cut;
     }
     if (!any) return false;
+    if (g_probe) ++g_probe->blendable;
     // Loads pair by tag and slot: the n-th of a kind in each frame, where both have as many.
     const auto keys_of = [](const gx::Frame& f, std::vector<Key>& keys) {
         keys.clear();
         for (size_t i = 0; i < f.loads.size(); ++i)
             if (f.loads[i].tag != 0 && f.loads[i].view != gx::kNoView)
-                keys.push_back({(uint64_t(f.loads[i].tag) << 8) | f.loads[i].slot, uint32_t(i)});
-        std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) { return a.key != b.key ? a.key < b.key : a.index < b.index; });
+                keys.push_back({(uint64_t(f.loads[i].tag) << 32) | f.loads[i].id, f.loads[i].slot, uint32_t(i)});
+        std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
+            return a.key != b.key ? a.key < b.key : a.slot != b.slot ? a.slot < b.slot : a.index < b.index;
+        });
     };
     keys_of(prev, prev_keys_), keys_of(cur, cur_keys_);
     size_t p = 0;
     for (size_t c = 0; c < cur_keys_.size();) {
         const uint64_t key = cur_keys_[c].key;
+        const uint32_t slot = cur_keys_[c].slot;
+        const auto before = [&](const Key& k) { return k.key != key ? k.key < key : k.slot < slot; };
+        const auto same_kind = [&](const Key& k) { return k.key == key && k.slot == slot; };
         size_t c_end = c;
-        while (c_end < cur_keys_.size() && cur_keys_[c_end].key == key) ++c_end;
-        while (p < prev_keys_.size() && prev_keys_[p].key < key) ++p;
+        while (c_end < cur_keys_.size() && same_kind(cur_keys_[c_end])) ++c_end;
+        while (p < prev_keys_.size() && before(prev_keys_[p])) ++p;
         size_t p_end = p;
-        while (p_end < prev_keys_.size() && prev_keys_[p_end].key == key) ++p_end;
+        while (p_end < prev_keys_.size() && same_kind(prev_keys_[p_end])) ++p_end;
         const bool same = p_end - p == c_end - c;
         for (size_t i = c; i < c_end; ++i) {
             const gx::Load& l1 = cur.loads[cur_keys_[i].index];
             const ViewPair& vp = views_[l1.view];
+            if (g_probe) {
+                Probe::Tag& t = g_probe->tags[l1.tag];
+                if (!vp.blend) ++g_probe->other_view;
+                else if (p_end == p) ++g_probe->fresh, ++t.fresh;
+                else if (!same) ++g_probe->miscounted, ++t.miscounted;
+            }
             if (!vp.blend) continue;
             Prepared& pr = prepared_[cur_keys_[i].index];
             float m1[12];
@@ -235,8 +342,10 @@ bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
                 const float far_z = vp.has_projection && vp.projection[1][4] != 0 ? std::fabs(vp.projection[1][5] / vp.projection[1][4]) : 0.0f;
                 float moved = 0;
                 for (int k = 0; k < 3; ++k) moved += (m1[4 * k + 3] - m0[4 * k + 3]) * (m1[4 * k + 3] - m0[4 * k + 3]);
-                if (far_z > 0 && std::sqrt(moved) > 0.02f * far_z) {
+                if (g_probe && far_z > 0) ++g_probe->model_move[Probe::bucket(std::sqrt(moved) / far_z)];
+                if (far_z > 0 && std::sqrt(moved) > kJump * far_z) {
                     ++counts_.jumped;
+                    if (g_probe) ++g_probe->jumped, ++g_probe->tags[l1.tag].jumped;
                 } else {
                     from_parts(parts_of(m0), pr.from), from_parts(parts_of(m1), pr.to);
                     std::memcpy(pr.from.m, m0, sizeof m0);
@@ -244,12 +353,15 @@ bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
                     pr.how = 1;
                 }
             }
+            if (g_probe && pr.how == 1) ++g_probe->paired, ++g_probe->tags[l1.tag].paired;
+            else if (g_probe && l0 && l0->view != l1.view) ++g_probe->other_view;
             if (pr.how == 1) ++counts_.paired;
             else ++counts_.alone;
         }
         c = c_end;
     }
-    return true;
+    // Nothing to move (a movie, a menu: flat drawing only): the picture between would be the frame.
+    return counts_.paired + counts_.alone > 0;
 }
 
 // ---- a picture's states

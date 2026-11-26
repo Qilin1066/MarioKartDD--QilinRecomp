@@ -86,7 +86,7 @@ size_t g_fifo_at = 0;
 // only means its draws aren't blended between frames.
 struct MatrixTag {
     uint64_t at;  // the load command's offset in the stream
-    uint32_t tag;
+    uint32_t tag, id;
     float view[12];
 };
 constexpr size_t kTagRing = 1u << 14;
@@ -95,11 +95,11 @@ std::atomic<uint64_t> g_tags_written{0}, g_tags_read{0};
 std::atomic<uint64_t> g_forwarded{0};  // bytes sent on to the decoder (the guest's side; whole bursts)
 uint64_t g_stream_base = 0;           // the stream offset of g_fifo's first byte (the decoder's side)
 
-void push_tag(uint64_t at, uint32_t tag, const float* view) {
+void push_tag(uint64_t at, uint32_t tag, const float* view, uint32_t id = 0) {
     const uint64_t w = g_tags_written.load(std::memory_order_relaxed);
     if (w - g_tags_read.load(std::memory_order_acquire) >= kTagRing) return;
     MatrixTag& t = g_tag_ring[w % kTagRing];
-    t.at = at, t.tag = tag;
+    t.at = at, t.tag = tag, t.id = id;
     std::memcpy(t.view, view, sizeof t.view);
     g_tags_written.store(w + 1, std::memory_order_release);
 }
@@ -591,7 +591,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             if (changed) gx::xf_changed(addr, count);  // the same values again change nothing
             if (addr < 120 && count == 12) {  // a position matrix: with its tag, if the loader gave one
                 const MatrixTag* t = in_display_list || data != g_fifo.data() ? nullptr : take_tag(g_stream_base + used);
-                gx::matrix_loaded(addr, &g_xf[addr], t ? t->tag : 0, t ? t->view : nullptr);
+                gx::matrix_loaded(addr, &g_xf[addr], t ? t->tag : 0, t ? t->view : nullptr, t ? t->id : 0);
             }
             n = 5 + 4 * count;
         } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) {  // LOAD_INDX_A-D
@@ -942,20 +942,20 @@ void init_gpu() {
 }
 uint64_t fifo_wait_ns() { return g_fifo_wait_ns.load(std::memory_order_relaxed); }
 
-void load_position_matrix(Cpu& c, uint32_t matrix, uint32_t xf_address, uint32_t tag, uint32_t view) {
+void load_position_matrix(Cpu& c, uint32_t matrix, uint32_t xf_address, uint32_t tag, uint32_t view, uint32_t id) {
     // Where the command will start in the decoder's stream: the bursts sent on so far and the
     // bytes gathered since. (Unlinked, nothing reaches the decoder and there is nothing to tag.)
     if (linked()) {
         float v[12];
         for (unsigned i = 0; i < 12; ++i) v[i] = std::bit_cast<float>(rt::peek32(view + 4 * i));
-        push_tag(g_forwarded.load(std::memory_order_relaxed) + g_gathered, tag, v);
+        push_tag(g_forwarded.load(std::memory_order_relaxed) + g_gathered, tag, v, id);
     }
     pipe_write(c, 0x10, 1);
     pipe_write(c, (11u << 16) | (xf_address & 0xFFFFu), 4);
     for (unsigned i = 0; i < 12; ++i) pipe_write(c, rt::peek32(matrix + 4 * i), 4);
 }
 
-void tag_matrix_at(uint64_t stream_offset, uint32_t tag, const float view[12]) { push_tag(stream_offset, tag, view); }
+void tag_matrix_at(uint64_t stream_offset, uint32_t tag, const float view[12], uint32_t id) { push_tag(stream_offset, tag, view, id); }
 
 void decode_commands(const uint8_t* bytes, size_t size) {
     static Cpu c = rt::new_cpu();

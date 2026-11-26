@@ -219,6 +219,7 @@ struct Renderer::Impl {
     std::unique_ptr<gx::Frame> held, held_prev;
     std::vector<Replay> replay;  // one for each of the held frame's draws
     bool keep_replay = false, can_blend = false;
+    int why_not = -1;
     interp::Blender blender;
     gx::Copy between_clear{};    // the clearing copy the frame before ended with
     Slot between[2];
@@ -226,6 +227,7 @@ struct Renderer::Impl {
     Image efb_between, efb_depth_between, between_xfb[3];
     bool between_timed[2] = {};
     uint64_t between_gpu_ns = 0, between_gpu_timed = 0;
+    uint64_t cost_frames = 0, cost_pictures = 0, cost_cpu_ns = 0, cost_gpu_ns = 0, cost_gpu_timed = 0;  // MKDD_INTERP_LOG
     // GPU time per frame: two timestamps a slot, where the queue has them.
     VkQueryPool timestamps = VK_NULL_HANDLE;
     double ns_per_tick = 0;
@@ -1778,6 +1780,15 @@ struct Renderer::Impl {
 
     // The frame just drawn is kept, with the one before it, for render_between.
     void render_held(std::unique_ptr<gx::Frame> f) {
+        // MKDD_INTERP_LOG: what the pictures between cost, every 600 frames (with interp.cpp's lines in its file).
+        static const bool costs = [] { const char* e = std::getenv("MKDD_INTERP_LOG"); return e && *e; }();
+        if (costs && ++cost_frames >= 600) {
+            rt::log("render: pictures between frames, the last 600 frames: %llu pictures, %.3f ms each on this thread, %.3f ms on the GPU (%u views, %llu draws in the newest frame)",
+                    static_cast<unsigned long long>(cost_pictures), cost_pictures ? double(cost_cpu_ns) / 1e6 / double(cost_pictures) : 0.0,
+                    cost_gpu_timed ? double(cost_gpu_ns) / 1e6 / double(cost_gpu_timed) : 0.0, blender.counts().views,
+                    static_cast<unsigned long long>(held ? held->draws.size() : 0));
+            cost_frames = cost_pictures = cost_cpu_ns = cost_gpu_ns = cost_gpu_timed = 0;
+        }
         keep_replay = true;
         render(*f);
         keep_replay = false;
@@ -1785,17 +1796,28 @@ struct Renderer::Impl {
         held_prev = std::move(held);
         held = std::move(f);
         can_blend = false;
+        // Why a frame has no pictures between, said when the reason changes.
+        const auto because = [this](int why, const char* text) {
+            if (why != why_not) rt::log("render: pictures between frames: %s", text);
+            why_not = why;
+        };
         if (!held_prev || held_prev->copies.empty() || held->copies.empty()) return;
         // A picture between starts from what the frame started from. That is known
         // without keeping a copy of the EFB when the frame before ended by clearing
         // it (this game's always do); otherwise, and where the picture changes its
         // pixel format in mid-frame, there are no pictures between for this frame.
         const gx::Copy& last = held_prev->copies.back();
-        if (!last.to_xfb || !last.clear || !last.clear_color || !last.clear_depth || !held->copies.back().to_xfb) return;
+        if (!last.to_xfb || !last.clear || !last.clear_color || !last.clear_depth || !held->copies.back().to_xfb) {
+            char text[160];
+            std::snprintf(text, sizeof text, "none, the frame before didn't end by clearing the EFB (to the frame buffer %d, clear %d, colour %d, depth %d)",
+                          last.to_xfb, last.clear, last.clear_color, last.clear_depth);
+            return because(1 + last.to_xfb + 2 * last.clear + 4 * last.clear_color + 8 * last.clear_depth, text);
+        }
         for (const gx::Packet& pk : held->packets)
-            if (pk.kind == gx::Packet::kConvert) return;
+            if (pk.kind == gx::Packet::kConvert) return because(20, "none, the frame changes the EFB's pixel format part way");
         between_clear = last;
         can_blend = blender.pair(*held_prev, *held);
+        because(can_blend ? 0 : 21, can_blend ? "drawn" : "none, nothing pairs with the frame before (a change of scene)");
     }
 
     // The held frame's picture at `phase` between the frame before (0) and itself
@@ -1806,6 +1828,8 @@ struct Renderer::Impl {
     // shows the frame's own picture.
     const Image* render_between(float phase) {
         if (!held || !can_blend) return nullptr;
+        const uint64_t cost0 = gx::now_ns();
+        ++cost_pictures;
         const gx::Frame& f = *held;
         between_slot ^= 1u;
         Slot& s = between[between_slot];
@@ -1814,7 +1838,8 @@ struct Renderer::Impl {
         if (between_timed[between_slot]) {
             uint64_t t[2];
             if (vkGetQueryPoolResults(gpu.device, timestamps, q, 2, sizeof t, t, sizeof t[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
-                between_gpu_ns += uint64_t(double((t[1] - t[0]) & tick_mask) * ns_per_tick), ++between_gpu_timed;
+                between_gpu_ns += uint64_t(double((t[1] - t[0]) & tick_mask) * ns_per_tick), ++between_gpu_timed,
+                    cost_gpu_ns += uint64_t(double((t[1] - t[0]) & tick_mask) * ns_per_tick), ++cost_gpu_timed;
             between_timed[between_slot] = false;
         }
         check(vkResetDescriptorPool(gpu.device, s.descriptors, 0), "vkResetDescriptorPool");
@@ -1927,6 +1952,7 @@ struct Renderer::Impl {
         }
         check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
         submit(s);
+        cost_cpu_ns += gx::now_ns() - cost0;
         return picture.image ? &picture : nullptr;
     }
 
