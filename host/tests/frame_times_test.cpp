@@ -136,6 +136,16 @@ int main() {
               "the modes fullscreen counts as even");
     }
 
+    // When a picture drawn now is seen (pacing.hpp): the first vblank after it.
+    {
+        using qilin::host::next_vblank;
+        const uint64_t p = 8333333;  // 120 Hz
+        check(next_vblank(1000, 0, p) == p && next_vblank(p - 1, 0, p) == p && next_vblank(p, 0, p) == 2 * p,
+              "the next vblank after now (one at this instant has gone)");
+        check(next_vblank(10 * p + 5, 3 * p, p) == 11 * p && next_vblank(100, 3 * p, p) == p, "from any one vblank's time, later or earlier than now");
+        check(next_vblank(12345, 999, 0) == 12345, "no period known: now");
+    }
+
     // The surround decoder (audio.hpp): what is alike in both channels is the centre's, what is
     // opposite the rear's (late and band-limited), and left and right pass as they are.
     {

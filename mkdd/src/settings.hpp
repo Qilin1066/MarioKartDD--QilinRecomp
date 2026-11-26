@@ -62,10 +62,10 @@ struct Player {
     std::vector<Binding> controls[kControlCount];
 };
 
-// Frames a second: the game's own (60; LAN play draws every second one in its
-// fullest games), 60 with every frame drawn, the display's refresh rate, or
-// as many as the computer draws. Above 60 needs pictures drawn between the
-// game's own (enhance.hpp, docs/enhancements.md).
+// Frames a second: the game's own 59.94 (original and sixty are the same
+// for this game: each frame is shown as it comes), the display's refresh
+// rate, or as many as the computer draws. Above the game's own they are
+// pictures drawn between its frames (interp.hpp, docs/graphics.md).
 enum class FrameRate : uint8_t { original, sixty, display, unlimited };
 // The HUD where the picture is wider than 4:3: at the screen's edges, in the
 // middle 4:3, or stretched with the picture.
