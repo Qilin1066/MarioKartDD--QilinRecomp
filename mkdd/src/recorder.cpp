@@ -25,6 +25,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -1399,7 +1400,9 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
 }
 
 static void draw_done();
+static uint32_t g_bp_now[256] = {};  // the BP registers as written since the last copy to the frame buffer (draw_done foretells from them)
 void bp_written(uint32_t reg, uint32_t value, bool changed) {
+    g_bp_now[reg & 0xFF] = value;
     if (reg == 0x45) draw_done();  // (the early frame end, if asked for)
     if (reg == 0x66) textures_invalidated(), g_join.valid = false;  // (a texture may be new under the same registers)
     if (!changed) return;  // the state is what it was (commands are acted on by gpu.cpp either way)
@@ -1545,9 +1548,11 @@ static void end_frame(Frame& f) {
     if (g_survey) [[unlikely]] survey(f, g_stats.frames.load(std::memory_order_relaxed));
     textures_end_frame(f);
     hud::place(f);  // (a widened picture: the flat parts back in proportion)
-    const uint64_t number = g_stats.frames.fetch_add(1, std::memory_order_relaxed) + 1;
+    g_stats.frames.fetch_add(1, std::memory_order_relaxed);
+    static uint64_t passes = 0;  // (MKDD_LATENCY numbers the passes' frames: a confirming copy isn't one)
+    const bool counted = !f.confirming;
     submit(std::move(g_frame));
-    latency::frame_handed(number);  // (MKDD_LATENCY)
+    if (counted) latency::frame_handed(++passes);
     g_frame = spare_frame();
     g_dirty = true;
     g_join.valid = false;
@@ -1559,15 +1564,27 @@ static void end_frame(Frame& f) {
 // drawing in JFWDisplay::endRender (a draw done, BP 0x45), calculates, waits for the
 // retrace and only then copies the picture to the frame buffer, in the next pass's
 // beginRender. The frame is ended at that draw done instead, with the copy the next pass
-// will make: the last one's, to the frame buffer after it in the game's rotation. When
-// that copy comes it is left out if it is the one foretold (it was made); otherwise it
-// is counted, and after three wrong in a row the early end stops.
+// will make foretold: the last one's, to the frame buffer after it in the game's rotation.
+// - Kept (set_copy_kept: the game's own frame rate): the foretold copy doesn't clear the
+//   EFB, and the real one, when it comes, ends a frame of its own (Frame::confirming), so
+//   the picture shown is always the real copy's; the main loop waits for it at the
+//   retrace. A wrong foretelling then costs nothing: the confirming copy is the right one.
+//   (The copy filter is foretold from the render mode beginRender will use, read in
+//   endRender; still wrong where AppMgr::calc, after endRender, switches the render mode,
+//   System::changeMovieRenderMode and changeNormalRenderMode at a movie's start and end,
+//   or the EFB's format: the log names what differed.)
+// - Not kept (pictures between frames, which start from a frame that cleared the EFB):
+//   the foretold copy clears, and the real one is left out; a wrong one is counted, the
+//   picture it made stays (the EFB is cleared), and after three in a row the early end stops.
 namespace {
+std::atomic<bool> g_keep_real{false};
+bool g_foretold_kept = false;
 const bool g_early_on = [] {
     const char* e = std::getenv("MKDD_EARLY_END");
     return !(e && *e == '0') && !std::getenv("MKDD_DFF");  // (a capture ends its frame at the copy)
 }();
 std::atomic<uint64_t> g_end_requests{0};
+std::atomic<int> g_next_filter{-1};  // (request_frame_end's: read by draw_done after the request's acquire)
 uint64_t g_end_served = 0;
 Copy g_last_xfb{};
 uint32_t g_xfb_dests[4] = {};  // the last copies' frame buffers, newest first
@@ -1575,6 +1592,31 @@ unsigned g_xfb_seen = 0, g_wrong_in_a_row = 0;
 bool g_foretold = false, g_early_stopped = false;
 Copy g_foretold_copy{};
 uint64_t g_early_ends = 0, g_wrong = 0, g_drawn_after = 0;
+
+uint32_t g_last_xfb_command = 0;
+
+// What differs between two copies, named (for the log): "" if nothing.
+std::string copy_difference(const Copy& real, const Copy& told) {
+    std::string s;
+    char b[96];
+    const auto add = [&](const char* name, auto x, auto y) {
+        if (x == y) return;
+        std::snprintf(b, sizeof b, "%s%s %lld, foretold %lld", s.empty() ? "" : "; ", name, static_cast<long long>(x), static_cast<long long>(y));
+        s += b;
+    };
+    add("dest", real.dest, told.dest);
+    for (int i = 0; i < 4; ++i) add("src", real.src[i], told.src[i]);
+    add("width", real.dest_width, told.dest_width), add("height", real.dest_height, told.dest_height);
+    add("half scale", real.half_scale, told.half_scale), add("from depth", real.from_depth, told.from_depth);
+    add("EFB alpha", real.efb_alpha, told.efb_alpha), add("clear", real.clear, told.clear);
+    add("clear colour", real.clear_color, told.clear_color), add("clear alpha", real.clear_alpha, told.clear_alpha);
+    add("clear depth", real.clear_depth, told.clear_depth), add("clear z", real.clear_z, told.clear_z);
+    for (int i = 0; i < 4; ++i) add("clear rgba", real.clear_rgba[i], told.clear_rgba[i]);
+    add("gamma x10", std::lround(real.gamma * 10), std::lround(told.gamma * 10));
+    for (int i = 0; i < 3; ++i) add("filter", real.filter[i], told.filter[i]);
+    add("clamp top", real.clamp_top, told.clamp_top), add("clamp bottom", real.clamp_bottom, told.clamp_bottom);
+    return s;
+}
 
 bool same_copy(const Copy& a, const Copy& b) {
     return std::memcmp(a.src, b.src, sizeof a.src) == 0 && a.dest == b.dest && a.dest_width == b.dest_width &&
@@ -1595,8 +1637,12 @@ bool next_dest(uint32_t& dest) {
 }
 }  // namespace
 
-void request_frame_end() {
-    if (g_early_on) g_end_requests.fetch_add(1, std::memory_order_release);
+void set_copy_kept(bool on) { g_keep_real.store(on, std::memory_order_relaxed); }
+bool early_frame_end() { return g_early_on; }
+void request_frame_end(int vfilter) {
+    if (!g_early_on) return;
+    g_next_filter.store(vfilter, std::memory_order_relaxed);
+    g_end_requests.fetch_add(1, std::memory_order_release);
 }
 
 static void log_copy(const char* what, const Copy& c) {
@@ -1616,6 +1662,7 @@ static void note_xfb_copy(const Copy& c) {
     ++g_xfb_seen;
 }
 
+static Copy copy_state(const uint32_t* bp, uint32_t command);
 // At a draw done: the frame ends here if the game's thread asked (it was in endRender).
 static void draw_done() {
     if (g_end_requests.load(std::memory_order_acquire) == g_end_served) return;
@@ -1624,11 +1671,23 @@ static void draw_done() {
     uint32_t dest;
     if (g_early_stopped || !next_dest(dest)) return;
     Frame& f = *g_frame;
+    // The last copy's, with the copy filter the next beginRender will set (its render
+    // mode's, read in endRender: a movie's start or end and the menus change it), else the
+    // one set since. The rest is the last one's: the source, destination, format and clear
+    // registers are written again by copies to textures in mid-frame, and GXCopyDisp
+    // writes its own before it copies.
     Copy c = g_last_xfb;
+    if (const int v = g_next_filter.load(std::memory_order_relaxed); v >= 0)
+        c.filter[0] = uint8_t(v), c.filter[1] = uint8_t(v >> 8), c.filter[2] = uint8_t(v >> 16);
+    else
+        std::memcpy(c.filter, copy_state(g_bp_now, g_last_xfb_command).filter, sizeof c.filter);
     c.dest = dest;
+    g_foretold_copy = c, g_foretold = true;
+    g_foretold_kept = g_keep_real.load(std::memory_order_relaxed);
+    if (g_foretold_kept) c.clear = false;  // (the real copy clears, a frame later)
     f.packets.push_back({Packet::kCopy, uint32_t(f.copies.size())});
     f.copies.push_back(c);
-    g_foretold_copy = c, g_foretold = true;
+    f.foretold = true;
     log_copy("foretold", c);
     if (++g_early_ends == 1 || g_early_ends % 3600 == 0)
         qilin::rt::log("render: early frame ends %llu, foretold wrong %llu, drawing between %llu", static_cast<unsigned long long>(g_early_ends),
@@ -1636,8 +1695,8 @@ static void draw_done() {
     end_frame(f);
 }
 
-// A copy to the frame buffer: true if the early end made it already.
-static bool early_copy_made(const Copy& c, const Frame& f) {
+// A copy to the frame buffer: true if the early end made it already (it isn't made again).
+static bool early_copy_made(const Copy& c, Frame& f) {
     if (!g_foretold) return false;
     log_copy("came", c);
     g_foretold = false;
@@ -1647,13 +1706,19 @@ static bool early_copy_made(const Copy& c, const Frame& f) {
         ++g_drawn_after;
         return false;
     }
+    const bool right = same_copy(c, g_foretold_copy);
+    if (!right && ++g_wrong <= 5)
+        qilin::rt::log("render: the early frame end foretold the wrong copy to %08X (%s)%s", c.dest, copy_difference(c, g_foretold_copy).c_str(),
+                       g_foretold_kept ? ": the real one is shown" : "");
+    if (g_foretold_kept) {  // made, ending a frame of its own: the picture shown
+        f.confirming = true;
+        return false;
+    }
     note_xfb_copy(c);
-    if (same_copy(c, g_foretold_copy)) {
+    if (right) {
         g_wrong_in_a_row = 0;
         return true;
     }
-    ++g_wrong;
-    if (g_wrong <= 5) qilin::rt::log("render: the early frame end foretold the wrong copy (frame buffer %08X, foretold %08X)", c.dest, g_foretold_copy.dest);
     if (++g_wrong_in_a_row == 3) {
         g_early_stopped = true;
         qilin::rt::log("render: the early frame end stops: three wrong copies in a row");
@@ -1661,27 +1726,28 @@ static bool early_copy_made(const Copy& c, const Frame& f) {
     return true;  // (the EFB was cleared by the one made: this one can't be made again)
 }
 
-static void record_copy_timed(const Registers& r, uint32_t command) {
-    Frame& f = *g_frame;
+// A copy's state from the BP registers and its command (all but its texture, which
+// record_copy_timed looks up): for a real copy, and for a foretold one (draw_done).
+static Copy copy_state(const uint32_t* bp, uint32_t command) {
     Copy c{};
-    const uint32_t src = r.bp[0x49], size = r.bp[0x4A];
+    const uint32_t src = bp[0x49], size = bp[0x4A];
     c.src[0] = int32_t(src & 0x3FF);
     c.src[1] = int32_t((src >> 10) & 0x3FF);
     c.src[2] = int32_t((size & 0x3FF) + 1);
     c.src[3] = int32_t(((size >> 10) & 0x3FF) + 1);
-    c.dest = bp_address(r.bp[0x4B]);
+    c.dest = bp_address(bp[0x4B]);
     c.to_xfb = (command >> 14) & 1;
     c.half_scale = (command >> 9) & 1;
     c.clear = (command >> 11) & 1;
-    c.from_depth = (r.bp[0x43] & 7) == 3;  // Z24: the EFB copy reads depth
-    c.efb_alpha = (r.bp[0x43] & 7) == 1;   // RGBA6_Z24: the only format that keeps alpha
+    c.from_depth = (bp[0x43] & 7) == 3;  // Z24: the EFB copy reads depth
+    c.efb_alpha = (bp[0x43] & 7) == 1;   // RGBA6_Z24: the only format that keeps alpha
     static constexpr float kGamma[4] = {1.0f, 1.7f, 2.2f, 2.2f};
     c.gamma = kGamma[(command >> 7) & 3];
     // The copy filter, which every EFB copy (to a texture or the frame buffer)
     // applies: GX's vertical filter, used for deflicker and to blend
     // alternate-line patterns. Weights w0-w3 in BP 0x53, w4-w6 in BP 0x54.
     {
-        const uint64_t w = uint64_t(r.bp[0x53] & 0xFFFFFF) | (uint64_t(r.bp[0x54] & 0xFFFFFF) << 24);
+        const uint64_t w = uint64_t(bp[0x53] & 0xFFFFFF) | (uint64_t(bp[0x54] & 0xFFFFFF) << 24);
         const auto tap = [&](unsigned i) { return unsigned((w >> (6 * i)) & 63); };
         c.filter[0] = uint8_t(tap(0) + tap(1));
         c.filter[1] = uint8_t(tap(2) + tap(3) + tap(4));
@@ -1694,19 +1760,19 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
     if (c.from_depth && !c.to_xfb) c.filter[0] = 0, c.filter[1] = 64, c.filter[2] = 0;
     c.clamp_top = command & 1;
     c.clamp_bottom = (command >> 1) & 1;
-    const uint32_t blend = r.bp[0x41];
-    const bool alpha_target = (r.bp[0x43] & 7) == 1;
+    const uint32_t blend = bp[0x41];
+    const bool alpha_target = (bp[0x43] & 7) == 1;
     c.clear_color = (blend >> 3) & 1;
     c.clear_alpha = ((blend >> 4) & 1) && alpha_target;
-    c.clear_depth = (r.bp[0x40] >> 4) & 1;
-    const uint32_t ar = r.bp[0x4F], gb = r.bp[0x50];
+    c.clear_depth = (bp[0x40] >> 4) & 1;
+    const uint32_t ar = bp[0x4F], gb = bp[0x50];
     c.clear_rgba[0] = uint8_t(ar & 255), c.clear_rgba[3] = uint8_t((ar >> 8) & 255);
     c.clear_rgba[1] = uint8_t((gb >> 8) & 255), c.clear_rgba[2] = uint8_t(gb & 255);
     if (!alpha_target) c.clear_rgba[3] = 255;
-    c.clear_z = r.bp[0x51] & 0xFFFFFF;
+    c.clear_z = bp[0x51] & 0xFFFFFF;
     if (c.to_xfb) {
         // The frame buffer's height after vertical scaling (BP 0x4E: 256 / scale).
-        const uint32_t yscale = r.bp[0x4E] & 0x1FF;
+        const uint32_t yscale = bp[0x4E] & 0x1FF;
         const float scale = ((command >> 10) & 1) && yscale ? 256.0f / float(yscale) : 1.0f;
         c.dest_width = uint32_t(c.src[2]);
         c.dest_height = uint32_t(std::lround(float(c.src[3]) * scale));
@@ -1715,6 +1781,17 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         c.format = ((command >> 3) & 15) / 2 + (((command >> 3) & 1) * 8) + (((command >> 15) & 1) ? 0x100 : 0);  // + intensity flag
         c.dest_width = uint32_t(c.half_scale ? c.src[2] / 2 : c.src[2]);
         c.dest_height = uint32_t(c.half_scale ? c.src[3] / 2 : c.src[3]);
+    }
+    return c;
+}
+
+static void record_copy_timed(const Registers& r, uint32_t command) {
+    Frame& f = *g_frame;
+    Copy c = copy_state(r.bp, command);
+    if (c.to_xfb) {
+        g_last_xfb_command = command;
+        std::memcpy(g_bp_now, r.bp, sizeof g_bp_now);  // (the state the next one is foretold from starts here)
+    } else {
         c.texture = texture_from_copy(c.dest, c.dest_width, c.dest_height, f);
         // A copy of one tile or less in the 32-bit layout (RGBA8, Z24X8) also
         // goes to guest memory, for the CPU: the game copies 2x2 pixels of

@@ -19,6 +19,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "input.hpp"
 
@@ -45,5 +46,10 @@ uint64_t pictures();
 // press (the timings are then not the game's: read-backs take milliseconds).
 bool checking();
 void check_picture(const uint8_t* rgba, uint32_t width, uint32_t height);
+// MKDD_PICTURE_HASHES=1 (offscreen): every picture presented, read back and hashed into the log,
+// to compare two runs' pictures byte for byte (slow: a read-back a picture).
+bool hashing();
+bool hashing_frames();  // also each frame's own picture (MKDD_PICTURE_HASHES=shown: only those presented, half the read-backs)
+void hash_picture(const std::vector<uint8_t>& rgba, double game_seconds, const char* what);
 
 }  // namespace mkdd::latency

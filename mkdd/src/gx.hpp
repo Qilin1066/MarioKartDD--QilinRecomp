@@ -298,6 +298,8 @@ struct Frame {
     std::vector<int32_t> released;  // texture ids no longer used
     bool alpha_target = true;       // the EFB has alpha (RGBA6_Z24)
     bool captured = false;          // the frame MKDD_DFF captured (main.cpp saves our picture of it)
+    bool foretold = false;          // ended early, its copy to the frame buffer foretold (recorder.hpp's request_frame_end)
+    bool confirming = false;        // only the real copy of the frame before, which was foretold
     // Empty again, keeping the vectors' capacity (recycle_frame). A new
     // member must be reset here too.
     void clear() {
@@ -306,6 +308,7 @@ struct Frame {
         textures.clear(), released.clear();
         alpha_target = true;
         captured = false;
+        foretold = confirming = false;
     }
 };
 // For a fatal error met while decoding (a texture, array or list outside memory): where the
