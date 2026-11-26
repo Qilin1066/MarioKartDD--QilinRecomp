@@ -187,7 +187,7 @@ Two threads share the work. The game's thread records what the command stream as
   - It reaches the depth buffer when Z is compared after texturing (BP 0x43 bit 6 clear). Those draws use a second build of the TEV shader that writes depth, because writing depth turns off the GPU's early depth test and every other draw keeps it.
 - **EFB copies of depth** (pixel format Z24 at the copy): the 24-bit depth is split into bytes, (z >> 16, z >> 8, z, 255), and these go through the colour copy's format conversion. So Z8 is the high byte, Z8M the middle and Z8L the low, as in Dolphin. The depth image is read with a nearest sampler, and the half-scale filter averages the bytes.
 - **Copy formats RG8 and GB8** sample (as IA8) with intensity from red and from green respectively. Before v0.13.9 the two channels were the wrong way round.
-- **Still approximate:** constant alpha together with blending that reads source alpha needs dual-source blending, which the Pi 4's driver doesn't have. There, the constant isn't written.
+- **Constant alpha beside blending by source alpha** is written with dual-source blending where the GPU has it, and otherwise (the Pi 4's driver) by marking the draw's pixels in a stencil and writing the constant over them in a second pass; `docs/graphics.md` has the details and the two cases that remain approximate.
 - **Tested without the game** (`mkdd_render_test`, in `ctest`, skipped without a Vulkan 1.3 device). GX register writes go through the real recorder and renderer, and the frame copied to the XFB is read back and checked. It covers:
   - all sixteen logic ops, with the GPU's own and approximated;
   - line and point sizes, and their fallbacks;
