@@ -99,6 +99,11 @@ private:
     // F9: the frames still to take, and those taken (PNG).
     unsigned frames_wanted_ = 0;
     std::vector<std::vector<uint8_t>> frames_;
+    // When F9 was pressed, and the game's frame count then: with no new frame a
+    // second later (the game stuck), the picture as it is, once.
+    uint64_t capture_asked_ms_ = 0;
+    uint32_t capture_asked_frame_ = 0;
+    bool capture_stuck_ = false;
 };
 
 }  // namespace mkdd
