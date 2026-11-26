@@ -514,7 +514,7 @@ struct Renderer::Impl {
     VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, bool vertices, VkPrimitiveTopology topology,
                              const VkPipelineColorBlendAttachmentState& blend, bool depth, bool depth_dynamic, int logic_op = -1,
                              bool line_width_dynamic = false, const VkSpecializationInfo* fs_constants = nullptr,
-                             bool small_vertices = false, bool blend_dynamic = false) {
+                             bool small_vertices = false, bool blend_dynamic = false, bool depth_clamp = false) {
         const VkPipelineShaderStageCreateInfo stages[2] = {
             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", nullptr},
             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", fs_constants}};
@@ -561,6 +561,7 @@ struct Renderer::Impl {
         rs.polygonMode = VK_POLYGON_MODE_FILL;
         rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
         rs.lineWidth = 1.0f;
+        rs.depthClampEnable = depth_clamp;
         VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
         ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
         VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -648,7 +649,10 @@ struct Renderer::Impl {
     // With dynamic blend state (Gpu::dynamic_blend), the part of a key that
     // still needs a pipeline of its own: the blend (and the logic op, where
     // it's dynamic too or only approximated by blending) is set per draw.
+    // Without depth clamping, GX's clipping turned off is drawn clipped all the same (the
+    // nearest the GPU comes: a vertex can't be moved without changing what's between).
     gx::PipelineKey base_key(gx::PipelineKey k) const {
+        if (!gpu.depth_clamp) k.no_clip = 0;
         if (!gpu.dynamic_blend) return k;
         k.blend = k.src = k.dst = k.src_alpha = k.dst_alpha = k.op = k.op_alpha = 0;
         k.write_mask = 0xF;
@@ -694,7 +698,8 @@ struct Renderer::Impl {
         const VkShaderModule fs = shape ? (early ? gx_frag_stages_early : gx_frag_stages)[((*shape)[0] >> 10) & 15]
                                   : k.depth_out == 1 ? gx_frag_depth : early ? gx_frag_early : gx_frag;
         return make_pipeline(gx_vert, fs, gx_layout, true, kTopology[k.topology], b, true, true, logic,
-                             k.topology == 1 && gpu.wide_lines, shape ? &info : nullptr, k.small_vertices != 0, gpu.dynamic_blend);
+                             k.topology == 1 && gpu.wide_lines, shape ? &info : nullptr, k.small_vertices != 0, gpu.dynamic_blend,
+                             k.no_clip != 0);
     }
 
     // pipelines.keys records: a kind byte (0 the ubershader's, 1 specialised),
@@ -772,12 +777,13 @@ struct Renderer::Impl {
             // built now, so no draw ever waits for one.
             for (uint8_t topology = 0; topology < 3; ++topology)
                 for (uint8_t depth_out = 0; depth_out < 3; ++depth_out)
-                    for (uint8_t small = 0; small < 2; ++small) {
-                        gx::PipelineKey k{};
-                        k.topology = topology, k.depth_out = depth_out, k.small_vertices = small;
-                        k = base_key(k);
-                        if (uber_requested.insert({k}).second) uber.push_back({true, {k, 0}});
-                    }
+                    for (uint8_t small = 0; small < 2; ++small)
+                        for (uint8_t no_clip = 0; no_clip < 2; ++no_clip) {
+                            gx::PipelineKey k{};
+                            k.topology = topology, k.depth_out = depth_out, k.small_vertices = small, k.no_clip = no_clip;
+                            k = base_key(k);
+                            if (uber_requested.insert({k}).second) uber.push_back({true, {k, 0}});
+                        }
         }
         rt::log("pipelines: %llu of the ubershader's and %llu specialised remembered, compiling as the game starts",
                 static_cast<unsigned long long>(uber.size()), static_cast<unsigned long long>(spec.size()));
@@ -1719,6 +1725,10 @@ struct Renderer::Impl {
                     static bool said = false;
                     approximated(said, "points are one pixel: this GPU has no large points");
                 }
+            }
+            if (d.pipeline.no_clip && !gpu.depth_clamp) {
+                static bool said = false;
+                approximated(said, "draws with clipping off are cut at the near and far planes: this GPU has no depth clamp");
             }
             Push push{d.state, d.has, 0u, sc, point, float(xscale)};
             const auto reads_src_alpha = [](uint8_t factor) { return factor == VK_BLEND_FACTOR_SRC_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; };

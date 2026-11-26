@@ -1220,6 +1220,28 @@ void marks_follow(Target& t, Stream& st) {
                                                              std::to_string(mark.w) + " wide (60, 30)");
 }
 
+// GXSetClipMode(GX_CLIP_DISABLE) (XF 0x1005, JPA's particles): a quad nearer than the near plane is cut
+// away with clipping on, and drawn with it off (its depth clamped), where the GPU can clamp depth.
+void clip_off(Target& t, Stream& st, bool clamps) {
+    stream_begin(st);
+    st.bp(0x40, 0);  // no depth test: only the clipping decides
+    stream_quad(st, 100, 100, 200, 200, 0.5f, 0xFF0000FFu);  // z 0.5: in front of the near plane (0)
+    st.xf(0x1005, {1});
+    stream_quad(st, 300, 100, 400, 200, 0.5f, 0x00FF00FFu);
+    stream_quad(st, 300, 300, 400, 400, -2.0f, 0x0000FFFFu);  // and beyond the far plane (-1)
+    st.xf(0x1005, {0});
+    st.end_frame();
+    st.send();
+    const auto px = t.shown();
+    check(near(at(px, 150, 150), 0, 0, 0), "with clipping on, a quad nearer than the near plane is cut away: " + rgb(at(px, 150, 150)));
+    if (!clamps) {
+        std::printf("skip clipping off: this GPU has no depth clamp (drawn clipped, as above)\n");
+        return;
+    }
+    check(near(at(px, 350, 150), 0, 255, 0), "with clipping off, a quad nearer than the near plane is drawn: " + rgb(at(px, 350, 150)));
+    check(near(at(px, 350, 350), 0, 0, 255), "with clipping off, a quad beyond the far plane is drawn: " + rgb(at(px, 350, 350)));
+}
+
 // mkdd_render_test --bench [players] [frames] [vertices a strip] [pictures between]: what such a frame costs to decode and record,
 // and to draw (the renderer's own time on the CPU, and the GPU's where it has timestamps).
 int bench(host::Gpu& gpu, unsigned players, unsigned frames, unsigned strip, unsigned pictures) {
@@ -1446,6 +1468,7 @@ int main(int argc, char** argv) {
         between_four_views(t, st);
         widened(t, st);
         marks_follow(t, st);
+        clip_off(t, st, gpu.depth_clamp);
         stream_begin(st), st.end_frame(), st.send();
         t.shown();
     }

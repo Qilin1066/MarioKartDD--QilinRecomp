@@ -31,8 +31,9 @@ struct Gpu {
     std::string name;
     // Optional features, enabled where the device has them (the renderer
     // approximates without them, and says so once): GX's logic ops, its line
-    // widths and its point sizes.
-    bool logic_op = false, wide_lines = false, large_points = false;
+    // widths and its point sizes; depth clamping, for GX's clipping turned off
+    // (XF 0x1005: nothing is cut at the near and far planes).
+    bool logic_op = false, wide_lines = false, large_points = false, depth_clamp = false;
     float max_line_width = 1.0f, max_point_size = 1.0f;
     // VK_KHR_present_id + VK_KHR_present_wait: the display can wait until a
     // frame is on screen, to keep at most one queued behind it (latency).

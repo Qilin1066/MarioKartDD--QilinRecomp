@@ -1367,6 +1367,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     bool alpha_target;
     d.pipeline = pipeline_key(r.bp, alpha_target);
     d.pipeline.small_vertices = small;
+    d.pipeline.no_clip = uint8_t(r.xf[0x1005] & 1);  // GXSetClipMode(GX_CLIP_DISABLE)
     d.shape = shape_id(r.bp);
     f.alpha_target = alpha_target;
     d.pipeline.topology = type <= 4 ? 0 : type <= 6 ? 1 : 2;

@@ -116,6 +116,9 @@ struct PipelineKey {
     //    written its depth all the same, as on the console.
     uint8_t depth_out = 0;
     uint8_t small_vertices = 0;  // the draw's vertices are SmallVertex (Frame::small)
+    // GX's clipping off (XF 0x1005 bit 0, GXSetClipMode: JPA's particles): nothing is cut at the near
+    // and far planes, the depth is clamped instead, where the GPU can (renderer.cpp).
+    uint8_t no_clip = 0;
     bool operator==(const PipelineKey&) const = default;
 };
 

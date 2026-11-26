@@ -164,11 +164,13 @@ Gpu Gpu::create(std::span<const char* const> instance_extensions, bool want_swap
     f2.features.logicOp = have.logicOp;
     f2.features.wideLines = have.wideLines;
     f2.features.largePoints = have.largePoints;
+    f2.features.depthClamp = have.depthClamp;
     f2.features.samplerAnisotropy = have.samplerAnisotropy;
     if (have.samplerAnisotropy) g.max_anisotropy = g.properties.limits.maxSamplerAnisotropy;
     g.logic_op = have.logicOp;
     g.wide_lines = have.wideLines;
     g.large_points = have.largePoints;
+    g.depth_clamp = have.depthClamp;
     if (g.wide_lines) g.max_line_width = g.properties.limits.lineWidthRange[1];
     if (g.large_points) g.max_point_size = g.properties.limits.pointSizeRange[1];
     std::vector<const char*> dext;
