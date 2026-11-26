@@ -825,6 +825,7 @@ int main(int argc, char** argv) {
         // VI shows black or before a frame is held: then, and with the game's own rate, the path
         // below, which shows each frame as VI shows it and nothing else.
         const mkdd::gx::Frame* newest = between ? renderer->held() : nullptr;
+        if (newest) renderer->take_real_copy();  // (a wrong foretold copy's real one, once it has come)
         if (newest && vi_xfb) {
             const bool vsynced = display->sdl_window() && display->picture().vsync;
             uint64_t now = clock_ns(), seen = now;

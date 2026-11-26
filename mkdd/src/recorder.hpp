@@ -6,6 +6,8 @@
 
 #include <cstdint>
 
+#include "gx.hpp"
+
 namespace mkdd::gx {
 
 // The command processor's, XF's and BP's registers as gpu.cpp keeps them.
@@ -68,6 +70,15 @@ void request_frame_end(int vfilter = -1);
 // Whether the real copy is kept after a foretold one (the main thread, each pass: true at the
 // game's own frame rate, where the picture shown must be the console's; false between frames).
 void set_copy_kept(bool on);
+// Not kept (between frames), a foretold copy that was wrong (a movie's start or end changes the
+// copy filter or the EFB's format after the frame ended): the real one, and the frame it should
+// have ended (Frame::serial), for the renderer to show that frame's pictures with it. The latest
+// such; serial 0 and no copy when there has been none.
+struct RealCopy {
+    uint64_t serial = 0;
+    Copy copy{};
+};
+RealCopy real_copy();
 bool early_frame_end();  // on (MKDD_EARLY_END=0: off, and the pictures shown are VI's, as before it)
 
 // The TEV colour registers and konstants as BP writes (sixteen: register in the

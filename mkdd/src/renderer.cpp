@@ -268,6 +268,8 @@ struct Renderer::Impl {
     std::unique_ptr<gx::Frame> held, held_prev;
     std::vector<Replay> replay;  // one for each of the held frame's draws
     bool keep_replay = false, can_blend = false;
+    bool can_replay = false;    // the held frame can be drawn again (it starts from the clear the frame before ended with)
+    uint64_t real_taken = 0;    // the last frame the real copy of was taken (recorder.hpp's real_copy)
     int why_not = -1;
     interp::Blender blender;
     gx::Copy between_clear{};    // the clearing copy the frame before ended with
@@ -2043,13 +2045,16 @@ struct Renderer::Impl {
                     static_cast<unsigned long long>(held ? held->draws.size() : 0));
             cost_frames = cost_pictures = cost_cpu_ns = cost_gpu_ns = cost_gpu_timed = 0;
         }
+        // A foretold copy already known to be wrong: the frame is drawn with the real one.
+        if (const gx::RealCopy r = gx::real_copy(); f->foretold && !f->copies.empty() && r.serial == f->serial)
+            take_copy(f->copies.back(), r.copy), real_taken = r.serial;
         keep_replay = true;
         render(*f);
         keep_replay = false;
         if (held_prev) gx::recycle_frame(std::move(held_prev));
         held_prev = std::move(held);
         held = std::move(f);
-        can_blend = false;
+        can_blend = can_replay = false;
         // Why a frame has no pictures between, said when the reason changes.
         const auto because = [this](int why, const char* text) {
             if (why != why_not) rt::log("render: pictures between frames: %s", text);
@@ -2070,6 +2075,7 @@ struct Renderer::Impl {
         for (const gx::Packet& pk : held->packets)
             if (pk.kind == gx::Packet::kConvert) return because(20, "none, the frame changes the EFB's pixel format part way");
         between_clear = last;
+        can_replay = true;
         can_blend = blender.pair(*held_prev, *held);
         because(can_blend ? 0 : 21, can_blend ? "drawn" : "none, nothing pairs with the frame before (a change of scene)");
     }
@@ -2081,7 +2087,32 @@ struct Renderer::Impl {
     // clear is cleared. Null when this frame can't be blended; the caller then
     // shows the frame's own picture.
     const Image* render_between(float phase) {
+        take_real_copy();
         if (!held || !can_blend) return nullptr;
+        between_next = (between_next + 1) % 3;
+        return draw_picture(phase, between_xfb[between_next]);
+    }
+    // A wrong foretold copy (a movie's start or end: the copy filter or the EFB's format changed
+    // after the frame ended) whose real copy has come since the held frame was drawn: the frame's
+    // copy is the real one from now on, for the pictures between and for its own picture, which
+    // is drawn again (at phase 1, the frame as it was drawn) with it. Nothing waits for it.
+    static void take_copy(gx::Copy& to, const gx::Copy& real) {
+        std::memcpy(to.src, real.src, sizeof to.src);
+        to.dest = real.dest, to.dest_width = real.dest_width, to.dest_height = real.dest_height;
+        to.half_scale = real.half_scale, to.efb_alpha = real.efb_alpha, to.gamma = real.gamma;
+        std::memcpy(to.filter, real.filter, sizeof to.filter);
+        to.clamp_top = real.clamp_top, to.clamp_bottom = real.clamp_bottom;
+        // (Not what it clears: the EFB was cleared as foretold, and the next frame starts from that.)
+    }
+    void take_real_copy() {
+        if (!held || !held->foretold || held->copies.empty()) return;
+        const gx::RealCopy r = gx::real_copy();
+        if (r.serial != held->serial || r.serial == real_taken) return;
+        real_taken = r.serial;
+        take_copy(held->copies.back(), r.copy);
+        if (can_replay) draw_picture(1.0f, xfbs[held->copies.back().dest & 0x1FFFFFFFu]);
+    }
+    const Image* draw_picture(float phase, Image& picture) {
         const uint64_t cost0 = gx::now_ns();
         ++cost_pictures;
         const gx::Frame& f = *held;
@@ -2127,8 +2158,6 @@ struct Renderer::Impl {
         vkUpdateDescriptorSets(gpu.device, 1, &wr, 0, nullptr);
         // The frame's vertices and indices are where its own drawing left them.
         const Slot& drawn = slots[slot];
-        between_next = (between_next + 1) % 3;
-        Image& picture = between_xfb[between_next];
         std::swap(efb, efb_between), std::swap(efb_depth, efb_depth_between), std::swap(efb_depth_rt, efb_depth_between_rt);  // (copies and clears go by these)
         barrier(cmd);
         stencil_ref = 0;
@@ -2283,6 +2312,7 @@ void Renderer::render_held(std::unique_ptr<gx::Frame> frame) {
     st.rendered.fetch_add(1, std::memory_order_relaxed);
 }
 const host::Image* Renderer::render_between(float phase) { return impl_->render_between(phase); }
+void Renderer::take_real_copy() { impl_->take_real_copy(); }
 const gx::Frame* Renderer::held() const { return impl_->held.get(); }
 const interp::Blender::Counts& Renderer::pairing() const { return impl_->blender.counts(); }
 double Renderer::between_gpu_ms() const {

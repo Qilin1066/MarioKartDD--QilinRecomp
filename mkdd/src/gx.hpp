@@ -368,6 +368,7 @@ struct Frame {
     bool alpha_target = true;       // the EFB has alpha (RGBA6_Z24)
     bool captured = false;          // the frame MKDD_DFF captured (main.cpp saves our picture of it)
     bool foretold = false;          // ended early, its copy to the frame buffer foretold (recorder.hpp's request_frame_end)
+    uint64_t serial = 0;            // the recorder's count of frames ended before it (recorder.hpp's real_copy)
     bool confirming = false;        // only the real copy of the frame before, which was foretold
     // Empty again, keeping the vectors' capacity (recycle_frame). A new
     // member must be reset here too.
@@ -378,6 +379,7 @@ struct Frame {
         alpha_target = true;
         captured = false;
         foretold = confirming = false;
+        serial = 0;
     }
 };
 // For a fatal error met while decoding (a texture, array or list outside memory): where the
