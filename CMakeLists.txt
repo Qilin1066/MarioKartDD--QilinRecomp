@@ -287,6 +287,14 @@ if(QILIN_HOST)
     # The write-gather pipe: stores of every size reach the FIFO as their bytes (cpu.hpp's inline gathering).
     add_test(NAME mkdd_pipe_test COMMAND mkdd_render_test --pipe)
     set_tests_properties(mkdd_pipe_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+    # More environment for the tests that open a Vulkan device (VAR=value;...): CI's LeakSanitizer
+    # run preloads the driver, so the loader's dlclose at vkDestroyInstance doesn't unmap it before
+    # the leak check, which then can't name (or suppress) what the driver keeps.
+    set(QILIN_GRAPHICS_TEST_ENV "" CACHE STRING "Extra environment for the tests that draw (VAR=value;...)")
+    if(QILIN_GRAPHICS_TEST_ENV)
+        set_property(TEST qilin_vktest qilin_padtest mkdd_render_test mkdd_render_test_ubershader mkdd_render_test_specialized
+                     mkdd_render_test_full_vertices mkdd_pipe_test APPEND PROPERTY ENVIRONMENT ${QILIN_GRAPHICS_TEST_ENV})
+    endif()
 endif()
 
 # ---- Tests (no game files needed) ----

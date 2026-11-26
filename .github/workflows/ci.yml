@@ -88,17 +88,25 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq g++-14 libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
             libxtst-dev libxfixes-dev libxkbcommon-dev libwayland-dev libdecor-0-dev libegl-dev libdrm-dev libgbm-dev \
-            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev xvfb xauth libvulkan1 mesa-vulkan-drivers
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev xvfb xauth libvulkan1 mesa-vulkan-drivers llvm-18
       - name: Configure
         run: |
+          # The tests that draw preload lavapipe (after the ASan runtime, which must come first): the Vulkan
+          # loader unloads the driver at vkDestroyInstance, and what it keeps would reach the leak check from
+          # unmapped code, with no module to name or suppress (tools/check/lsan.supp).
+          lvp=/usr/lib/x86_64-linux-gnu/libvulkan_lvp.so
+          test -f "$lvp"
           # (Warnings are the build job's: GCC's flow warnings under the sanitizers' instrumentation aren't ours.)
           cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQILIN_SANITIZE=address,undefined \
-            -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14
+            -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
+            "-DQILIN_GRAPHICS_TEST_ENV=LD_PRELOAD=$(gcc-14 -print-file-name=libasan.so):$lvp"
       - name: Build
         run: cmake --build build --parallel
       - name: Test
         env:
-          ASAN_OPTIONS: detect_leaks=1
+          # Whole stacks through code built without frame pointers (the driver's), symbolised by LLVM's.
+          ASAN_OPTIONS: detect_leaks=1:fast_unwind_on_malloc=0:malloc_context_size=40
+          ASAN_SYMBOLIZER_PATH: /usr/bin/llvm-symbolizer-18
           LSAN_OPTIONS: suppressions=${{ github.workspace }}/tools/check/lsan.supp:print_suppressions=0
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: xvfb-run -a env QILIN_REQUIRE_GRAPHICS=1 ctest --test-dir build --output-on-failure --timeout 600
