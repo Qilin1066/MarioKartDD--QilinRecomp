@@ -57,9 +57,6 @@ void on_wpar_write(void (*reset)());
 uint64_t time_base();
 // A time-base value as the steady clock's (ns since its epoch): what the guest's timers mean on the host.
 uint64_t steady_ns_at(uint64_t time_base_value);
-// SRAM's progressive flag (set_console). Unused since the cable has a setting
-// of its own (g_component_cable), apart from the flag as on a console.
-bool component_cable();
 // Whether a component cable is plugged in: the console's hardware, apart from
 // SRAM's progressive flag (the settings' [console] component_cable). VIGetDTVStatus.
 inline std::atomic<bool> g_component_cable{true};

@@ -546,7 +546,6 @@ const rt::Provided kReplacements[] = {
 void set_console(unsigned language, bool stereo, bool progressive) {
     g_language = language, g_stereo = stereo, g_progressive = progressive;
 }
-bool component_cable() { return g_progressive; }
 
 std::span<const rt::Provided> os_replacements() { return kReplacements; }
 
