@@ -31,7 +31,9 @@
 
 #include "boot.hpp"
 #include "build.hpp"
+#include "guest_clock.hpp"
 #include "priority.hpp"
+#include "qilin/rt/report.hpp"
 
 namespace mkdd {
 namespace rt = qilin::rt;
@@ -605,21 +607,28 @@ void civil_from_days(int64_t z, int64_t& y, unsigned& m, unsigned& d) {
 }
 
 namespace {
-std::atomic<int64_t> g_paused_ns{0};  // time spent parked, left out of the time base
+// The time base's clock: the host's, less the menu's pauses and the stretches
+// the host didn't run us (guest_clock.hpp).
+GuestClock g_clock;
+[[maybe_unused]] const bool g_clock_logged = (g_clock.on_gap = [](int64_t gap_ns) {
+    rt::log("the host's clock moved %.1f s with nothing of the game running (the PC asleep, or the program stopped): "
+            "the game's clock goes on from where it was", double(gap_ns) / 1e9);
+}, true);
+int64_t host_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - g_boot).count(); }
 std::atomic<bool> g_pause_asked{false};
-std::mutex g_pause_lock;
-std::condition_variable g_pause_cv;
+// Never destroyed: a guest thread parked on them at exit (the window closed
+// from the menu) would block glibc's pthread_cond_destroy (see gpu.cpp).
+std::mutex& g_pause_lock = *new std::mutex;
+std::condition_variable& g_pause_cv = *new std::condition_variable;
 bool g_parked = false;  // under g_pause_lock
 }  // namespace
 
 uint64_t time_base() {
-    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - g_boot).count() -
-                    g_paused_ns.load(std::memory_order_relaxed);
-    return g_epoch + static_cast<uint64_t>(ns) * 81u / 2000u;  // 40.5 MHz
+    return g_epoch + static_cast<uint64_t>(g_clock.read(host_ns)) * 81u / 2000u;  // 40.5 MHz
 }
 
 uint64_t steady_ns_at(uint64_t t) {
-    const int64_t since_boot = static_cast<int64_t>((t - g_epoch) * 2000u / 81u) + g_paused_ns.load(std::memory_order_relaxed);
+    const int64_t since_boot = g_clock.host_at(static_cast<int64_t>((t - g_epoch) * 2000u / 81u));
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(g_boot.time_since_epoch()).count() + since_boot);
 }
 
@@ -639,12 +648,11 @@ bool game_parked() {
 void park_if_requested() {
     if (!g_pause_asked.load(std::memory_order_relaxed)) return;
     std::unique_lock l(g_pause_lock);
-    const auto t0 = std::chrono::steady_clock::now();
+    const bool froze = g_clock.freeze(host_ns());  // the time base stands still meanwhile
     g_parked = true;
     g_pause_cv.wait(l, [] { return !g_pause_asked.load(std::memory_order_relaxed); });
     g_parked = false;
-    g_paused_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(),
-                          std::memory_order_relaxed);
+    if (froze) g_clock.thaw(host_ns());
 }
 
 void add_timer_source(std::function<void()> poll, std::function<uint64_t()> deadline) {
@@ -884,6 +892,7 @@ void clock_wait(uint64_t until) {
 
 void clock_main() {
     set_this_thread_priority(Priority::high);  // late, it makes a deadline late
+    rt::set_thread_role("the poll clock");
     constexpr uint64_t kRetry = kTimerHz / 1000, kStale = kTimerHz / 250;  // 1 ms, 4 ms
     const auto set = [] {
         rt::g_poll_due.store(true, std::memory_order_relaxed);
