@@ -43,6 +43,16 @@ namespace {
 RecorderStats g_stats;
 std::unique_ptr<Frame> g_frame = std::make_unique<Frame>();
 
+// The switches read for every primitive, read once at start-up (a function's own static is a guard to
+// check each time it runs).
+bool env_set(const char* name) {
+    const char* e = std::getenv(name);
+    return e && *e && *e != '0';
+}
+const bool g_check_decode = env_set("MKDD_CHECK_DECODE");  // the fast decoders and incremental states checked
+const bool g_force_full = env_set("MKDD_FULL_VERTICES");   // always the full vertex layout (tests both)
+const bool g_join_on = [] { const char* e = std::getenv("MKDD_JOIN"); return !(e && *e == '0'); }();  // MKDD_JOIN=0: a draw a primitive
+
 // Every shape seen, by its words, and by id for the renderer's threads.
 struct ShapeHash {
     size_t operator()(const ShapeWords& w) const {
@@ -94,11 +104,13 @@ QILIN_RECORDER_INLINE float component(const uint8_t* p, unsigned fmt, float scal
     }
 }
 QILIN_RECORDER_INLINE float normal_component(const uint8_t* p, unsigned fmt) {
-    switch (fmt) {  // fixed scales: the fraction is the type's
-        case 0: return p[0] / 128.0f;
-        case 1: return static_cast<int8_t>(p[0]) / 64.0f;
-        case 2: return be16(p) / 32768.0f;
-        case 3: return static_cast<int16_t>(be16(p)) / 16384.0f;
+    // Fixed scales: the fraction is the type's. (Times the power of two's inverse: the same float as the
+    // division, which MSVC keeps as a division.)
+    switch (fmt) {
+        case 0: return float(p[0]) * (1.0f / 128.0f);
+        case 1: return float(static_cast<int8_t>(p[0])) * (1.0f / 64.0f);
+        case 2: return float(be16(p)) * (1.0f / 32768.0f);
+        case 3: return float(static_cast<int16_t>(be16(p))) * (1.0f / 16384.0f);
         default: return as_float(be32(p));
     }
 }
@@ -646,7 +658,7 @@ QILIN_RECORDER_INLINE void fused_step(const FusedIn& in, const uint8_t* p, V& v)
         v.pos[0] = as_float(be32(d)), v.pos[1] = as_float(be32(d + 4)), v.pos[2] = as_float(be32(d + 8));
     } else if constexpr (C == kCNrmS16) {
         const uint8_t* d = in.element(1, 6, p + At);
-        for (unsigned j = 0; j < 3; ++j) v.normal[j] = static_cast<int16_t>(be16(d + 2 * j)) / 16384.0f;
+        for (unsigned j = 0; j < 3; ++j) v.normal[j] = float(static_cast<int16_t>(be16(d + 2 * j))) * (1.0f / 16384.0f);
     } else if constexpr (C == kCNrmF) {
         const uint8_t* d = in.element(1, 12, p + At);
         for (unsigned j = 0; j < 3; ++j) v.normal[j] = as_float(be32(d + 4 * j));
@@ -752,8 +764,7 @@ size_t decode_best(const Registers& r, const Format& f, const Plan& pl, const ui
 // fatal error at the first difference. For tests and after changing either.
 template <class V>
 size_t decode_checked(const Registers& r, const Format& f, const Plan& pl, const uint8_t* data, uint32_t count, V* out) {
-    static const bool check = [] { const char* e = std::getenv("MKDD_CHECK_DECODE"); return e && *e && *e != '0'; }();
-    if (!check) [[likely]] return decode_best(r, f, pl, data, count, out);
+    if (!g_check_decode) [[likely]] return decode_best(r, f, pl, data, count, out);
     float last[3][3];
     std::memcpy(last[0], g_last_normal, 12), std::memcpy(last[1], g_last_tangent, 12), std::memcpy(last[2], g_last_binormal, 12);
     const size_t used = decode_best(r, f, pl, data, count, out);
@@ -1204,10 +1215,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     // answer: the last tangents only change in a format that has them.
     constexpr uint32_t kBig = kHasTangent | kHasBinormal | (((1u << (8 - kSmallUvs)) - 1) * (kHasUv0 << kSmallUvs));
     static constexpr float kZero3[3] = {};
-    static const bool force_full = [] {  // MKDD_FULL_VERTICES=1: always the full layout (tests both)
-        const char* e = std::getenv("MKDD_FULL_VERTICES");
-        return e && *e && *e != '0';
-    }();
+    const bool force_full = g_force_full;
     const auto zero_bytes = [](const float* v) {  // (all 12 bytes: -0 isn't zero here)
         uint32_t w[3];
         std::memcpy(w, v, 12);
@@ -1305,8 +1313,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     // The joined draw is an indexed triangle list, in the primitives' order.
     // (Not while MKDD_DFF captures, which numbers draws by primitive;
     // MKDD_JOIN=0 gives every primitive its own draw.)
-    static const bool join = [] { const char* e = std::getenv("MKDD_JOIN"); return !(e && *e == '0'); }();
-    if (join && type <= 4 && !g_dirty && g_join.valid && g_join.has == has && g_join.small == small && !g_dff_use &&
+    if (g_join_on && type <= 4 && !g_dirty && g_join.valid && g_join.has == has && g_join.small == small && !g_dff_use &&
         !f.packets.empty() && f.packets.back().kind == Packet::kDraw && f.packets.back().index == g_join.draw) {
         Draw& d = f.draws[g_join.draw];
         if (d.direct) {  // the first to join it: its own vertices as indices
@@ -1321,12 +1328,11 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     }
     if (g_dirty) {
         // From the frame's last state where there is one, redoing what changed.
-        static const bool check = [] { const char* e = std::getenv("MKDD_CHECK_DECODE"); return e && *e && *e != '0'; }();
         const uint32_t parts = f.states.empty() ? uint32_t(kPartAll) : g_parts;
         if (f.states.empty()) f.states.emplace_back();
         else f.states.push_back(f.states.back());
         build_state(r, f.states.back(), parts);
-        if (check && parts != kPartAll) [[unlikely]] {  // MKDD_CHECK_DECODE: the same as built whole
+        if (g_check_decode && parts != kPartAll) [[unlikely]] {  // MKDD_CHECK_DECODE: the same as built whole
             State whole;
             build_state(r, whole, kPartAll);
             if (std::memcmp(&whole, &f.states.back(), sizeof whole) != 0)
@@ -1818,12 +1824,17 @@ uint64_t now_ns() {
 }
 
 uint32_t shape_id(const uint32_t* bp) {
+    // The draw before's, mostly (a material's draws share one): compared before the table is searched.
+    static ShapeWords last{};
+    static uint32_t last_id = kNoLoad;
     const ShapeWords w = shape_of(bp);
+    if (last_id != kNoLoad && w == last) return last_id;
     const auto [it, added] = g_shape_ids.try_emplace(w, uint32_t(g_shape_ids.size()));
     if (added) {
         std::lock_guard lock(g_shapes_lock);
         g_shapes.push_back(w);
     }
+    last = w, last_id = it->second;
     return it->second;
 }
 uint32_t intern_shape(const ShapeWords& w) {
