@@ -37,5 +37,7 @@ void set_retrace_rate(uint32_t num, uint32_t den);
 // From the main thread: run the retraces this much faster (or slower, below 1;
 // held within 1%), on top of the rate: vblank steering nudges the phase with it.
 void set_retrace_speed(double speed);
+// When the next retrace comes, on the steady clock (ns since its epoch); 0 before VIInit.
+uint64_t next_retrace_ns();
 
 }  // namespace mkdd

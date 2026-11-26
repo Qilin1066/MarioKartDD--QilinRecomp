@@ -331,6 +331,7 @@ inline void dff_use_memory(uint32_t physical, uint32_t size) {
 void submit(std::unique_ptr<Frame> frame);
 // The renderer's side: the next frame, or null after `timeout_ms`.
 std::unique_ptr<Frame> next_frame(unsigned timeout_ms);
+std::unique_ptr<Frame> next_frame_us(uint64_t timeout_us);  // (finer)
 // Give a drawn frame back, so the recorder reuses its memory: a fight frame's
 // vectors hold 10-20 MB, which allocated fresh each frame cost page faults
 // and copies as they grew.

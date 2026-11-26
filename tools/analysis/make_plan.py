@@ -106,6 +106,9 @@ FUNCTIONS = {
     "drawPlayerMark__6Race2DFv": ("wrap", "game: Race2D::drawPlayerMark (marks that follow a kart)"),
     "drawAlarm__6Race2DFv": ("wrap", "game: Race2D::drawAlarm (marks that follow a kart)"),
     "drawBomb__6Race2DFv": ("wrap", "game: Race2D::drawBomb (marks that follow a kart)"),
+    # The end of a pass's drawing: the recorder's frame ends as it begins (vi.cpp's wrapper),
+    # a tick before the copy to the frame buffer that the next pass makes.
+    "endRender__10JFWDisplayFv": ("wrap", "JSystem: JFWDisplay::endRender (the early frame end)"),
     "OSReport": ("lift", "dolphin/os: OSReport (formats through MSL's vprintf)"),
     "__PADDisableRecalibration": ("lift", "dolphin/pad: __PADDisableRecalibration (a flag in low memory)"),
     "EXIGetType": ("lift", "dolphin/exi: EXIGetType (a table over EXIGetID)"),

@@ -194,7 +194,7 @@ Offscreen, `frame_rate = display` with `MKDD_PRESENT_HZ` 120 and 240, through th
 6. Texture matrices (scrolls, env maps) and the effects sampled from the newer frame's copies (shadows a tick ahead of their karts, the shimmer, the blur): visible or not at 120 and 240 Hz.
 7. Split screen: that each player's camera is a distinct view in the same order every frame; two cameras with the same matrix in one frame would count as one view and stop blending.
 8. Frames that can't be blended at all (no clear at the end of the frame before): none expected in this game; the count should stay 0 outside movies.
-9. Latency: one tick more than without, by design; the early frame end at `JFWDisplay::endRender` (`docs/enhancements.md`) would give a tick back in every mode and isn't done.
+9. Latency: one tick more than without, by design; the early frame end at `JFWDisplay::endRender` gives a tick back in every mode (done: `runtime.md`, "Response time").
 10. The tag ring (16,384 loads between the guest and the decoder): a load beyond it goes untagged; count them in a busy 4-player race.
 
 ## A picture wider than drawn for

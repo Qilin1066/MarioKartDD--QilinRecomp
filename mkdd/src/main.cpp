@@ -30,6 +30,7 @@
 #include <span>
 #include <thread>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "boot.hpp"
@@ -42,6 +43,7 @@
 #include "interp.hpp"
 #include "input.hpp"
 #include "input_map.hpp"
+#include "latency.hpp"
 #include "menu.hpp"
 #include "os.hpp"
 #include "priority.hpp"
@@ -550,6 +552,15 @@ int main(int argc, char** argv) {
     uint8_t trigger_clicks[mkdd::kPlayers] = {};
     bool wait_control_release = false;
     uint64_t sequence = 0, shown = 0;
+    uint64_t taken = 0;                                // frames taken from the recorder, numbered as it hands them over
+    std::unordered_map<uint32_t, uint64_t> xfb_frame;  // the frame that last copied to each XFB (MKDD_LATENCY)
+    uint32_t newest_xfb = 0;                           // the frame buffer the newest frame copied to
+    std::unique_ptr<mkdd::gx::Frame> waiting_frame;    // taken while waiting to present, drawn next pass
+    bool window_closed = false;                        // (seen by a look at the input between passes)
+    const uint64_t input_lead_ns = [] {
+        const char* t = std::getenv("MKDD_INPUT_LEAD_US");
+        return t ? uint64_t(std::max(0, std::atoi(t))) * 1000 : uint64_t{2000} * 1000;
+    }();
     std::vector<uint8_t> rgba;
     if (display) start_watchdog();
     for (;;) {
@@ -575,7 +586,7 @@ int main(int argc, char** argv) {
             display->set_rumble_strength(settings.rumble_strength);
         }
         if (audio) audio->set_volume(settings.volume, settings.mute_unfocused && display && display->sdl_window() && !display->focused());
-        if (display && !display->poll()) {
+        if (display && (window_closed || !display->poll())) {
             rt::log("window closed");
             mkdd::before_exit();
             std::fflush(nullptr);
@@ -612,7 +623,7 @@ int main(int argc, char** argv) {
             aspect = mkdd::aspect_ratio(settings, wh > 0 ? float(ww) / float(wh) : 4.0f / 3.0f);
             mkdd::enhance::set_aspect(aspect, settings.hud);
         }
-        {  // (without a display, --headless: the scripts alone)
+        const auto sample_input = [&] {  // (without a display, --headless: the scripts alone)
             // The four controller ports (input.hpp), each from its player's bindings: the controller
             // at its place (display.hpp: by name, or in the order the controllers joined), and the
             // keyboard and mouse where the player has keys. The first port is always connected, as a
@@ -637,10 +648,23 @@ int main(int argc, char** argv) {
             for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
                 if (wait_control_release) pads[p] = mkdd::GcPad{pads[p].connected, 0, 0, 0, 0, 0, 0, 0};
                 mkdd::apply_input_script(scripts[p], now, pads[p]);
+                if (p == 0) mkdd::latency::sample(pads[p], now);  // MKDD_LATENCY: the probe's press
                 mkdd::set_gc_pad(int(p), pads[p]);
                 if (display) display->rumble_pad(int(p), settings.players[p].rumble && mkdd::gc_rumble_wanted(int(p)));
             }
-        }
+        };
+        sample_input();
+        // The input again just before the next retrace, after which the game's pass reads the
+        // pads (PADRead): what it reads is then at most about this old, rather than as old as
+        // the main loop's last pass (MKDD_INPUT_LEAD_US, 0: not). Waits below end there.
+        const uint64_t input_due = input_lead_ns && renderer ? [&]() -> uint64_t {
+            const uint64_t r = mkdd::next_retrace_ns();
+            return r > input_lead_ns ? r - input_lead_ns : 0;
+        }() : 0;
+        const auto sample_late = [&] {
+            if (display && !display->poll()) window_closed = true;
+            sample_input();
+        };
         if (!renderer) {  // headless: nothing shows the frames, so they're only waited for, not converted
             if (audio) report_timing(nullptr, nullptr, audio.get());  // (MKDD_AUDIO: the sound queue's numbers)
             uint32_t xfb, w, h;
@@ -679,15 +703,24 @@ int main(int argc, char** argv) {
         bool frame_came = false;
         // Draw what the guest recorded, then show what VI shows.
         for (int i = 0; i < 2; ++i)  // what's queued (two at most), then on to showing
-            if (auto f = mkdd::gx::next_frame(between ? 0 : i == 0 ? 4 : 0)) {
+            if (auto f = waiting_frame ? std::move(waiting_frame) : mkdd::gx::next_frame_us(between ? 0 : i == 0 ? [&]() -> uint64_t {
+                    // Up to 4 ms, ending at the input's time before the retrace if that comes first.
+                    const uint64_t now = clock_ns();
+                    return input_due > now && input_due - now < 4'000'000 ? (input_due - now) / 1000 : 4000;
+                }() : 0)) {
+                ++taken;
+                for (const auto& c : f->copies)
+                    if (c.to_xfb) xfb_frame[c.dest] = taken, newest_xfb = c.dest;
                 if (between) {  // drawn as ever, and kept: the pictures until the next one are blended towards it
                     mkdd::gx::Frame* kept = f.get();
                     renderer->render_held(std::move(f));
+                    mkdd::latency::frame_drawn(taken);
                     arrived_ns = clock_ns(), frame_came = true;
                     if (kept->captured) rt::log("MKDD_DFF: no picture of the captured frame while pictures between frames are on (frame_rate)");
                     continue;
                 }
                 renderer->render(*f);
+                mkdd::latency::frame_drawn(taken);
                 if (f->captured && display) {  // MKDD_DFF: our picture of the captured frame, beside it
                     for (const auto& c : f->copies)
                         if (const qilin::host::Image* x = c.to_xfb ? renderer->xfb(c.dest) : nullptr) {
@@ -752,6 +785,15 @@ int main(int argc, char** argv) {
                 // No vsync, or no window: a clock at the display's rate (59.94 if that isn't known).
                 const uint64_t period = static_cast<uint64_t>(1e9 / (present_hz > 0 ? present_hz : 59.94));
                 if (next_present_ns == 0 || now > next_present_ns + 4 * period) next_present_ns = now;  // the start, or after a stall
+                // Until the present: a frame that comes meanwhile is drawn at once (the pass again,
+                // the present still at its time), and the input is looked at before the retrace.
+                if (input_due > now && input_due < next_present_ns) {
+                    if ((waiting_frame = mkdd::gx::next_frame_us((input_due - now) / 1000))) continue;
+                    sample_late();
+                    now = clock_ns();
+                }
+                if (now < next_present_ns && (waiting_frame = mkdd::gx::next_frame_us((next_present_ns - now) / 1000))) continue;
+                now = clock_ns();
                 if (now < next_present_ns) std::this_thread::sleep_for(std::chrono::nanoseconds(next_present_ns - now));
                 seen = next_present_ns;
                 next_present_ns += period;
@@ -771,6 +813,11 @@ int main(int argc, char** argv) {
             if (!x) continue;  // (no picture of it yet)
             display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(),
                                    vi_h ? vi_h : x->height / renderer->scale());
+            mkdd::latency::presented(taken);  // (blended or whole, the newest frame is in it)
+            if (mkdd::latency::checking() && !display->sdl_window()) {
+                const std::vector<uint8_t> px = display->read_back();
+                mkdd::latency::check_picture(px.data(), dump_w, dump_h);
+            }
             g_pictures_shown.fetch_add(1, std::memory_order_relaxed);
             if (frame_came) steer_to_vblank();
             if (menu) menu->frame_shown();  // (F9: a capture takes it)
@@ -780,8 +827,17 @@ int main(int argc, char** argv) {
                 continue;
             }
             shown_phase = 1.0;
+            // The newest frame's picture: with the early frame end (recorder.hpp) the frame drawn
+            // in the pass before is ended before its copy to the frame buffer, which VI would show
+            // a retrace later; it is shown now, a tick sooner. (Otherwise it is VI's own.)
+            if (xfb && newest_xfb) xfb = newest_xfb;
             if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {
                 display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), h);
+                if (const auto it = xfb_frame.find(xfb); it != xfb_frame.end()) mkdd::latency::presented(it->second);
+                if (mkdd::latency::checking() && !display->sdl_window()) {
+                    const std::vector<uint8_t> px = display->read_back();
+                    mkdd::latency::check_picture(px.data(), dump_w, dump_h);
+                }
                 g_pictures_shown.fetch_add(1, std::memory_order_relaxed);
                 steer_to_vblank();
                 if (menu) menu->frame_shown();  // (F9: a capture takes it)

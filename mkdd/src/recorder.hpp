@@ -60,6 +60,9 @@ struct RecorderStats {
     std::atomic<uint64_t> images_made{0};             // images created since boot (the rest are reused)
 };
 RecorderStats& recorder_stats();
+// The game's thread is in JFWDisplay::endRender (vi.cpp): the frame ends at the draw done
+// it issues, with the copy to the frame buffer the next pass will make (MKDD_EARLY_END=0: not).
+void request_frame_end();
 
 // The TEV colour registers and konstants as BP writes (sixteen: register in the
 // top byte, value below), for a frame capture's start: BP memory keeps only

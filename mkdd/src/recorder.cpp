@@ -12,6 +12,7 @@
 // XFMemory.h, BPMemory.h, VertexShaderManager.cpp, BPFunctions.cpp,
 // RenderState.cpp). Facts only; the code is ours.
 #include "recorder.hpp"
+#include "latency.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1097,9 +1098,10 @@ static std::unique_ptr<Frame> spare_frame() {
     return f;
 }
 
-std::unique_ptr<Frame> next_frame(unsigned timeout_ms) {
+std::unique_ptr<Frame> next_frame(unsigned timeout_ms) { return next_frame_us(uint64_t{timeout_ms} * 1000); }
+std::unique_ptr<Frame> next_frame_us(uint64_t timeout_us) {
     std::unique_lock l(g_queue_lock);
-    if (!g_queue_cv.wait_for(l, std::chrono::milliseconds(timeout_ms), [] { return !g_queue.empty(); })) return nullptr;
+    if (!g_queue_cv.wait_for(l, std::chrono::microseconds(timeout_us), [] { return !g_queue.empty(); })) return nullptr;
     auto f = std::move(g_queue.front());
     g_queue.pop_front();
     g_queue_cv.notify_all();
@@ -1395,7 +1397,9 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     f.draws.push_back(d);
 }
 
+static void draw_done();
 void bp_written(uint32_t reg, uint32_t value, bool changed) {
+    if (reg == 0x45) draw_done();  // (the early frame end, if asked for)
     if (reg == 0x66) textures_invalidated(), g_join.valid = false;  // (a texture may be new under the same registers)
     if (!changed) return;  // the state is what it was (commands are acted on by gpu.cpp either way)
     g_parts |= kPartBp;
@@ -1533,6 +1537,129 @@ void survey(const Frame& f, uint64_t frame_number) {
 }
 }  // namespace
 
+// ---- the frame's end: at its copy to the frame buffer, or early (request_frame_end)
+static void end_frame(Frame& f) {
+    f.captured = g_capture_next;
+    g_capture_next = false;
+    if (g_survey) [[unlikely]] survey(f, g_stats.frames.load(std::memory_order_relaxed));
+    textures_end_frame(f);
+    hud::place(f);  // (a widened picture: the flat parts back in proportion)
+    const uint64_t number = g_stats.frames.fetch_add(1, std::memory_order_relaxed) + 1;
+    submit(std::move(g_frame));
+    latency::frame_handed(number);  // (MKDD_LATENCY)
+    g_frame = spare_frame();
+    g_dirty = true;
+    g_join.valid = false;
+    std::fill(std::begin(g_slot_load), std::end(g_slot_load), kNoLoad);  // loads don't outlive their frame
+    g_view = kNoView;
+}
+
+// The early frame end (docs/enhancements.md, "Latency"): the game's pass draws, ends its
+// drawing in JFWDisplay::endRender (a draw done, BP 0x45), calculates, waits for the
+// retrace and only then copies the picture to the frame buffer, in the next pass's
+// beginRender. The frame is ended at that draw done instead, with the copy the next pass
+// will make: the last one's, to the frame buffer after it in the game's rotation. When
+// that copy comes it is left out if it is the one foretold (it was made); otherwise it
+// is counted, and after three wrong in a row the early end stops.
+namespace {
+const bool g_early_on = [] {
+    const char* e = std::getenv("MKDD_EARLY_END");
+    return !(e && *e == '0') && !std::getenv("MKDD_DFF");  // (a capture ends its frame at the copy)
+}();
+std::atomic<uint64_t> g_end_requests{0};
+uint64_t g_end_served = 0;
+Copy g_last_xfb{};
+uint32_t g_xfb_dests[4] = {};  // the last copies' frame buffers, newest first
+unsigned g_xfb_seen = 0, g_wrong_in_a_row = 0;
+bool g_foretold = false, g_early_stopped = false;
+Copy g_foretold_copy{};
+uint64_t g_early_ends = 0, g_wrong = 0, g_drawn_after = 0;
+
+bool same_copy(const Copy& a, const Copy& b) {
+    return std::memcmp(a.src, b.src, sizeof a.src) == 0 && a.dest == b.dest && a.dest_width == b.dest_width &&
+           a.dest_height == b.dest_height && a.half_scale == b.half_scale && a.from_depth == b.from_depth && a.efb_alpha == b.efb_alpha &&
+           a.clear == b.clear && a.clear_color == b.clear_color && a.clear_alpha == b.clear_alpha && a.clear_depth == b.clear_depth &&
+           std::memcmp(a.clear_rgba, b.clear_rgba, 4) == 0 && a.clear_z == b.clear_z && a.gamma == b.gamma &&
+           std::memcmp(a.filter, b.filter, 3) == 0 && a.clamp_top == b.clamp_top && a.clamp_bottom == b.clamp_bottom;
+}
+// The frame buffer the next copy goes to: the game's rotation of them (one, two or three).
+bool next_dest(uint32_t& dest) {
+    if (g_xfb_seen < 4) return false;
+    for (unsigned k = 1; k <= 3; ++k)
+        if (g_xfb_dests[0] == g_xfb_dests[k]) {  // a cycle of k: the next is the one k-1 before the newest
+            dest = g_xfb_dests[k - 1];
+            return true;
+        }
+    return false;
+}
+}  // namespace
+
+void request_frame_end() {
+    if (g_early_on) g_end_requests.fetch_add(1, std::memory_order_release);
+}
+
+static void log_copy(const char* what, const Copy& c) {
+    static const bool on = std::getenv("MKDD_EARLY_LOG") != nullptr;
+    if (on)
+        qilin::rt::log("early: %s %08X src %d,%d %dx%d dest %ux%u clear %d%d%d%d rgba %02X%02X%02X%02X z %06X gamma %.1f filter %u,%u,%u clamp %d%d half %d depth %d alpha %d (frames %llu)",
+                       what, c.dest, c.src[0], c.src[1], c.src[2], c.src[3], c.dest_width, c.dest_height, c.clear, c.clear_color, c.clear_alpha,
+                       c.clear_depth, c.clear_rgba[0], c.clear_rgba[1], c.clear_rgba[2], c.clear_rgba[3], c.clear_z, c.gamma, c.filter[0],
+                       c.filter[1], c.filter[2], c.clamp_top, c.clamp_bottom, c.half_scale, c.from_depth, c.efb_alpha,
+                       static_cast<unsigned long long>(g_stats.frames.load()));
+}
+static void note_xfb_copy(const Copy& c) {
+    log_copy("copy", c);
+    g_last_xfb = c;
+    std::memmove(g_xfb_dests + 1, g_xfb_dests, 3 * sizeof g_xfb_dests[0]);
+    g_xfb_dests[0] = c.dest;
+    ++g_xfb_seen;
+}
+
+// At a draw done: the frame ends here if the game's thread asked (it was in endRender).
+static void draw_done() {
+    if (g_end_requests.load(std::memory_order_acquire) == g_end_served) return;
+    g_end_served = g_end_requests.load(std::memory_order_relaxed);
+    g_foretold = false;  // (one foretold and never made: the game cleared instead of copying, a picture dropped; the rotation stays)
+    uint32_t dest;
+    if (g_early_stopped || !next_dest(dest)) return;
+    Frame& f = *g_frame;
+    Copy c = g_last_xfb;
+    c.dest = dest;
+    f.packets.push_back({Packet::kCopy, uint32_t(f.copies.size())});
+    f.copies.push_back(c);
+    g_foretold_copy = c, g_foretold = true;
+    log_copy("foretold", c);
+    if (++g_early_ends == 1 || g_early_ends % 3600 == 0)
+        qilin::rt::log("render: early frame ends %llu, foretold wrong %llu, drawing between %llu", static_cast<unsigned long long>(g_early_ends),
+                       static_cast<unsigned long long>(g_wrong), static_cast<unsigned long long>(g_drawn_after));
+    end_frame(f);
+}
+
+// A copy to the frame buffer: true if the early end made it already.
+static bool early_copy_made(const Copy& c, const Frame& f) {
+    if (!g_foretold) return false;
+    log_copy("came", c);
+    g_foretold = false;
+    bool drawn = false;
+    for (const Packet& p : f.packets) drawn = drawn || p.kind != Packet::kCopy;
+    if (drawn) {  // (a pass that drew after the frame's end: its copy is its own picture, made as ever)
+        ++g_drawn_after;
+        return false;
+    }
+    note_xfb_copy(c);
+    if (same_copy(c, g_foretold_copy)) {
+        g_wrong_in_a_row = 0;
+        return true;
+    }
+    ++g_wrong;
+    if (g_wrong <= 5) qilin::rt::log("render: the early frame end foretold the wrong copy (frame buffer %08X, foretold %08X)", c.dest, g_foretold_copy.dest);
+    if (++g_wrong_in_a_row == 3) {
+        g_early_stopped = true;
+        qilin::rt::log("render: the early frame end stops: three wrong copies in a row");
+    }
+    return true;  // (the EFB was cleared by the one made: this one can't be made again)
+}
+
 static void record_copy_timed(const Registers& r, uint32_t command) {
     Frame& f = *g_frame;
     Copy c{};
@@ -1595,21 +1722,12 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         // GPU: this game reads none of them (docs/graphics.md).
         c.to_memory = c.dest_width <= 4 && c.dest_height <= 4 && (c.format & 0xFF) == 6 && in_memory(c.dest & 0x03FFFFFFu, 64);
     }
+    if (c.to_xfb && early_copy_made(c, f)) return;
     f.packets.push_back({Packet::kCopy, uint32_t(f.copies.size())});
     f.copies.push_back(c);
     if (c.to_xfb) {
-        f.captured = g_capture_next;
-        g_capture_next = false;
-        if (g_survey) [[unlikely]] survey(f, g_stats.frames.load(std::memory_order_relaxed));
-        textures_end_frame(f);
-        hud::place(f);  // (a widened picture: the flat parts back in proportion)
-        g_stats.frames.fetch_add(1, std::memory_order_relaxed);
-        submit(std::move(g_frame));
-        g_frame = spare_frame();
-        g_dirty = true;
-        g_join.valid = false;
-        std::fill(std::begin(g_slot_load), std::end(g_slot_load), kNoLoad);  // loads don't outlive their frame
-        g_view = kNoView;
+        note_xfb_copy(c);
+        end_frame(f);
     }
 }
 
