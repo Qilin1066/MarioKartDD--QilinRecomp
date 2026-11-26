@@ -484,7 +484,7 @@ int bench_recording(const char* dff_path, unsigned times) {
         decode(c, commands.data(), commands.size(), used, false);
         const uint64_t t1 = gx::now_ns();
         while (auto f = gx::next_frame(0)) {
-            if (i >= 5) draws += f->draws.size(), vertices += f->vertices.size() + f->small.size(), states += f->states.size(), state_bytes += f->states.blocks() * gx::States::kBlock;
+            if (i >= 5) draws += f->draws.size(), vertices += f->vertices.size() + f->small.size() + f->tiny.size(), states += f->states.size(), state_bytes += f->states.blocks() * gx::States::kBlock;
             gx::recycle_frame(std::move(f));
         }
         if (i >= 5) ms.push_back(double(t1 - t0) / 1e6);

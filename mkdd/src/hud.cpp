@@ -96,7 +96,8 @@ void place(gx::Frame& f) {
         if (d.state != s_at) f.states.resolve(d.state, s), s_at = d.state;
         if (s.projection[3][3] != 1.0f || d.index_count == 0) continue;  // perspective: the cameras' business
         float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
-        if (d.pipeline.small_vertices) extent(f, d, s, f.small.data(), lo, hi);
+        if (d.pipeline.small_vertices == gx::kLayoutTiny) extent(f, d, s, f.tiny.data(), lo, hi);
+        else if (d.pipeline.small_vertices) extent(f, d, s, f.small.data(), lo, hi);
         else extent(f, d, s, f.vertices.data(), lo, hi);
         if (!std::isfinite(lo[0]) || !std::isfinite(hi[0])) continue;
         Flat fl{};

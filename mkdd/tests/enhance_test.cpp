@@ -237,7 +237,7 @@ Span span_of(const gx::Frame& f, size_t i) {
     };
     for (uint32_t k = 0; k < d.index_count; ++k) {
         const uint32_t v = d.direct ? d.first_index + k : f.indices[d.first_index + k];
-        one(d.pipeline.small_vertices ? f.small[v].pos : f.vertices[v].pos);
+        one(d.pipeline.small_vertices == gx::kLayoutTiny ? f.tiny[v].pos : d.pipeline.small_vertices ? f.small[v].pos : f.vertices[v].pos);
     }
     return s;
 }

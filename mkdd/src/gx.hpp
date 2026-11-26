@@ -66,6 +66,20 @@ struct SmallVertex {
 };
 static_assert(sizeof(SmallVertex) == 76);
 constexpr unsigned kSmallUvs = 4;  // texture coordinates SmallVertex has
+// The race's layout: no layout in a race frame has more than two texture coordinates (the
+// captures, work/rec2/layouts.py), so its draws take 60 bytes a vertex, every attribute exact
+// (no packing): 2.2 MB less to write and upload a four-view frame than SmallVertex.
+struct TinyVertex {
+    float pos[3];
+    float normal[3];
+    uint8_t color0[4], color1[4];
+    float uv[2][2];
+    uint32_t matrices[3];
+};
+static_assert(sizeof(TinyVertex) == 60);
+constexpr unsigned kTinyUvs = 2;
+// PipelineKey::small_vertices: which of the three a draw's vertices are.
+constexpr uint8_t kLayoutFull = 0, kLayoutSmall = 1, kLayoutTiny = 2;
 
 // Which attributes the vertex format had (the shaders' lighting and texgen
 // rules depend on it).
@@ -117,7 +131,7 @@ struct PipelineKey {
     //    before texturing) and its alpha test can fail: a pixel the test drops has
     //    written its depth all the same, as on the console.
     uint8_t depth_out = 0;
-    uint8_t small_vertices = 0;  // the draw's vertices are SmallVertex (Frame::small)
+    uint8_t small_vertices = 0;  // the draw's vertices: kLayoutFull (Frame::vertices), kLayoutSmall (Frame::small), kLayoutTiny (Frame::tiny)
     // GX's clipping off (XF 0x1005 bit 0, GXSetClipMode: JPA's particles): nothing is cut at the near
     // and far planes, the depth is clamped instead, where the GPU can (renderer.cpp).
     uint8_t no_clip = 0;
@@ -354,7 +368,8 @@ static_assert(States::kBlocks <= 32, "a block mask is 32 bits");
 struct Frame {
     // (The recorder writes every byte of each vertex and index it makes room for.)
     std::vector<Vertex, Unfilled<Vertex>> vertices;
-    std::vector<SmallVertex, Unfilled<SmallVertex>> small;  // draws with PipelineKey::small_vertices index these
+    std::vector<SmallVertex, Unfilled<SmallVertex>> small;  // draws with PipelineKey::small_vertices kLayoutSmall index these
+    std::vector<TinyVertex, Unfilled<TinyVertex>> tiny;     // ... kLayoutTiny
     std::vector<uint32_t, Unfilled<uint32_t>> indices;
     States states;
     std::vector<StateInfo> state_info;  // one for each state
@@ -373,7 +388,7 @@ struct Frame {
     // Empty again, keeping the vectors' capacity (recycle_frame). A new
     // member must be reset here too.
     void clear() {
-        vertices.clear(), small.clear(), indices.clear(), states.clear(), draws.clear(), copies.clear(), packets.clear();
+        vertices.clear(), small.clear(), tiny.clear(), indices.clear(), states.clear(), draws.clear(), copies.clear(), packets.clear();
         state_info.clear(), loads.clear(), views.clear();
         textures.clear(), released.clear();
         alpha_target = true;

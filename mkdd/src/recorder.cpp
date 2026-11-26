@@ -335,6 +335,7 @@ struct Plan {
     bool usable = true;
     // A decoder specialised to this layout where it is one of the game's common ones (decode_fused); else null.
     size_t (*fused_small)(const Registers&, const Format&, const Plan&, const uint8_t*, uint32_t, SmallVertex*) = nullptr;
+    size_t (*fused_tiny)(const Registers&, const Format&, const Plan&, const uint8_t*, uint32_t, TinyVertex*) = nullptr;
     size_t (*fused_full)(const Registers&, const Format&, const Plan&, const uint8_t*, uint32_t, Vertex*) = nullptr;
 };
 void choose_fused(Plan& pl);
@@ -436,7 +437,7 @@ size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const 
             case Step::kUv: {
                 const uint8_t* d = fetch(st.how, 4 + st.slot, st.cs * st.n);
                 if constexpr (!kFull) {
-                    if (st.slot >= kSmallUvs) [[unlikely]]
+                    if (st.slot >= std::extent_v<decltype(V::uv)>) [[unlikely]]
                         rt::fatal(nullptr, "texture coordinate %u in the compact vertex layout", unsigned(st.slot));
                 }
                 if (st.fmt == 4) {  // float
@@ -588,7 +589,7 @@ size_t decode_columns(const Registers& r, const Format& f, const Plan& pl, const
                 break;
             case Step::kUv: {
                 if constexpr (!kFull) {
-                    if (st.slot >= kSmallUvs) [[unlikely]]
+                    if (st.slot >= std::extent_v<decltype(V::uv)>) [[unlikely]]
                         rt::fatal(nullptr, "texture coordinate %u in the compact vertex layout", unsigned(st.slot));
                 }
                 const uint32_t bytes = st.cs * st.n;
@@ -700,10 +701,11 @@ struct Fused {
     Code codes[6];
     unsigned n;
     decltype(Plan::fused_small) small;
+    decltype(Plan::fused_tiny) tiny;
     decltype(Plan::fused_full) full;
 };
 template <Code... C>
-constexpr Fused fused() { return {{C...}, sizeof...(C), &decode_fused<SmallVertex, C...>, &decode_fused<Vertex, C...>}; }
+constexpr Fused fused() { return {{C...}, sizeof...(C), &decode_fused<SmallVertex, C...>, &decode_fused<TinyVertex, C...>, &decode_fused<Vertex, C...>}; }
 // The layouts, as counted in race frames (one view and four) and the menus.
 constexpr Fused kFused[] = {
     fused<kCPosF3, kCColRGBA8, kCUv0S16>(),
@@ -743,7 +745,7 @@ void choose_fused(Plan& pl) {
     }
     for (const Fused& k : kFused)
         if (k.n == pl.count && std::equal(codes, codes + pl.count, k.codes)) {
-            pl.fused_small = k.small, pl.fused_full = k.full;
+            pl.fused_small = k.small, pl.fused_tiny = k.tiny, pl.fused_full = k.full;
             return;
         }
 }
@@ -752,6 +754,8 @@ size_t decode_best(const Registers& r, const Format& f, const Plan& pl, const ui
     if (!g_dff_use) [[likely]] {  // (the capture notes the elements read: decode_columns does)
         if constexpr (std::is_same_v<V, SmallVertex>) {
             if (pl.fused_small) return pl.fused_small(r, f, pl, data, count, out);
+        } else if constexpr (std::is_same_v<V, TinyVertex>) {
+            if (pl.fused_tiny) return pl.fused_tiny(r, f, pl, data, count, out);
         } else {
             if (pl.fused_full) return pl.fused_full(r, f, pl, data, count, out);
         }
@@ -1233,7 +1237,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
 static struct {
     bool valid = false;
     uint32_t draw = 0, has = 0;
-    bool small = false;
+    uint8_t small = 0;  // the vertex layout (kLayout...)
 } g_join;
 // The vertex format last used and its plan, kept while the CP registers
 // they're made from stay as they are (cp_changed): a model's display list is
@@ -1275,11 +1279,13 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     const Plan& plan = g_kept.plan;
     if (g_dff_use) [[unlikely]]
         std::fill(std::begin(g_use_lo), std::end(g_use_lo), ~0u), std::fill(std::begin(g_use_hi), std::end(g_use_hi), 0u);
-    // The compact layout when nothing needs the rest: no tangents or binormals
-    // in the format, and none sent before (emboss texgen reads the last ones),
-    // and no texture coordinates past the fourth. Decoding can't change the
-    // answer: the last tangents only change in a format that has them.
+    // A compact layout when nothing needs the rest: no tangents or binormals in the format, and
+    // none sent before (emboss texgen reads the last ones), and no texture coordinates past the
+    // second (TinyVertex: a race's every draw) or the fourth (SmallVertex: the menus' models).
+    // Decoding can't change the answer: the last tangents only change in a format that has them.
+    const auto beyond = [](unsigned uvs) { return kHasTangent | kHasBinormal | (((1u << (8 - uvs)) - 1) * (kHasUv0 << uvs)); };
     constexpr uint32_t kBig = kHasTangent | kHasBinormal | (((1u << (8 - kSmallUvs)) - 1) * (kHasUv0 << kSmallUvs));
+    static_assert(kBig == (kHasTangent | kHasBinormal | (kHasUv0 << 4) | (kHasUv0 << 5) | (kHasUv0 << 6) | (kHasUv0 << 7)));
     static constexpr float kZero3[3] = {};
     const bool force_full = g_force_full;
     const auto zero_bytes = [](const float* v) {  // (all 12 bytes: -0 isn't zero here)
@@ -1288,32 +1294,34 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
         return (w[0] | w[1] | w[2]) == 0;
     };
     const bool no_last_nbt = zero_bytes(g_last_tangent) && zero_bytes(g_last_binormal);
-    bool small;
+    const auto layout_of = [&](uint32_t what, bool no_nbt) {
+        if (force_full || !no_nbt || (what & kBig)) return kLayoutFull;
+        return (what & beyond(kTinyUvs)) ? kLayoutSmall : kLayoutTiny;
+    };
+    uint8_t small;
     uint32_t first;
+    const auto decode_into = [&](auto& vertices) {
+        first = uint32_t(vertices.size());
+        vertices.resize(first + count);
+        data += decode_checked(r, fmt, plan, data, count, vertices.data() + first);
+    };
     if (plan.usable) {  // straight into the frame's vertices
         has = plan.has;
-        small = !force_full && !(has & kBig) && no_last_nbt;
-        if (small) {
-            first = uint32_t(f.small.size());
-            f.small.resize(first + count);
-            data += decode_checked(r, fmt, plan, data, count, f.small.data() + first);
-        } else {
-            first = uint32_t(f.vertices.size());
-            f.vertices.resize(first + count);
-            data += decode_checked(r, fmt, plan, data, count, f.vertices.data() + first);
-        }
+        small = layout_of(has, no_last_nbt);
+        if (small == kLayoutTiny) decode_into(f.tiny);
+        else if (small == kLayoutSmall) decode_into(f.small);
+        else decode_into(f.vertices);
     } else {  // the general reader (rare formats), then the layout
         thread_local std::vector<Vertex> decoded;
         decoded.resize(count);
         for (uint32_t i = 0; i < count; ++i) data += read_vertex(r, fmt, data, decoded[i], has);
-        small = !force_full && !(has & kBig) && std::memcmp(g_last_tangent, kZero3, 12) == 0 &&
-                std::memcmp(g_last_binormal, kZero3, 12) == 0;
-        if (small) {
-            first = uint32_t(f.small.size());
-            f.small.resize(first + count);
+        small = layout_of(has, std::memcmp(g_last_tangent, kZero3, 12) == 0 && std::memcmp(g_last_binormal, kZero3, 12) == 0);
+        const auto compact = [&](auto& vertices) {
+            first = uint32_t(vertices.size());
+            vertices.resize(first + count);
             for (uint32_t i = 0; i < count; ++i) {
                 const Vertex& v = decoded[i];
-                SmallVertex& o = f.small[first + i];
+                auto& o = vertices[first + i];
                 std::memcpy(o.pos, v.pos, 12);
                 std::memcpy(o.normal, v.normal, 12);
                 std::memcpy(o.color0, v.color0, 4);
@@ -1321,6 +1329,11 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
                 std::memcpy(o.uv, v.uv, sizeof o.uv);
                 std::memcpy(o.matrices, v.matrices, 12);
             }
+        };
+        if (small == kLayoutTiny) {
+            compact(f.tiny);
+        } else if (small == kLayoutSmall) {
+            compact(f.small);
         } else {
             first = uint32_t(f.vertices.size());
             f.vertices.insert(f.vertices.end(), decoded.begin(), decoded.end());
@@ -1570,7 +1583,8 @@ void survey(const Frame& f, uint64_t frame_number) {
         const auto vertex = [&](uint32_t i) {
             const float* p;
             uint32_t row;
-            if (d.pipeline.small_vertices) p = f.small[i].pos, row = f.small[i].matrices[0] & 0xFFu;
+            if (d.pipeline.small_vertices == kLayoutTiny) p = f.tiny[i].pos, row = f.tiny[i].matrices[0] & 0xFFu;
+            else if (d.pipeline.small_vertices) p = f.small[i].pos, row = f.small[i].matrices[0] & 0xFFu;
             else p = f.vertices[i].pos, row = f.vertices[i].matrices[0] & 0xFFu;
             if (row > 61) return;
             float v[3];

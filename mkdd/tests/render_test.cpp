@@ -1453,7 +1453,7 @@ int bench(host::Gpu& gpu, unsigned players, unsigned frames, unsigned strip, uns
         const uint64_t t1 = gx::now_ns();
         double drawn = 0;
         while (auto f = gx::next_frame(0)) {
-            draws = f->draws.size(), vertices = f->vertices.size() + f->small.size(), states = f->states.size();
+            draws = f->draws.size(), vertices = f->vertices.size() + f->small.size() + f->tiny.size(), states = f->states.size();
             const uint64_t r0 = gx::now_ns();
             if (pictures) {  // held, and that many pictures between it and the frame before
                 t.renderer.render_held(std::move(f));
@@ -1610,8 +1610,9 @@ int bench_dff(const char* path, unsigned times) {
 int zwait_dff(host::Gpu& gpu, const char* path, unsigned loops) {
     mkdd::Renderer renderer(gpu, 1);
     std::vector<double> answer, recorded, finished;
-    size_t copies = 0;
+    size_t copies = 0, full = 0, small = 0, tiny = 0;
     mkdd::replay_dff(path, loops, [&](gx::Frame& f) {
+        full = f.vertices.size(), small = f.small.size(), tiny = f.tiny.size();
         std::vector<uint32_t> dests;
         for (const gx::Copy& c : f.copies)
             if (c.to_memory && !c.to_xfb) dests.push_back(c.dest);
@@ -1635,6 +1636,8 @@ int zwait_dff(host::Gpu& gpu, const char* path, unsigned loops) {
     std::printf("%s: %zu copies for the CPU a frame; from the start of drawing: all in memory %.3f ms (median; fastest %.3f), "
                 "recording done %.3f ms, the GPU done %.3f ms\n",
                 path, copies, median(answer), *std::min_element(answer.begin(), answer.end()), median(recorded), median(finished));
+    std::printf("vertices: %zu full (%zu bytes each), %zu small (%zu), %zu tiny (%zu): %zu KB\n", full, sizeof(gx::Vertex), small, sizeof(gx::SmallVertex), tiny,
+                sizeof(gx::TinyVertex), (full * sizeof(gx::Vertex) + small * sizeof(gx::SmallVertex) + tiny * sizeof(gx::TinyVertex)) / 1024);
     return 0;
 }
 
