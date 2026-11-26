@@ -8,6 +8,7 @@
 // Runtime code: no std::format (macOS 10.15).
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -306,6 +307,16 @@ public:
     }
     void resolve_all(State* out) const {
         for (size_t i = 0, n = size(); i < n; ++i) resolve(i, out[i]);
+    }
+    // Part of a state: `bytes` from `offset` (offsetof(State, ...)) into `out` (interp.cpp's texture matrices).
+    void read(size_t i, size_t offset, size_t bytes, void* out) const {
+        const uint32_t* at = index_.data() + i * kBlocks;
+        auto* to = static_cast<uint8_t*>(out);
+        while (bytes) {
+            const size_t b = offset / kBlock, in = offset % kBlock, n = std::min(bytes, kBlock - in);
+            std::memcpy(to, blocks_[at[b]].bytes + in, n);
+            to += n, offset += n, bytes -= n;
+        }
     }
     // A new state, last. `changed`: a bit for each block that may differ from the state before's (the
     // others are taken as the same without looking); each of those is compared, and shared if it is.

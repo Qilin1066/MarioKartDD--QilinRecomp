@@ -82,10 +82,12 @@ public:
     // What the last pair() found (the tests, the stats line).
     struct Counts {
         uint32_t loads = 0, paired = 0, alone = 0, jumped = 0, views = 0, cuts = 0;
+        uint32_t textures = 0, texture_snaps = 0;  // texture matrices blended, and left as the newer frame has them (a wrap, a jump)
     };
     const Counts& counts() const { return counts_; }
 
 private:
+    void pair_textures(const gx::Frame& prev, const gx::Frame& cur);
     struct Key {
         uint64_t key;  // tag and id
         uint32_t slot, index;
@@ -99,7 +101,17 @@ private:
         uint8_t how;  // 0 as loaded, 1 paired (from/to), 2 alone (to under the blended view)
         Pose from, to;
         float mv0[12];  // paired: the older frame's matrix as it was loaded (phase 0 is exactly it)
+        uint32_t prev;  // paired: the older frame's load
     };
+    // A state's texture matrices (XF rows 30-59, GX_TEXMTX0-9) blended from those of the older
+    // frame's state that drew the same thing (the state its first paired position matrix was
+    // loaded in): an animated texture (a scroll, water) moves between frames as its model does.
+    struct TexBlend {
+        uint32_t state, groups;  // groups: bit g, the matrix at row 30 + 3g
+        float from[30][4];
+    };
+    std::vector<TexBlend> tex_;
+    std::vector<uint32_t> prev_state_of_;  // the older frame's first state each of its loads is in
     struct ViewPair {
         bool blend;
         Pose from, to;      // the camera: rotation and eye position

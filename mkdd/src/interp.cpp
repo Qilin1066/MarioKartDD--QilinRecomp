@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -156,7 +157,7 @@ namespace {
 struct Probe {
     FILE* out = nullptr;
     uint64_t frames = 0, blendable = 0, loads = 0, paired = 0, jumped = 0, fresh = 0, miscounted = 0, other_view = 0, untagged = 0,
-             views = 0, cuts = 0, view_changes = 0;
+             views = 0, cuts = 0, view_changes = 0, textures = 0, texture_snaps = 0;
     uint32_t view_step[14] = {}, view_turn[8] = {}, model_move[14] = {};
     double far_sum = 0;
     float far_max = 0, step_max = 0;
@@ -182,6 +183,7 @@ struct Probe {
                      double(paired) / double(frames), double(jumped) / double(frames), double(fresh) / double(frames),
                      double(miscounted) / double(frames), double(other_view) / double(frames), double(untagged) / double(frames),
                      double(views) / double(frames), (unsigned long long)cuts);
+        std::fprintf(out, "  texture matrices a frame: blended %.1f, wrapped or jumped %.2f\n", double(textures) / double(frames), double(texture_snaps) / double(frames));
         const auto row = [&](const char* name, const uint32_t* h, unsigned n) {
             std::fprintf(out, "  %s:", name);
             for (unsigned i = 0; i < n; ++i) std::fprintf(out, " %u", h[i]);
@@ -233,6 +235,7 @@ constexpr float kJump = 1.0f / 128.0f;
 
 bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
     counts_ = {};
+    tex_.clear();
     const size_t loads = cur.loads.size(), views = cur.views.size();
     prepared_.resize(loads);
     for (Prepared& p : prepared_) p.how = 0;
@@ -350,6 +353,7 @@ bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
                     from_parts(parts_of(m0), pr.from), from_parts(parts_of(m1), pr.to);
                     std::memcpy(pr.from.m, m0, sizeof m0);
                     std::memcpy(pr.mv0, l0->mv, sizeof pr.mv0);
+                    pr.prev = prev_keys_[p + (i - c)].index;
                     pr.how = 1;
                 }
             }
@@ -360,8 +364,49 @@ bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
         }
         c = c_end;
     }
+    pair_textures(prev, cur);
+    if (g_probe) g_probe->textures += counts_.textures, g_probe->texture_snaps += counts_.texture_snaps;
     // Nothing to move (a movie, a menu: flat drawing only): the picture between would be the frame.
     return counts_.paired + counts_.alone > 0;
+}
+
+// A texture matrix whose translation moves by more than a quarter of the texture in a tick has
+// wrapped (a scroll kept in 0..1) or jumped: it is drawn as the newer frame has it.
+constexpr float kTextureJump = 0.25f;
+constexpr size_t kTexRows = offsetof(gx::State, posmtx) + 30 * sizeof(float[4]), kTexBytes = 30 * sizeof(float[4]);
+
+void Blender::pair_textures(const gx::Frame& prev, const gx::Frame& cur) {
+    tex_.clear();
+    if (!counts_.paired || prev.state_info.size() != prev.states.size()) return;
+    prev_state_of_.assign(prev.loads.size(), gx::kNoLoad);
+    for (size_t j = 0; j < prev.state_info.size(); ++j)
+        for (uint32_t l : prev.state_info[j].load)
+            if (l < prev_state_of_.size() && prev_state_of_[l] == gx::kNoLoad) prev_state_of_[l] = uint32_t(j);
+    float to[30][4];
+    for (size_t i = 0; i < cur.states.size(); ++i) {
+        float w;  // projection[3][2]: -1 for a perspective projection (flat drawing isn't blended)
+        cur.states.read(i, offsetof(gx::State, projection) + 14 * sizeof(float), sizeof w, &w);
+        if (w != -1.0f) continue;
+        uint32_t j = gx::kNoLoad;
+        for (uint32_t l : cur.state_info[i].load)
+            if (l != gx::kNoLoad && prepared_[l].how == 1 && prepared_[l].prev < prev_state_of_.size()) {
+                j = prev_state_of_[prepared_[l].prev];
+                break;
+            }
+        if (j == gx::kNoLoad) continue;
+        TexBlend& tb = tex_.emplace_back();
+        tb.state = uint32_t(i), tb.groups = 0;
+        prev.states.read(j, kTexRows, kTexBytes, tb.from);
+        cur.states.read(i, kTexRows, kTexBytes, to);
+        for (unsigned g = 0; g < 10; ++g) {
+            if (std::memcmp(tb.from[3 * g], to[3 * g], 3 * sizeof(float[4])) == 0) continue;
+            bool jump = false;
+            for (unsigned r = 3 * g; r < 3 * g + 3; ++r) jump |= !(std::fabs(to[r][3] - tb.from[r][3]) <= kTextureJump);
+            if (jump) ++counts_.texture_snaps;
+            else tb.groups |= 1u << g, ++counts_.textures;
+        }
+        if (!tb.groups) tex_.pop_back();
+    }
 }
 
 // ---- a picture's states
@@ -457,6 +502,15 @@ void Blender::states(const gx::Frame& cur, float phase, gx::State* out) {
                 s.projection[2][2] = p[4], s.projection[2][3] = p[5];
             }
         }
+    }
+    float to[30][4];
+    for (const TexBlend& tb : tex_) {
+        cur.states.read(tb.state, kTexRows, kTexBytes, to);
+        float (*rows)[4] = out[tb.state].posmtx + 30;
+        for (unsigned g = 0; g < 10; ++g)
+            if ((tb.groups >> g) & 1)
+                for (unsigned r = 3 * g; r < 3 * g + 3; ++r)
+                    for (unsigned k = 0; k < 4; ++k) rows[r][k] = tb.from[r][k] + (to[r][k] - tb.from[r][k]) * t;
     }
 }
 

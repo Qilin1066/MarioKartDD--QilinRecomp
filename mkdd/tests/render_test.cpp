@@ -1181,6 +1181,48 @@ void between_four_views(Target& t, Stream& st) {
                                                     "(145.9 139.8 60.8 158.1)");
 }
 
+// A scrolling texture between frames (water, conveyor arrows): its texture matrix (row 30,
+// GX_TEXMTX0) is blended like the model's position matrix, so the texture moves part of the way
+// too; one whose scroll wrapped (0.9 to 0.05) is drawn as the newer frame has it. A model 256
+// pixels wide from x 192, white for the first half of an 8-texel repeating texture: the edge is
+// at x 192 + 256 (0.5 - scroll).
+void between_textures(Target& t, Stream& st) {
+    constexpr uint32_t kStripes = 0x009A0000u;
+    for (uint32_t i = 0; i < 32; ++i) guest(kStripes)[i] = (i % 8) < 4 ? 0xFF : 0x00;  // I8 8x4: four white columns, four black
+    const auto frame = [&](float scroll) {
+        stream_begin(st);
+        perspective(st);
+        st.xff(30 * 4, {1, 0, 0, scroll, 0, 1, 0, 0, 0, 0, 1, 0});
+        st.texture(kStripes, 8, 4, 1);
+        st.bp(0x80, 1u | (1u << 2));                                   // repeat, nearest
+        st.bp(0xC0, 8u | (15u << 4) | (15u << 8) | (15u << 12) | (1u << 19));
+        const Mat cam = camera_at(0.0f), model = model_at(0.0f, 0.0f);
+        st.tagged(0, model.m, 0x80300000u, cam.m);
+        stream_quad(st, -2.0f, 0.5f, 2.0f, -0.5f, 0, 0xFFFFFFFFu, true);
+        st.end_frame();
+        st.send();
+        return t.shown(true);
+    };
+    const auto edge = [](const std::vector<uint8_t>& px) {  // the first white-to-black step from the model's left
+        for (int x = 193; x < 448; ++x)
+            if (at(px, x - 1, 264)[0] > 128 && at(px, x, 264)[0] <= 128) return x;
+        return -1;
+    };
+    frame(0.0f), frame(0.2f);
+    const unsigned blended = t.renderer.pairing().textures;
+    const auto half = t.between(0.5f);
+    const int e = half.empty() ? -1 : edge(half);
+    check(blended == 1 && std::abs(e - 294) <= 1, "between frames a scrolling texture is half way: edge at x " + std::to_string(e) +
+                                                     " (294; the frames: 320, 269), " + std::to_string(blended) + " texture matrix blended");
+    frame(0.9f);
+    const auto newer = frame(0.05f);
+    const unsigned snapped = t.renderer.pairing().texture_snaps;
+    const auto wrapped = t.between(0.5f);
+    check(snapped == 1 && !wrapped.empty() && edge(wrapped) == edge(newer) && edge(newer) > 0,
+          "... and one that wrapped is drawn as the newer frame has it: edge at " + std::to_string(wrapped.empty() ? -1 : edge(wrapped)) + " (" +
+              std::to_string(edge(newer)) + ")");
+}
+
 // A picture shown wider than drawn for (16:9 and 21:9 on the game's 4:3) gets more columns
 // than lines: enough whole ones for the stretch (Renderer::request_widening). The console's
 // pixel positions must hold in them: a copy's rectangle, the Z the CPU reads, the dither's
@@ -1709,6 +1751,7 @@ int main(int argc, char** argv) {
         address_bits(t, st);
         between_frames(t, st);
         between_four_views(t, st);
+        between_textures(t, st);
         widened(t, st);
         marks_follow(t, st);
         clip_off(t, st, gpu.depth_clamp);
