@@ -318,7 +318,12 @@ unsigned g_cp_write_count = 0;
               l.vat[0], l.vat[1], l.vat[2], cp);
 }
 
-uint32_t be32(const uint8_t* p) { return uint32_t{p[0]} << 24 | uint32_t{p[1]} << 16 | uint32_t{p[2]} << 8 | p[3]; }
+uint32_t be32(const uint8_t* p) {  // (a load and a byte swap, which MSVC doesn't find in shifts and ors)
+    uint32_t v;
+    std::memcpy(&v, p, 4);
+    if constexpr (std::endian::native == std::endian::little) v = std::byteswap(v);
+    return v;
+}
 
 // Decode whole commands from data[used..size); stop at one that isn't complete.
 // ---- MKDD_DFF=<file>@<seconds>: the first whole frame after that much
@@ -459,7 +464,7 @@ int bench_recording(const char* dff_path, unsigned times) {
     Cpu c = rt::new_cpu();
     gx::set_rendering(true);  // frames are queued (and taken back below), as when drawing
     std::vector<double> ms;
-    uint64_t draws = 0, vertices = 0, hashed_before = 0;
+    uint64_t draws = 0, vertices = 0, states = 0, hashed_before = 0;
     for (unsigned i = 0; i < times + 5; ++i) {
         if (i == 5) hashed_before = gx::recorder_stats().hashed_bytes.load();  // five to warm the caches up, not counted
         dff.registers();
@@ -469,7 +474,7 @@ int bench_recording(const char* dff_path, unsigned times) {
         decode(c, commands.data(), commands.size(), used, false);
         const uint64_t t1 = gx::now_ns();
         while (auto f = gx::next_frame(0)) {
-            if (i >= 5) draws += f->draws.size(), vertices += f->vertices.size() + f->small.size();
+            if (i >= 5) draws += f->draws.size(), vertices += f->vertices.size() + f->small.size(), states += f->states.size();
             gx::recycle_frame(std::move(f));
         }
         if (i >= 5) ms.push_back(double(t1 - t0) / 1e6);
@@ -478,9 +483,10 @@ int bench_recording(const char* dff_path, unsigned times) {
     double sum = 0;
     for (double v : ms) sum += v;
     std::printf("recording %s, %u times: median %.3f ms, fastest %.3f, slowest %.3f, mean %.3f; "
-                "%llu draws and %llu vertices a frame, %llu KB of textures checked\n",
+                "%llu draws, %llu vertices and %llu states a frame, %llu KB of textures checked\n",
                 dff_path, times, ms[ms.size() / 2], ms.front(), ms.back(), sum / double(ms.size()),
                 static_cast<unsigned long long>(draws / times), static_cast<unsigned long long>(vertices / times),
+                static_cast<unsigned long long>(states / times),
                 static_cast<unsigned long long>((gx::recorder_stats().hashed_bytes.load() - hashed_before) / times / 1024));
     return 0;
 }

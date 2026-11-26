@@ -9,12 +9,26 @@
 // depth, and the RG8/GB8 copy formats. Exit 77 (skipped) without a Vulkan 1.3
 // device.
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
+
+#if defined(_WIN32) && defined(_M_X64)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+#undef near  // (windows.h's, which the checks below use as a name)
+#undef far
+#endif
 
 #include "gpu.hpp"
 #include "gx.hpp"
@@ -1293,6 +1307,87 @@ int mtxtag_bytes() {
     return 0;
 }
 
+// mkdd_render_test --bench-dff <file.dff> [times]: mkdd --bench-record without the game (the recorder's
+// cost on a captured frame). With MKDD_PROFILE=1 on Windows, a sampler (another thread stopping this one
+// every few hundred microseconds) prints where the time goes, by function (inlined ones too) and by line;
+// it needs the build's program database (built with /Zi, linked with /DEBUG).
+#if defined(_WIN32) && defined(_M_X64)
+struct Sampler {
+    HANDLE target = nullptr;
+    std::atomic<bool> stop{false};
+    std::thread thread;
+    std::unordered_map<uint64_t, uint64_t> counts;
+    void start() {
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &target, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        thread = std::thread([this] {
+            while (!stop.load(std::memory_order_relaxed)) {
+                if (SuspendThread(target) != DWORD(-1)) {
+                    CONTEXT c{};
+                    c.ContextFlags = CONTEXT_CONTROL;
+                    if (GetThreadContext(target, &c)) ++counts[c.Rip];
+                    ResumeThread(target);
+                }
+                const uint64_t until = gx::now_ns() + 250'000;
+                while (gx::now_ns() < until) std::this_thread::yield();
+            }
+        });
+    }
+    void report() {
+        stop = true;
+        thread.join();
+        const HANDLE p = GetCurrentProcess();
+        SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
+        SymInitialize(p, nullptr, TRUE);
+        std::unordered_map<std::string, uint64_t> by_function, by_line;
+        uint64_t total = 0;
+        alignas(SYMBOL_INFO) char buf[sizeof(SYMBOL_INFO) + 512];
+        for (const auto& [pc, n] : counts) {
+            total += n;
+            auto* sym = reinterpret_cast<SYMBOL_INFO*>(buf);
+            std::memset(buf, 0, sizeof buf);
+            sym->SizeOfStruct = sizeof(SYMBOL_INFO), sym->MaxNameLen = 511;
+            DWORD64 disp = 0;
+            std::string name = "?";
+            DWORD context = 0, frame = 0;
+            if (SymAddrIncludeInlineTrace(p, pc) && SymQueryInlineTrace(p, pc, 0, pc, pc, &context, &frame) &&
+                SymFromInlineContext(p, pc, context, &disp, sym))
+                name = sym->Name;
+            else if (SymFromAddr(p, pc, &disp, sym)) name = sym->Name;
+            by_function[name] += n;
+            IMAGEHLP_LINE64 line{};
+            line.SizeOfStruct = sizeof line;
+            DWORD ldisp = 0;
+            std::string where = "?";
+            if (SymGetLineFromInlineContext(p, pc, context, 0, &ldisp, &line) || SymGetLineFromAddr64(p, pc, &ldisp, &line)) {
+                const char* file = std::strrchr(line.FileName, '\\');
+                where = std::string(file ? file + 1 : line.FileName) + ":" + std::to_string(line.LineNumber);
+            }
+            by_line[where + " " + name] += n;
+        }
+        const auto top = [&](const std::unordered_map<std::string, uint64_t>& m, const char* what, size_t k) {
+            std::vector<std::pair<uint64_t, std::string>> v;
+            for (const auto& [s, n] : m) v.emplace_back(n, s);
+            std::sort(v.rbegin(), v.rend());
+            std::printf("profile: %llu samples, by %s\n", static_cast<unsigned long long>(total), what);
+            for (size_t i = 0; i < v.size() && i < k; ++i) std::printf("  %5.1f%%  %s\n", 100.0 * double(v[i].first) / double(total), v[i].second.c_str());
+        };
+        top(by_function, "function", 40);
+        top(by_line, "line", 60);
+    }
+};
+#endif
+int bench_dff(const char* path, unsigned times) {
+#if defined(_WIN32) && defined(_M_X64)
+    std::unique_ptr<Sampler> sampler;
+    if (const char* e = std::getenv("MKDD_PROFILE"); e && *e && *e != '0') sampler = std::make_unique<Sampler>(), sampler->start();
+    const int code = mkdd::bench_recording(path, times);
+    if (sampler) sampler->report();
+    return code;
+#else
+    return mkdd::bench_recording(path, times);
+#endif
+}
+
 const rt::FunctionEntry kNoFunctions[] = {{0x80004000u, [](rt::Cpu&) {}}};
 
 }  // namespace
@@ -1304,6 +1399,10 @@ int main(int argc, char** argv) {
     }
     rt::init({kNoFunctions, {}});  // guest memory, for textures
     if (argc >= 2 && std::strcmp(argv[1], "--mtxtag") == 0) return mtxtag_bytes();
+    if (argc >= 3 && std::strcmp(argv[1], "--bench-dff") == 0) {
+        gx::set_rendering(true);
+        return bench_dff(argv[2], argc >= 4 ? unsigned(std::atoi(argv[3])) : 200);
+    }
     host::Gpu gpu = host::Gpu::create({}, false);
     std::printf("device: %s (logic ops %s, wide lines %s, large points %s)\n", gpu.name.c_str(), gpu.logic_op ? "yes" : "no",
                 gpu.wide_lines ? "yes" : "no", gpu.large_points ? "yes" : "no");

@@ -14,6 +14,7 @@
 #include "recorder.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -25,6 +26,7 @@
 #include <mutex>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 
 #include "gx.hpp"
 #include "hud.hpp"
@@ -58,8 +60,19 @@ float g_last_normal[3] = {0, 0, 1}, g_last_tangent[3] = {}, g_last_binormal[3] =
 // ---- vertices
 
 float as_float(uint32_t v) { return std::bit_cast<float>(v); }
-uint16_t be16(const uint8_t* p) { return uint16_t((p[0] << 8) | p[1]); }
-uint32_t be32(const uint8_t* p) { return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3]; }
+// (A load and a byte swap: MSVC doesn't see one in shifts and ors, and these read every vertex.)
+uint16_t be16(const uint8_t* p) {
+    uint16_t v;
+    std::memcpy(&v, p, 2);
+    if constexpr (std::endian::native == std::endian::little) v = std::byteswap(v);
+    return v;
+}
+uint32_t be32(const uint8_t* p) {
+    uint32_t v;
+    std::memcpy(&v, p, 4);
+    if constexpr (std::endian::native == std::endian::little) v = std::byteswap(v);
+    return v;
+}
 
 // Forced inline: one per vertex attribute (MSVC spells it differently).
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -306,7 +319,11 @@ struct Plan {
     uint8_t mtx[9];
     uint32_t has = 0;  // what the attributes give
     bool usable = true;
+    // A decoder specialised to this layout where it is one of the game's common ones (decode_fused); else null.
+    size_t (*fused_small)(const Registers&, const Format&, const Plan&, const uint8_t*, uint32_t, SmallVertex*) = nullptr;
+    size_t (*fused_full)(const Registers&, const Format&, const Plan&, const uint8_t*, uint32_t, Vertex*) = nullptr;
 };
+void choose_fused(Plan& pl);
 Plan plan_of(const Registers& r, const Format& f) {
     Plan pl;
     const uint32_t ia = r.cp[0x30], ib = r.cp[0x40];
@@ -335,6 +352,7 @@ Plan plan_of(const Registers& r, const Format& f) {
             add({Step::kUv, uint8_t(how), uint8_t(f.tc_fmt[t]), uint8_t(f.tc_n[t]), t, uint8_t(component_size(f.tc_fmt[t])), f.tc_scale[t]});
             pl.has |= kHasUv0 << t;
         }
+    choose_fused(pl);
     return pl;
 }
 
@@ -588,16 +606,152 @@ size_t decode_columns(const Registers& r, const Format& f, const Plan& pl, const
     return size_t(size) * count;
 }
 
-// decode_columns, and with MKDD_CHECK_DECODE=1 checked against
+// The game's models come in a handful of layouts, every attribute by a 16-bit
+// index (a race frame: 30,000 primitives of 4.6 vertices, nine in ten in six
+// layouts). For those, a decoder compiled for the layout: one pass a vertex,
+// each attribute at a constant offset with a constant format, and every byte
+// of the vertex written once (decode_columns' results, the same bytes).
+enum Code : uint8_t { kCPosMtx, kCTexMtx0, kCPosF3, kCNrmS16, kCNrmF, kCColRGBA8, kCUv0S16, kCUv1S16 };
+constexpr unsigned code_bytes(Code c) { return c == kCPosMtx || c == kCTexMtx0 ? 1 : 2; }
+template <Code... C>
+constexpr std::array<unsigned, sizeof...(C)> code_offsets() {
+    std::array<unsigned, sizeof...(C)> at{};
+    unsigned o = 0, i = 0;
+    ((at[i++] = o, o += code_bytes(C)), ...);
+    return at;
+}
+struct FusedIn {
+    const Registers& r;
+    const Format& f;
+    // The element an index in the vertex points at (array_data reports one outside memory).
+    QILIN_RECORDER_INLINE const uint8_t* element(unsigned array, uint32_t bytes, const uint8_t* p) const {
+        const Array& a = f.arrays[array];
+        const uint32_t index = be16(p);
+        if (a.any && index <= a.last) [[likely]] return a.host + size_t(index) * a.stride;
+        return array_data(r, array, index, bytes);
+    }
+};
+template <Code C, unsigned At, class V>
+QILIN_RECORDER_INLINE void fused_step(const FusedIn& in, const uint8_t* p, V& v) {
+    if constexpr (C == kCPosMtx) {
+        v.matrices[0] = (v.matrices[0] & ~0xFFu) | (p[At] & 63u);
+    } else if constexpr (C == kCTexMtx0) {
+        v.matrices[0] = (v.matrices[0] & ~0xFF00u) | ((p[At] & 63u) << 8);
+    } else if constexpr (C == kCPosF3) {
+        const uint8_t* d = in.element(0, 12, p + At);
+        v.pos[0] = as_float(be32(d)), v.pos[1] = as_float(be32(d + 4)), v.pos[2] = as_float(be32(d + 8));
+    } else if constexpr (C == kCNrmS16) {
+        const uint8_t* d = in.element(1, 6, p + At);
+        for (unsigned j = 0; j < 3; ++j) v.normal[j] = static_cast<int16_t>(be16(d + 2 * j)) / 16384.0f;
+    } else if constexpr (C == kCNrmF) {
+        const uint8_t* d = in.element(1, 12, p + At);
+        for (unsigned j = 0; j < 3; ++j) v.normal[j] = as_float(be32(d + 4 * j));
+    } else if constexpr (C == kCColRGBA8) {  // the only colour: both channels are it
+        const uint8_t* d = in.element(2, 4, p + At);
+        std::memcpy(v.color0, d, 4), std::memcpy(v.color1, d, 4);
+    } else {
+        constexpr unsigned slot = C == kCUv0S16 ? 0 : 1;
+        const uint8_t* d = in.element(4 + slot, 4, p + At);
+        const float scale = in.f.tc_scale[slot];
+        v.uv[slot][0] = float(int16_t(be16(d))) * scale;
+        v.uv[slot][1] = float(int16_t(be16(d + 2))) * scale;
+    }
+}
+template <class V, Code... C>
+size_t decode_fused(const Registers& r, const Format& f, const Plan& pl, const uint8_t* data, uint32_t count, V* out) {
+    constexpr bool kFull = std::is_same_v<V, Vertex>;
+    constexpr unsigned kSize = (code_bytes(C) + ...);
+    static constexpr auto kAt = code_offsets<C...>();
+    constexpr bool kNormal = ((C == kCNrmS16 || C == kCNrmF) || ...), kColor = ((C == kCColRGBA8) || ...);
+    uint32_t m0 = 0, m1 = 0;
+    for (int k = 0; k < 4; ++k) m0 |= uint32_t(pl.mtx[k]) << (8 * k), m1 |= uint32_t(pl.mtx[4 + k]) << (8 * k);
+    const uint32_t m2 = pl.mtx[8];
+    const FusedIn in{r, f};
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint8_t* const p = data + size_t(i) * kSize;
+        V& v = out[i];
+        if constexpr (!kNormal) std::memcpy(v.normal, g_last_normal, 12);
+        if constexpr (kFull) std::memcpy(v.tangent, g_last_tangent, 12), std::memcpy(v.binormal, g_last_binormal, 12);
+        if constexpr (!kColor) std::memset(v.color0, 255, 4), std::memset(v.color1, 255, 4);
+        std::memset(v.uv, 0, sizeof v.uv);
+        v.matrices[0] = m0, v.matrices[1] = m1, v.matrices[2] = m2;
+        [&]<size_t... I>(std::index_sequence<I...>) { (fused_step<C, kAt[I]>(in, p, v), ...); }(std::make_index_sequence<sizeof...(C)>{});
+    }
+    if constexpr (kNormal) std::memcpy(g_last_normal, out[count - 1].normal, 12);
+    return size_t(kSize) * count;
+}
+struct Fused {
+    Code codes[6];
+    unsigned n;
+    decltype(Plan::fused_small) small;
+    decltype(Plan::fused_full) full;
+};
+template <Code... C>
+constexpr Fused fused() { return {{C...}, sizeof...(C), &decode_fused<SmallVertex, C...>, &decode_fused<Vertex, C...>}; }
+// The layouts, as counted in race frames (one view and four) and the menus.
+constexpr Fused kFused[] = {
+    fused<kCPosF3, kCColRGBA8, kCUv0S16>(),
+    fused<kCPosF3, kCNrmS16, kCUv0S16>(),
+    fused<kCPosF3, kCColRGBA8, kCUv0S16, kCUv1S16>(),
+    fused<kCPosF3, kCNrmF>(),
+    fused<kCPosMtx, kCTexMtx0, kCPosF3, kCNrmS16, kCUv0S16>(),
+    fused<kCPosF3, kCNrmS16>(),
+    fused<kCPosF3, kCNrmF, kCUv0S16>(),
+    fused<kCPosMtx, kCPosF3, kCNrmS16, kCUv0S16>(),
+    fused<kCPosF3, kCUv0S16>(),
+};
+void choose_fused(Plan& pl) {
+    if (!pl.usable || pl.count > 6) return;
+    Code codes[6];
+    for (unsigned i = 0; i < pl.count; ++i) {
+        const Step& st = pl.steps[i];
+        const bool idx16 = st.how == 3;
+        switch (st.kind) {
+            case Step::kPosMtx: codes[i] = kCPosMtx; break;
+            case Step::kTexMtx: if (st.slot != 0) return; codes[i] = kCTexMtx0; break;
+            case Step::kPos: if (!idx16 || st.fmt != 4 || st.n != 3) return; codes[i] = kCPosF3; break;
+            case Step::kNormal:
+                if (!idx16 || st.n != 1 || (st.fmt != 3 && st.fmt != 4)) return;
+                codes[i] = st.fmt == 3 ? kCNrmS16 : kCNrmF;
+                break;
+            case Step::kColor:
+                if (!idx16 || st.fmt != 5 || st.slot != 0) return;
+                codes[i] = kCColRGBA8;
+                break;
+            case Step::kUv:
+                if (!idx16 || st.fmt != 3 || st.n != 2 || st.slot > 1) return;
+                codes[i] = st.slot ? kCUv1S16 : kCUv0S16;
+                break;
+        }
+    }
+    for (const Fused& k : kFused)
+        if (k.n == pl.count && std::equal(codes, codes + pl.count, k.codes)) {
+            pl.fused_small = k.small, pl.fused_full = k.full;
+            return;
+        }
+}
+template <class V>
+size_t decode_best(const Registers& r, const Format& f, const Plan& pl, const uint8_t* data, uint32_t count, V* out) {
+    if (!g_dff_use) [[likely]] {  // (the capture notes the elements read: decode_columns does)
+        if constexpr (std::is_same_v<V, SmallVertex>) {
+            if (pl.fused_small) return pl.fused_small(r, f, pl, data, count, out);
+        } else {
+            if (pl.fused_full) return pl.fused_full(r, f, pl, data, count, out);
+        }
+    }
+    return decode_columns(r, f, pl, data, count, out);
+}
+
+// decode_best, and with MKDD_CHECK_DECODE=1 checked against
 // decode_vertex vertex by vertex (byte for byte, the last normals too): a
 // fatal error at the first difference. For tests and after changing either.
 template <class V>
 size_t decode_checked(const Registers& r, const Format& f, const Plan& pl, const uint8_t* data, uint32_t count, V* out) {
     static const bool check = [] { const char* e = std::getenv("MKDD_CHECK_DECODE"); return e && *e && *e != '0'; }();
-    if (!check) [[likely]] return decode_columns(r, f, pl, data, count, out);
+    if (!check) [[likely]] return decode_best(r, f, pl, data, count, out);
     float last[3][3];
     std::memcpy(last[0], g_last_normal, 12), std::memcpy(last[1], g_last_tangent, 12), std::memcpy(last[2], g_last_binormal, 12);
-    const size_t used = decode_columns(r, f, pl, data, count, out);
+    const size_t used = decode_best(r, f, pl, data, count, out);
     float after[3][3];
     std::memcpy(after[0], g_last_normal, 12), std::memcpy(after[1], g_last_tangent, 12), std::memcpy(after[2], g_last_binormal, 12);
     std::memcpy(g_last_normal, last[0], 12), std::memcpy(g_last_tangent, last[1], 12), std::memcpy(g_last_binormal, last[2], 12);
@@ -827,19 +981,25 @@ void viewport_and_scissor(const Registers& r, Draw& d) {
     const float vl = std::min(x_orig - wd, x_orig + wd), vr = std::max(x_orig - wd, x_orig + wd);
     const float vt = std::min(y_orig - ht, y_orig + ht), vb = std::max(y_orig - ht, y_orig + ht);
     struct Range { int off, start, end; };
+    struct Ranges {  // (on the stack: this runs for every draw)
+        Range r[9];
+        unsigned n = 0;
+        const Range* begin() const { return r; }
+        const Range* end() const { return r + n; }
+    };
     const auto ranges = [](int start, int end, int offset, int dim) {
-        std::vector<Range> out;
+        Ranges out;
         for (int extra = -4096; extra <= 4096; extra += 1024) {
             const int o = offset + extra, s = std::clamp(start - o, 0, dim), e = std::clamp(end - o + 1, 0, dim);
-            if (s < e) out.push_back({o, s, e});
+            if (s < e) out.r[out.n++] = {o, s, e};
         }
         return out;
     };
     Range bx{x_off, 0, 0}, by{y_off, 0, 0};
     long best = -1, best_area = -1;
     if (left <= right && top <= bottom)
-        for (const Range& x : ranges(left, right, x_off, 640))
-            for (const Range& y : ranges(top, bottom, y_off, 528)) {
+        for (const Ranges xs = ranges(left, right, x_off, 640), ys = ranges(top, bottom, y_off, 528); const Range& x : xs)
+            for (const Range& y : ys) {
                 const float x0 = std::clamp(float(x.start + x.off), vl, vr), x1 = std::clamp(float(x.end + x.off), vl, vr);
                 const float y0 = std::clamp(float(y.start + y.off), vt, vb), y1 = std::clamp(float(y.end + y.off), vt, vb);
                 const long cover = long((x1 - x0) * (y1 - y0)), area = long(x.end - x.start) * (y.end - y.start);
@@ -1042,7 +1202,12 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
         const char* e = std::getenv("MKDD_FULL_VERTICES");
         return e && *e && *e != '0';
     }();
-    const bool no_last_nbt = std::memcmp(g_last_tangent, kZero3, 12) == 0 && std::memcmp(g_last_binormal, kZero3, 12) == 0;
+    const auto zero_bytes = [](const float* v) {  // (all 12 bytes: -0 isn't zero here)
+        uint32_t w[3];
+        std::memcpy(w, v, 12);
+        return (w[0] | w[1] | w[2]) == 0;
+    };
+    const bool no_last_nbt = zero_bytes(g_last_tangent) && zero_bytes(g_last_binormal);
     bool small;
     uint32_t first;
     if (plan.usable) {  // straight into the frame's vertices
