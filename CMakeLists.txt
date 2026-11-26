@@ -387,7 +387,7 @@ if(QILIN_GAME_DOL)
     target_link_libraries(qilin_game_difftest PRIVATE qilin_core qilin_rt qilin_warnings)
     qilin_tool(qilin_game_difftest)
     if(MSVC)
-        target_compile_options(qilin_game_difftest PRIVATE /bigobj /MP)
+        target_compile_options(qilin_game_difftest PRIVATE /bigobj /MP6)
         target_link_options(qilin_game_difftest PRIVATE /STACK:16777216)  # lifted calls nest as the guest's do
     endif()
 endif()
@@ -459,7 +459,9 @@ if(QILIN_GAME_DOL)
         # Lifted code calls nest as deeply as the guest's: a large host stack.
         target_link_options(mkdd PRIVATE /STACK:16777216)
         # MSBuild compiles one project's files one at a time without this: the lifted files take long.
-        target_compile_options(mkdd PRIVATE /MP)
+        # Bounded: a lifted file's compiler takes up to about 1 GB, and unbounded /MP with several
+        # builds at once ran a 32 GB PC out of memory.
+        target_compile_options(mkdd PRIVATE /MP6)
     else()
         if(QILIN_SANITIZE AND NOT QILIN_SANITIZE_LIFTED)
             set_source_files_properties(${gen_sources} PROPERTIES COMPILE_OPTIONS "-w;-fno-sanitize=all;-g0")
