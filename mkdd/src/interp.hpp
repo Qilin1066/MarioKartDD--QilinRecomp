@@ -84,8 +84,8 @@ public:
 
 private:
     struct Key {
-        uint64_t key;
-        uint32_t index;
+        uint64_t key;  // tag and id
+        uint32_t slot, index;
     };
     struct Pose {  // a matrix as rotation (a quaternion), scale and translation
         float q[4], s[3], t[3];
