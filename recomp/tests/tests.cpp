@@ -832,13 +832,32 @@ void test_fp_single_mode() {
     // cmpwi r3,0; beq +8; lfs f1,0(r4); lfs f1,4(r4); blr: f1 is written on every path to the one way out.
     const Lifted every = fn({0x2C030000u, 0x41820008u, 0xC0240000u, 0xC0240004u, 0x4E800020u});
     CHECK(every.ok && every.code.contains("float f1") && !every.code.contains("bool w"));
-    // lfs f1,0(r3); bl elsewhere; blr: a call, no single mode.
-    LiftInput call;
-    call.start = 0x80003000;
-    call.insns = {{0x80003000, ppc::decode(0xC0230000u)}, {0x80003004, ppc::decode(0x48000101u)}, {0x80003008, ppc::decode(0x4E800020u)}};
-    call.is_function = [](uint32_t) { return true; };
-    const Lifted with_call = lift(call);
-    CHECK(with_call.ok && !with_call.code.contains("float"));
+    // lfs f1,0(r3); bl elsewhere; blr: the call gets f1 written back, and nothing after it reads
+    // a register as a single, so there is no double version to fall back on.
+    auto with_calls = [](std::initializer_list<uint32_t> words) {
+        LiftInput in;
+        in.start = 0x80003000;
+        uint32_t a = in.start;
+        for (uint32_t w : words) in.insns.emplace_back(a, ppc::decode(w)), a += 4;
+        in.is_function = [](uint32_t) { return true; };
+        return lift(in);
+    };
+    const Lifted with_call = with_calls({0xC0230000u, 0x48000101u, 0x4E800020u});
+    CHECK(with_call.ok && with_call.code.contains("float f1") && with_call.code.contains("c.ps0[1] = fp::to_d(f1); c.ps1[1] = fp::to_d(p1);  fn_80003104(c);"));
+    CHECK(!with_call.code.contains("fn_80003000_d") && !with_call.code.contains("return; }"));  // (and the return writes nothing back)
+    // stfd f31,8(r1); lfs f31,0(r3); bl; fadds f1,f31,f31; lfd f31,8(r1); blr: a compiler's
+    // save and restore of an FPR around paired-single work. The save stores the Cpu's f31, single
+    // or not; after the call f31 is fetched again, and the double version takes over there if it
+    // isn't a single; the restore goes straight to the Cpu, and the return writes back f1 only.
+    const Lifted saved = with_calls({0xDBE10008u, 0xC3E30000u, 0x48000101u, 0xEC3FF82Au, 0xCBE10008u, 0x4E800020u});
+    CHECK(saved.ok && saved.code.contains("static void fn_80003000_d(Cpu& c, unsigned resume)"));
+    CHECK(saved.code.contains("switch (resume) { case 1: goto R_1; default: break; }") && saved.code.contains("R_1:\n"));
+    CHECK(saved.code.contains("write64(c, ea, fp::bits(c.ps0[31]));"));
+    CHECK(saved.code.contains("if (!(int(fp::to_f_exact(c.ps0[31], f31)))) [[unlikely]] { fn_80003000_d(c, 1); return; }"));
+    CHECK(saved.code.contains("c.ps0[31] = fp::from_bits(read64(c, ea));"));
+    CHECK(saved.code.contains("c.ps0[1] = fp::to_d(f1); c.ps1[1] = fp::to_d(p1);  return;") && !saved.code.contains("bool w"));
+    // lfs f1,0(r3); bcl 4,eq,elsewhere; blr: a conditional call: no single mode.
+    CHECK(!with_calls({0xC0230000u, 0x40820101u, 0x4E800020u}).code.contains("float"));
 }
 
 void test_cfg_switches() {

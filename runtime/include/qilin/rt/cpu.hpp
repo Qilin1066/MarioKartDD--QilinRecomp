@@ -434,7 +434,8 @@ inline double estimate_rsqrt(double v) {
 enum class Quant : unsigned { kFloat = 0, kU8 = 4, kU16 = 5, kS8 = 6, kS16 = 7 };
 inline bool quant_valid(unsigned type) { return type == 0 || type >= 4; }
 inline unsigned quant_size(unsigned type) { return type == 0 ? 4 : (type == 4 || type == 6) ? 1 : 2; }
-inline float pow2f(int e) { return std::ldexp(1.0f, e); }
+// 2^e as a float, for a scale's -32..32: the exponent field, no library call.
+inline float pow2f(int e) { return std::bit_cast<float>(static_cast<uint32_t>(127 + e) << 23); }
 inline int signed_scale(unsigned s) { return s < 32 ? static_cast<int>(s) : static_cast<int>(s) - 64; }
 
 // One loaded element (raw is the big-endian value read, zero-extended) to its double.

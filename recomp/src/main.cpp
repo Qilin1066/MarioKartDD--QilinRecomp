@@ -58,7 +58,7 @@ int usage() {
                "  qilin coverage <main.dol> [--list]\n"
                "  qilin suspects <main.dol>\n"
                "  qilin polls   <main.dol>\n"
-               "  qilin lift    <main.dol> -o <dir> [--plan plan.tsv] [--files n]\n"
+               "  qilin lift    <main.dol> -o <dir> [--plan plan.tsv] [--files n] [--leaf-single]\n"
                "  qilin --version\n");
     return 2;
 }
@@ -67,7 +67,7 @@ struct Args {
     std::string command, input;
     std::optional<std::string> out, json, plan;
     uint32_t base = 0, files = 0;
-    bool list = false;
+    bool list = false, leaf_single = false;
 };
 
 uint32_t parse_u32(std::string_view s) {
@@ -97,6 +97,7 @@ Args parse_args(std::span<char*> argv) {
         else if (arg == "--plan") a.plan = value();
         else if (arg == "--files") a.files = parse_u32(value());
         else if (arg == "--list") a.list = true;
+        else if (arg == "--leaf-single") a.leaf_single = true;
         else if (arg.starts_with("-")) throw Failure{std::format("unknown option {}", arg)};
         else if (a.input.empty()) a.input = arg;
         else throw Failure{std::format("unexpected argument {}", arg)};
@@ -371,7 +372,9 @@ int cmd_lift(const Args& a) {
             if (++n % kChunk == 0) flush();
             continue;
         }
-        const Lifted l = lift(lift_input(cfg, f));
+        LiftInput input = lift_input(cfg, f);
+        input.single_leaf_only = a.leaf_single;  // (single mode as it was, to measure against)
+        const Lifted l = lift(input);
         if (l.ok) {
             chunk += l.code + "\n";
             ++lifted;

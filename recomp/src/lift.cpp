@@ -132,11 +132,24 @@ bool single_effect(const Insn& in, uint64_t& use, uint64_t& def) {
 // values on entry, or the double version runs instead), and before each
 // instruction the halves it has written on every path there and on some path
 // (what to write back on the ways out: a half only read keeps its register).
+//
+// A function may also call, and save and restore FPRs as doubles (stfd, lfd):
+// what a compiler's prologue and epilogue do around paired-single code. After
+// a call every half is the Cpu's again, and after lfd that register's ps0
+// (`kill`); the halves read later as singles are fetched again there, and if
+// one doesn't hold a single-precision value the double version takes over
+// from that very point (`resume`, a number the double version switches on).
 struct SingleInfo {
     bool ok = false;
     uint64_t live_in = 0, flags = 0;   // flags: halves written on some paths only, somewhere
     std::vector<uint64_t> must, may;   // per instruction
+    std::vector<uint64_t> def, kill, need;  // per instruction; need: the halves to fetch again after it
+    std::vector<unsigned> resume;      // per instruction: where the double version takes over after it (0: nowhere)
+    unsigned resumes = 0;
 };
+
+bool double_store(Op op) { return op == Op::stfd || op == Op::stfdx || op == Op::stfdu || op == Op::stfdux; }
+bool double_load(Op op) { return op == Op::lfd || op == Op::lfdx || op == Op::lfdu || op == Op::lfdux; }
 
 SingleInfo analyse_single(const LiftInput& f) {
     SingleInfo info;
@@ -146,19 +159,28 @@ SingleInfo analyse_single(const LiftInput& f) {
     for (size_t k = 0; k < n; ++k) index[f.insns[k].first] = k;
     std::map<uint32_t, const JumpTable*> tables;
     for (const JumpTable& t : f.jtabs) tables[t.at] = &t;
-    std::vector<uint64_t> use(n), def(n);
+    std::vector<uint64_t> use(n), def(n), kill(n, 0);
     std::vector<std::vector<size_t>> succ(n), pred(n);
     bool any = false;
     for (size_t k = 0; k < n; ++k) {
         const auto& [a, in] = f.insns[k];
-        if (uses_fpr(in.op) || in.op == Op::ps_cmpu0 || in.op == Op::ps_cmpo0 || in.op == Op::ps_cmpu1 || in.op == Op::ps_cmpo1) {
+        if (double_store(in.op)) {
+            if (f.single_leaf_only) return info;
+            // (reads the register as it stands, single or not: no use, no definition)
+        } else if (double_load(in.op)) {
+            if (f.single_leaf_only) return info;
+            kill[k] = F0(in.rd());
+        } else if (uses_fpr(in.op) || in.op == Op::ps_cmpu0 || in.op == Op::ps_cmpo0 || in.op == Op::ps_cmpu1 || in.op == Op::ps_cmpo1) {
             if (!single_effect(in, use[k], def[k])) return info;
             any = true;
         }
         const bool branch = in.op == Op::b || in.op == Op::bc || in.op == Op::bclr || in.op == Op::bcctr;
-        // A call comes back with every register the callee's: no single mode.
-        if (branch && in.lk() && !(in.op == Op::b && f.not_calls.contains(a)) && !(in.op == Op::bc && in.branch_target(a) == a + 4))
-            return info;
+        // A call comes back with every register the callee's. (A conditional call would leave
+        // them ours on one path only: no single mode then; compilers don't emit one.)
+        if (branch && in.lk() && !(in.op == Op::b && f.not_calls.contains(a)) && !(in.op == Op::bc && in.branch_target(a) == a + 4)) {
+            if (f.single_leaf_only || (in.op != Op::b && (in.rd() & 0x14) != 0x14)) return info;
+            kill[k] = ~uint64_t{0};
+        }
         bool next = !Cfg::is_terminator(in);
         if ((in.op == Op::b || in.op == Op::bc) && !in.lk()) {
             if (const auto it = index.find(in.branch_target(a)); it != index.end()) succ[k].push_back(it->second);
@@ -180,7 +202,7 @@ SingleInfo analyse_single(const LiftInput& f) {
         for (size_t k = n; k-- > 0;) {
             uint64_t out = 0;
             for (size_t t : succ[k]) out |= live[t];
-            const uint64_t in = use[k] | (out & ~def[k]);
+            const uint64_t in = use[k] | (out & ~def[k] & ~kill[k]);
             if (in != live[k]) live[k] = in, changed = true;
         }
     }
@@ -198,11 +220,20 @@ SingleInfo analyse_single(const LiftInput& f) {
         for (size_t k = 0; k < n; ++k) {
             uint64_t must = k == 0 || pred[k].empty() ? 0 : ~uint64_t{0};
             uint64_t may = k != 0 && pred[k].empty() ? all_defs : 0;
-            for (size_t p : pred[k]) must &= info.must[p] | def[p], may |= info.may[p] | def[p];
+            for (size_t p : pred[k]) must &= (info.must[p] | def[p]) & ~kill[p], may |= (info.may[p] | def[p]) & ~kill[p];
             if (must != info.must[k] || may != info.may[k]) info.must[k] = must, info.may[k] = may, changed = true;
         }
     }
     for (size_t k = 0; k < n; ++k) info.flags |= info.may[k] & ~info.must[k];
+    info.need.assign(n, 0);
+    info.resume.assign(n, 0);
+    for (size_t k = 0; k < n; ++k) {
+        if (!kill[k]) continue;
+        for (size_t t : succ[k]) info.need[k] |= live[t] & kill[k];
+        if (info.need[k]) info.resume[k] = ++info.resumes;
+    }
+    info.def = std::move(def);
+    info.kill = std::move(kill);
     info.ok = true;
     return info;
 }
@@ -210,8 +241,9 @@ SingleInfo analyse_single(const LiftInput& f) {
 class Emitter {
 public:
     // With `single`, the function in single mode (the caller has checked it can be).
-    explicit Emitter(const LiftInput& f, const SingleInfo* single = nullptr, std::string name = {})
-        : f_(f), single_(single), name_(name.empty() ? fn_name(f.start) : std::move(name)) {
+    // `resume`: for the double version behind a single-mode one, the points it can take over at.
+    explicit Emitter(const LiftInput& f, const SingleInfo* single = nullptr, std::string name = {}, const SingleInfo* resume = nullptr)
+        : f_(f), single_(single), resume_(resume && resume->resumes ? resume : nullptr), name_(name.empty() ? fn_name(f.start) : std::move(name)) {
         for (const auto& [a, in] : f.insns) present_.insert(a);
         for (const JumpTable& t : f.jtabs) tables_[t.at] = &t;
     }
@@ -247,6 +279,8 @@ public:
                 return out;
             }
             body += line;
+            if (single_ && single_->kill[k] == ~uint64_t{0}) body += after_call();
+            if (resume_ && resume_->resume[k]) body += std::format("R_{}:\n", resume_->resume[k]);
             const bool last = k + 1 == f_.insns.size();
             const uint32_t next = last ? 0 : f_.insns[k + 1].first;
             if (!Cfg::is_terminator(in) && !(tables_.contains(a)) && (last || next != a + 4)) {
@@ -261,7 +295,14 @@ public:
                 }
             }
         }
-        out.code = std::format("{}void {}(Cpu& c) {{\n{}{}}}\n", name_ == fn_name(f_.start) ? "" : "static ", name_, prologue(), body);
+        std::string enter;
+        if (resume_) {
+            enter = "    switch (resume) {";
+            for (unsigned r = 1; r <= resume_->resumes; ++r) enter += std::format(" case {0}: goto R_{0};", r);
+            enter += " default: break; }\n";
+        }
+        out.code = std::format("{}void {}(Cpu& c{}) {{\n{}{}{}}}\n", name_ == fn_name(f_.start) ? "" : "static ", name_,
+                               resume_ ? ", unsigned resume" : "", prologue(), enter, body);
         out.ok = true;
         return out;
     }
@@ -311,7 +352,7 @@ private:
                 for (unsigned h = 0; h < 64; ++h)
                     if (single_->live_in & (uint64_t{1} << h))
                         all += std::format("{}int(fp::to_f_exact(c.ps{}[{}], {}))", all.empty() ? "" : " & ", h < 32 ? 0 : 1, h & 31, half(h));
-                p += std::format("    if (!({})) [[unlikely]] {{ {}_d(c); return; }}\n", all, name_);
+                p += std::format("    if (!({})) [[unlikely]] {{ {}; return; }}\n", all, twin(0));
             }
         } else {
             for (unsigned n : fprs_) p += std::format("    double f{0} = c.ps0[{0}];\n", n);
@@ -327,14 +368,14 @@ private:
     // Written back before anything outside the function can see the state
     // (calls, returns, traps); read again after a call. The text is a
     // placeholder until the function's uses are known.
-    std::string sync_out() {
+    std::string sync_out(uint64_t except = 0) {
         if (!single_) return "@OUT@";
         // Single mode: the halves written on every path here go back as doubles, those written on
         // some paths if this run wrote them, the rest are the registers' own still.
         std::string s = "@OUT@ ";
         for (unsigned h = 0; h < 64; ++h) {
             const uint64_t bit = uint64_t{1} << h;
-            if (!(single_->may[cur_] & bit)) continue;
+            if (!(single_->may[cur_] & bit) || (except & bit)) continue;
             (h < 32 ? fprs_ : ps1s_).insert(h & 31);
             const std::string store = std::format("c.ps{}[{}] = fp::to_d({}); ", h < 32 ? 0 : 1, h & 31, half(h));
             if (!(single_->must[cur_] & bit)) flags_read_ |= bit;
@@ -344,11 +385,32 @@ private:
     }
     static std::string half(unsigned h) { return std::format("{}{}", h < 32 ? 'f' : 'p', h & 31); }
     // Single mode: after writing these halves, their "written" flags (those that have one).
-    std::string wrote(uint64_t halves) const {
+    std::string wrote(uint64_t halves, bool written = true) const {
         std::string s;
         for (unsigned h = 0; h < 64; ++h)
-            if (halves & single_->flags & (uint64_t{1} << h)) s += std::format(" w{} = true;", half(h));
+            if (halves & single_->flags & (uint64_t{1} << h)) s += std::format(" w{} = {};", half(h), written);
         return s;
+    }
+    // The double version, entered at the start (0) or taking over at a resume point.
+    std::string twin(unsigned resume) const {
+        return single_->resumes ? std::format("{}_d(c, {})", name_, resume) : std::format("{}_d(c)", name_);
+    }
+    // Single mode: these halves, now the Cpu's, as floats again; the double version takes over
+    // from here if one isn't a single-precision value. `out`: what to write back first.
+    std::string fetch(uint64_t halves, const std::string& out) {
+        if (!halves) return {};
+        std::string all;
+        for (unsigned h = 0; h < 64; ++h)
+            if (halves & (uint64_t{1} << h)) {
+                (h < 32 ? fprs_ : ps1s_).insert(h & 31);
+                all += std::format("{}int(fp::to_f_exact(c.ps{}[{}], {}))", all.empty() ? "" : " & ", h < 32 ? 0 : 1, h & 31, half(h));
+            }
+        return std::format(" if (!({})) [[unlikely]] {{ {}{}; return; }}", all, out, twin(single_->resume[cur_]));
+    }
+    // Single mode, after a call's line: every half is the Cpu's (the call wrote ours back).
+    std::string after_call() {
+        const std::string s = wrote(~uint64_t{0}, false) + fetch(single_->need[cur_], "");
+        return s.empty() ? s : "   " + s + "\n";
     }
     std::string sync_in() { return "@IN@"; }
 
@@ -478,6 +540,25 @@ private:
             const std::string v = std::format("fp::madd_s({}, {}, {}, {})", x, cv, y, sub);
             return neg ? "fp::neg_unless_nan_s(" + v + ")" : v;
         };
+        if (double_store(in.op) || double_load(in.op)) {
+            const bool x = in.op == Op::stfdx || in.op == Op::stfdux || in.op == Op::lfdx || in.op == Op::lfdux;
+            const bool u = in.op == Op::stfdu || in.op == Op::stfdux || in.op == Op::lfdu || in.op == Op::lfdux;
+            const std::string ea = u ? (x ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm())) : (x ? ea_x() : ea_d());
+            const std::string update = u ? std::format(" {} = ea;", R(a)) : std::string();
+            const uint64_t bit = F0(d);
+            if (double_load(in.op)) {
+                // The register is the Cpu's from here; fetched again as a float if it's read as one.
+                line(std::format("{{ const uint32_t ea = {}; c.ps0[{}] = fp::from_bits(read64(c, ea));{}{}{} }}", ea, d, update,
+                                 wrote(bit, false), fetch(single_->need[cur_], sync_out(bit))));
+                return true;
+            }
+            // Ours if we wrote it (a flag says, where only some paths did), else the Cpu's.
+            std::string value = std::format("c.ps0[{}]", d);
+            if (single_->must[cur_] & bit) value = std::format("fp::to_d({})", F(d));
+            else if (single_->may[cur_] & bit) flags_read_ |= bit, value = std::format("(w{0} ? fp::to_d({0}) : c.ps0[{1}])", F(d), d);
+            line(std::format("{{ const uint32_t ea = {}; write64(c, ea, fp::bits({}));{} }}", ea, value, update));
+            return true;
+        }
         switch (in.op) {
         case Op::fadds: return fill(out, d, op2("add_s", F(a), F(b)));
         case Op::fsubs: return fill(out, d, op2("sub_s", F(a), F(b)));
@@ -989,6 +1070,7 @@ private:
 
     const LiftInput& f_;
     const SingleInfo* single_;  // single mode, with its analysis; else null
+    const SingleInfo* resume_;  // the double version of a single-mode function with resume points; else null
     std::string name_;
     size_t cur_ = 0;  // the instruction being emitted (an index into f_.insns)
     std::set<uint32_t> present_, labels_, callees_;
@@ -1013,17 +1095,17 @@ Lifted lift(const LiftInput& f) {
     if (!info.ok) return out;
     uint64_t read = 0;
     {
-        Emitter first(f, &info);  // finds which "written" flags the ways out read
+        Emitter first(f, &info);  // finds which "written" flags the ways out (and stfd) read
         if (!first.run().ok) return out;
         read = first.flags_read();
     }
     info.flags = read;
     Emitter s(f, &info);
     Lifted single = s.run();
-    if (!single.ok || single.code.contains("@IN@")) return out;
+    if (!single.ok || single.code.contains("c.hooks->idle")) return out;  // (a poll loop reads the registers back)
     single.code = s.expand(single.code);
-    if (info.live_in) {
-        Emitter d(f, nullptr, fn_name(f.start) + "_d");
+    if (info.live_in || info.resumes) {
+        Emitter d(f, nullptr, fn_name(f.start) + "_d", &info);
         Lifted twin = d.run();
         if (!twin.ok) return out;
         single.code = d.expand(twin.code) + single.code;

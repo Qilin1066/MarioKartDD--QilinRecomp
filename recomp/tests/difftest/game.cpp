@@ -2,6 +2,7 @@
 // each run against the reference interpreter (ref.cpp) from the same states.
 //
 //   qilin_game_difftest <main.dol> [--trials n] [--seed n] [--steps n] [--only address] [--data symbols-data.txt]
+//   qilin_game_difftest <main.dol> --thp movie.thp [--frames n] [--reps n]
 //
 // Where qilin_difftest checks each instruction alone, this checks what the
 // lifter makes of whole functions: its register model across calls, branches,
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <bit>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
@@ -84,6 +86,10 @@ struct Program {
     bool function(uint32_t a) const { return a >= text_lo && a < text_hi && a % 4 == 0 && (flags[index(a)] & kStart); }
 };
 
+// What a replaced function does, for the few the movie decoder needs (--thp); the same on both
+// sides. Null: every replaced function returns at once.
+void (*g_native)(uint32_t function, uint32_t* gpr, uint8_t* mem) = nullptr;
+
 enum class End { Returned, Trap, Skipped, Broken };
 struct Outcome {
     End end = End::Skipped;
@@ -101,6 +107,7 @@ Outcome interpret(ref::State& s, const Program& p, uint32_t entry, unsigned max_
         const bool no_body = (p.flags[i] & kStart) && (p.flags[i] & kNoBody);
         const Insn in = no_body ? ppc::decode(0x4E800020u) : p.code[i];  // (a blr)
         if (!no_body) executed.push_back(static_cast<uint32_t>(i));
+        else if (g_native) g_native(pc, s.gpr, s.mem);
         const unsigned bo = in.rd(), bi = in.ra();
         // A call: the lifted code calls the function and carries on at `back`.
         auto call = [&](uint32_t target, uint32_t back) {
@@ -195,7 +202,9 @@ void on_trap(rt::Cpu&, uint32_t pc, const char* why) {
     if (std::string_view(why).starts_with("not lifted")) return;  // a function the lifter refuses: returns at once here
     throw Trapped{pc};
 }
-void on_replaced(rt::Cpu&, uint32_t) {}  // replaced or dropped code: returns at once here
+void on_replaced(rt::Cpu& c, uint32_t f) {  // replaced or dropped code: returns at once here
+    if (g_native) g_native(f, c.r, c.mem);
+}
 const rt::CpuHooks kHooks{slow_read, slow_write, on_call, on_trap, on_replaced, [](rt::Cpu&) {}};
 
 uint32_t g_current = 0;
@@ -265,7 +274,8 @@ int main(int argc, char** argv) {
     }
     unsigned trials = 8, max_steps = 20000;
     uint32_t seed = 20261125u, only = 0;
-    std::string data_path;
+    std::string data_path, thp_path;
+    unsigned thp_frames = 3, thp_reps = 5;
     for (int i = 2; i + 1 < argc; i += 2) {
         const std::string_view o = argv[i];
         if (o == "--trials") trials = parse_u32(argv[i + 1], 10);
@@ -273,6 +283,9 @@ int main(int argc, char** argv) {
         else if (o == "--steps") max_steps = parse_u32(argv[i + 1], 10);
         else if (o == "--only") only = parse_u32(argv[i + 1], 16);
         else if (o == "--data") data_path = argv[i + 1];
+        else if (o == "--thp") thp_path = argv[i + 1];
+        else if (o == "--frames") thp_frames = parse_u32(argv[i + 1], 10);
+        else if (o == "--reps") thp_reps = parse_u32(argv[i + 1], 10);
         else {
             std::println(stderr, "game difftest: unknown option {}", o);
             return 2;
@@ -408,6 +421,116 @@ int main(int argc, char** argv) {
     }
     std::vector<uint8_t> dirty((kSize + kLow) / kPage, 0);  // the main range's pages, then the low one's
     std::signal(SIGSEGV, on_crash);
+
+    // --thp: the SDK's movie decoder on real frames, the heaviest paired-single code the game
+    // has: THPInit, then THPVideoDecode on the first frames of a .thp file, on the reference and
+    // lifted; everything must agree after each call. Then the lifted decode alone, timed.
+    if (!thp_path.empty()) {
+        constexpr uint32_t kThpInit = 0x800F7CC8u, kThpVideoDecode = 0x800F0800u;  // GM4E01 (the symbols port's names)
+        constexpr uint32_t kLc = 0xE0000000u, kLcSize = 0x4000u;                    // the decoder works in the locked cache
+        constexpr uint32_t kFile = 0x80500000u, kY = 0x80580000u, kU = 0x80600000u, kV = 0x80640000u, kWork = 0x80680000u;
+        std::ifstream f(thp_path, std::ios::binary);
+        const std::vector<uint8_t> movie{std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+        auto be = [&](size_t o) { return o + 4 <= movie.size() ? read_be32(movie.data() + o) : 0u; };
+        if (movie.size() < 0x40 || be(0) != 0x54485000u) {
+            std::println(stderr, "game difftest: {} isn't a THP movie", thp_path);
+            return 1;
+        }
+        const uint32_t components = be(be(0x20));
+        const uint32_t width = be(be(0x20) + 20), height = be(be(0x20) + 24);  // (the video component's info comes first)
+        if (!lifted_memory.commit(kLc, kLcSize) || !ref_memory.commit(kLc, kLcSize) || components == 0 || components > 16) {
+            std::println(stderr, "game difftest: cannot set up the movie");
+            return 1;
+        }
+        rt::Cpu c;
+        c.mem = lifted_memory.base();
+        c.hooks = &kHooks;
+        c.r[1] = kStackTop;
+        c.r[2] = sda[0];
+        c.r[13] = sda[1];
+        ref::State s;
+        std::memcpy(s.gpr, c.r, sizeof s.gpr);
+        s.mem = ref_memory.base();
+        s.lo = kLo, s.hi = kHi, s.low = kLow, s.extra = kLc, s.extra_size = kLcSize;
+        // The OS functions the decoder leans on: HID2 says the locked cache is on, DCZeroRange
+        // clears the work area, LCStoreData copies a finished row out of the locked cache.
+        g_native = [](uint32_t function, uint32_t* gpr, uint8_t* mem) {
+            if (function == 0x800A96CCu) gpr[3] = 0xB0000000u;                                           // PPCMfhid2
+            else if (function == 0x800E715Cu) std::memset(mem + (gpr[3] & ~31u), 0, (gpr[4] + (gpr[3] & 31u) + 31u) & ~31u);  // DCZeroRange
+            else if (function == 0x800E7330u) std::memmove(mem + gpr[3], mem + gpr[4], gpr[5]);         // LCStoreData
+        };
+        using Clock = std::chrono::steady_clock;
+        std::vector<uint32_t> executed;
+        double lifted_seconds = 0;
+        auto lifted_call = [&](uint32_t fn, std::initializer_list<uint32_t> args) {
+            unsigned r = 3;
+            for (uint32_t a : args) c.r[r++] = a;
+            c.lr = kReturn;
+            g_current = fn;
+            const auto t0 = Clock::now();
+            on_call(c, fn);
+            lifted_seconds = std::chrono::duration<double>(Clock::now() - t0).count();
+        };
+        auto both = [&](const char* what, uint32_t fn, std::initializer_list<uint32_t> args) {
+            unsigned r = 3;
+            for (uint32_t a : args) s.gpr[r++] = a;
+            s.lr = kReturn;
+            executed.clear();
+            const Outcome end = interpret(s, p, fn, 2000000000u, executed);
+            if (end.end != End::Returned) {
+                std::println(stderr, "FAIL {}: the reference stopped at {:08X}: {}{}", what, end.pc, end.why, s.fault ? std::format(" ({:08X})", s.fault_at) : "");
+                return false;
+            }
+            lifted_call(fn, args);
+            std::vector<std::string> diffs;
+            for (unsigned n = 0; n < 32; ++n) {
+                if (c.r[n] != s.gpr[n]) diffs.push_back(std::format("r{} {:08X} vs {:08X}", n, c.r[n], s.gpr[n]));
+                if (std::bit_cast<uint64_t>(c.ps0[n]) != s.ps0[n]) diffs.push_back(std::format("f{}.ps0 {:016X} vs {:016X}", n, std::bit_cast<uint64_t>(c.ps0[n]), s.ps0[n]));
+                if (std::bit_cast<uint64_t>(c.ps1[n]) != s.ps1[n]) diffs.push_back(std::format("f{}.ps1 {:016X} vs {:016X}", n, std::bit_cast<uint64_t>(c.ps1[n]), s.ps1[n]));
+            }
+            if (c.cr != s.cr || c.ctr != s.ctr || c.lr != s.lr || c.xer() != (s.xer & 0xE000007Fu)) diffs.push_back("cr, ctr, lr or xer");
+            for (unsigned g = 0; g < 8; ++g)
+                if (c.gqr[g] != s.gqr[g]) diffs.push_back(std::format("gqr{}", g));
+            for (const auto& [base, size] : {std::pair{kLo, kSize}, std::pair{0u, kLow}, std::pair{kLc, kLcSize}})
+                if (std::memcmp(lifted_memory.base() + base, ref_memory.base() + base, size) != 0) {
+                    uint32_t i = 0;
+                    while (lifted_memory.base()[base + i] == ref_memory.base()[base + i]) ++i;
+                    diffs.push_back(std::format("memory at {:08X}", base + i));
+                }
+            std::println("{}: {} instructions, returns {:08X}, {} differences", what, executed.size(), s.gpr[3], diffs.size());
+            for (size_t d = 0; d < diffs.size() && d < 12; ++d) std::println(stderr, "    {} (lifted vs reference)", diffs[d]);
+            return diffs.empty();
+        };
+        if (!both("THPInit", kThpInit, {})) return 1;
+        std::vector<std::pair<uint32_t, uint32_t>> images;  // file offset and size of each frame's picture
+        for (uint32_t at = be(0x28), size = be(0x18), n = 0; n < thp_frames && at + size <= movie.size(); ++n) {
+            images.emplace_back(at + 8 + 4 * components, be(at + 8));
+            const uint32_t next = be(at);
+            at += size;
+            size = next;
+        }
+        auto load = [&](const std::pair<uint32_t, uint32_t>& image) {
+            for (uint8_t* base : {lifted_memory.base(), ref_memory.base()}) std::memcpy(base + kFile, movie.data() + image.first, image.second);
+        };
+        for (size_t n = 0; n < images.size(); ++n) {
+            load(images[n]);
+            if (!both(std::format("frame {}", n).c_str(), kThpVideoDecode, {kFile, kY, kU, kV, kWork})) return 1;
+        }
+        double best = 1e9;
+        for (unsigned rep = 0; rep < thp_reps; ++rep) {
+            double total = 0;
+            for (const auto& image : images) {
+                std::memcpy(lifted_memory.base() + kFile, movie.data() + image.first, image.second);
+                lifted_call(kThpVideoDecode, {kFile, kY, kU, kV, kWork});
+                total += lifted_seconds;
+            }
+            best = std::min(best, total / static_cast<double>(images.size()));
+        }
+        const double blocks = (width / 16) * (height / 16) * 6.0;
+        std::println("THP {}x{}: lifted decode {:.3f} ms a frame ({:.0f} ns an 8x8 block), best of {} passes over {} frames",
+                     width, height, best * 1e3, best * 1e9 / blocks, thp_reps, images.size());
+        return 0;
+    }
 
     std::vector<uint8_t> covered(p.code.size(), 0);
     std::vector<uint32_t> executed;
