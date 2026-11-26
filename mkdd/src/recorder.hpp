@@ -31,7 +31,7 @@ void xf_changed(uint32_t address, uint32_t count);
 // by `tag` (gx.hpp's Load; 0 unknown) under the view matrix `view` (twelve
 // floats; null: the one last given, as for an indexed load, which comes from
 // the model whose shapes were just tagged). Besides xf_changed.
-void matrix_loaded(uint32_t address, const uint32_t* words, uint32_t tag, const float* view, uint32_t id = 0);
+void matrix_loaded(uint32_t address, const uint32_t* words, uint32_t tag, const float* view, uint32_t id = 0, uint8_t context = 0);
 // A BP register was written (the TEV colour registers latch by which half is written).
 // `changed`: the value differs from before (else only commands it triggers matter).
 void bp_written(uint32_t reg, uint32_t value, bool changed = true);

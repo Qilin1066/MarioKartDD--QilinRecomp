@@ -33,6 +33,9 @@ namespace mkdd::mtxtag {
 // marks 80067A64-80067AE8 and 800C20D8-800C2128 replaced. Asking for them is
 // what says they are in (installed()).
 std::span<const qilin::rt::Provided> replacements();
+// And the wrappers of Race2D::drawPlayerMark (8014573C), drawAlarm (80146CF0) and drawBomb
+// (80147B1C), which the plan must wrap: for rt::provide too.
+std::span<const qilin::rt::Provided> wrappers();
 bool installed();
 // For hud::set_follows_world: a flat draw that follows something in the 3D
 // scene, as far as the tags tell (the lens flare; see mtxtag.cpp for what they can't).

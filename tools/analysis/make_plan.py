@@ -99,6 +99,13 @@ INIT = {
 }
 # Single functions decided apart from their object: lift, replace or wrap.
 FUNCTIONS = {
+    # The HUD's marks that follow a kart (the players' marks, the alarm, a bomb's): each draws
+    # its panes through J2DPicture, so nothing in the drawing says what they follow. A native
+    # wrapper flags the matrices loaded while one runs (mtxtag.cpp), for the placing of the HUD
+    # on a picture wider than drawn for (hud.cpp).
+    "drawPlayerMark__6Race2DFv": ("wrap", "game: Race2D::drawPlayerMark (marks that follow a kart)"),
+    "drawAlarm__6Race2DFv": ("wrap", "game: Race2D::drawAlarm (marks that follow a kart)"),
+    "drawBomb__6Race2DFv": ("wrap", "game: Race2D::drawBomb (marks that follow a kart)"),
     "OSReport": ("lift", "dolphin/os: OSReport (formats through MSL's vprintf)"),
     "__PADDisableRecalibration": ("lift", "dolphin/pad: __PADDisableRecalibration (a flag in low memory)"),
     "EXIGetType": ("lift", "dolphin/exi: EXIGetType (a table over EXIGetID)"),
@@ -163,7 +170,14 @@ def build(symbols, dol):
     init_end = text[0][1]
     rows = []
     alone_end = None
+    after_wrap = None  # (end, lib, obj) of the wrapped function just placed
     for address, size, name, lib, obj, _ in sorted(symbols):
+        # Code the symbols don't name between a wrapped function's end and the next symbol (a
+        # thunk after Race2D::drawBomb) is its object's, not part of the wrap.
+        if after_wrap and address > after_wrap[0]:
+            plan, label = decide(after_wrap[0], "", after_wrap[1], after_wrap[2], init_end)
+            rows.append([after_wrap[0], None, plan, label, rows[-1][4]])
+        after_wrap = None
         if lib == "-" and alone_end is None:
             # kartLocale.o is linked alone before JSystem and has one function: what follows
             # it, named or not, is JSystem's (J3DU's weak template functions, mostly unnamed)
@@ -177,6 +191,8 @@ def build(symbols, dol):
         if rows and rows[-1][2:] == [plan, label, section] and plan != "wrap":  # (a wrap range is one function)
             continue
         rows.append([address, None, plan, label, section])
+        if plan == "wrap":
+            after_wrap = (address + size, lib, obj)
     # a range ends where the next begins; the last of a section at the end of its code
     for i, row in enumerate(rows):
         nxt = rows[i + 1] if i + 1 < len(rows) else None
