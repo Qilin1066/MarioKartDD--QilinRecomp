@@ -680,7 +680,9 @@ QILIN_INLINE bool ordinary(float r) {
     // both at every check (four instructions): the exponent field instead, from 2 to 254, or
     // a zero. An exponent of 1 (below 2^-125) goes the careful way too, which gives the same.
     const uint32_t b = fbits(r);
-    return ((b >> 23) & 0xFFu) - 2u < 253u || (b << 1) == 0;
+    // Exponent 1 above its smallest value (0x00800001 to 0x00FFFFFF) is ordinary as well, so the
+    // answer is exactly the x86 form's; that rare case is tested only after the common one.
+    return ((b >> 23) & 0xFFu) - 2u < 253u || (b << 1) == 0 || (b << 1) - 0x01000002u < 0x00FFFFFEu;
 #else
     // The bits without the sign: 0x00800001 to 0x7F7FFFFF, or 0. One compare on the common path.
     const uint32_t u = fbits(r) << 1;
