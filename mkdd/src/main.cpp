@@ -428,8 +428,9 @@ int main(int argc, char** argv) {
 
     const std::filesystem::path data = qilin::host::user_folder();
     mkdd::Settings settings = mkdd::load_settings(data);
-    // SRAM's language, sound mode and progressive flag; the progressive setting also stands for the component cable.
+    // SRAM's language, sound mode and progressive flag; the component cable is the console's hardware (VIGetDTVStatus).
     mkdd::set_console(settings.language, settings.sound != 0, settings.progressive);
+    mkdd::g_component_cable.store(settings.component_cable, std::memory_order_relaxed);
     // The picture's shape in races (enhance.hpp); everything else is shown 4:3.
     float aspect = 4.0f / 3.0f;
     std::unique_ptr<qilin::host::Display> display;
@@ -494,7 +495,15 @@ int main(int argc, char** argv) {
 
     // Each port's controls, with each key's name looked up once (again when the menu changes them).
     mkdd::BoundControls bound[mkdd::kPlayers];
+    std::vector<mkdd::BoundInput> bound_reset;  // the console's reset button
     const auto look_up_controls = [&] {
+        bound_reset.clear();
+        for (const mkdd::Binding& b : settings.reset) {
+            int key = -1;
+            if (b.kind == mkdd::Binding::kKey && display && display->sdl_window() && (key = display->key_code(b.key.c_str())) < 0)
+                rt::fatal(nullptr, "mkdd.ini: [controls] reset = key:%s, but there's no key called '%s'", b.key.c_str(), b.key.c_str());
+            bound_reset.push_back({b.kind, b.pad, key});
+        }
         for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
             bound[p] = {};
             for (unsigned c = 0; c < mkdd::kControlCount; ++c)
@@ -607,6 +616,7 @@ int main(int argc, char** argv) {
             if (menu->take_controls_changed()) look_up_controls();
             if (menu->is_open()) {  // the game is parked: the last picture, with the menu over it
                 wait_control_release = true;
+                mkdd::g_reset_button.store(false, std::memory_order_relaxed);
                 // Every controller at rest (and still plugged in: the game mustn't see them go).
                 for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
                     mkdd::GcPad rest = mkdd::gc_pad(int(p));
@@ -640,15 +650,23 @@ int main(int argc, char** argv) {
             }
             const double now = mkdd::frame_count() / 60.0;  // game time: see the top
             mkdd::GcPad pads[mkdd::kPlayers];
+            qilin::host::PadState states[mkdd::kPlayers];
             bool any = false;
             for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
-                const qilin::host::PadState pad = display ? display->pad_state(int(p)) : qilin::host::PadState{};
+                const qilin::host::PadState pad = states[p] = display ? display->pad_state(int(p)) : qilin::host::PadState{};
                 pads[p] = mkdd::map_gc_pad(bound[p], pad, keys, settings.stick_deadzone, settings.trigger_threshold, trigger_clicks[p]);
                 pads[p].connected = p == 0 || pad.connected || bound[p].has_keys || scripted[p];
                 any = any || pads[p].buttons || pads[p].stick_x || pads[p].stick_y || pads[p].c_x || pads[p].c_y || pads[p].l || pads[p].r;
             }
+            // The reset button, held while its input is; the game's own reset (ResetAgent) does the rest.
+            bool reset = mkdd::reset_held(bound_reset, states, mkdd::kPlayers, keys);
+            for (unsigned p = 0; p < mkdd::kPlayers; ++p) reset = reset || mkdd::script_reset(scripts[p], now);
+            any = any || reset;
             // After the menu: nothing reaches the game until everything is let go (the press that closed it).
             if (wait_control_release && !any) wait_control_release = false;
+            if (wait_control_release) reset = false;
+            if (mkdd::g_reset_button.exchange(reset, std::memory_order_relaxed) != reset)
+                rt::log("the reset button %s", reset ? "pressed" : "let go");
             for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
                 if (wait_control_release) pads[p] = mkdd::GcPad{pads[p].connected, 0, 0, 0, 0, 0, 0, 0};
                 mkdd::apply_input_script(scripts[p], now, pads[p]);

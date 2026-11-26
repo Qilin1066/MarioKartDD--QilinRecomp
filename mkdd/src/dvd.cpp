@@ -131,6 +131,7 @@ void start_next() {
     const uint32_t b = g_executing.block;
     rt::poke32(b + kState, kBusy);
     g_done_at = time_base() + read_ticks(rt::peek32(b + kOffset), rt::peek32(b + kLength));
+    note_deadline(g_done_at);  // the poll clock
     wake_idle();
 }
 

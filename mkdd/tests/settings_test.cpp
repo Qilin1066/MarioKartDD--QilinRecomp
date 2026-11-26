@@ -28,7 +28,7 @@ bool same(const mkdd::Settings& a, const mkdd::Settings& b) {
         a.sound_output != b.sound_output || a.sound_device != b.sound_device || a.stick_deadzone != b.stick_deadzone ||
         a.stick_threshold != b.stick_threshold || a.trigger_threshold != b.trigger_threshold ||
         a.rumble_strength != b.rumble_strength || a.language != b.language || a.sound != b.sound || a.progressive != b.progressive ||
-        a.eu_rgb60 != b.eu_rgb60)
+        a.eu_rgb60 != b.eu_rgb60 || a.component_cable != b.component_cable || a.reset != b.reset)
         return false;
     for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
         if (a.players[p].controller != b.players[p].controller || a.players[p].rumble != b.players[p].rumble) return false;
@@ -83,6 +83,8 @@ int main() {
         check(!keys && four[mkdd::kCtlA].size() == 1 && four[mkdd::kCtlA][0].pad == host::kPadA,
               "the other players have the pad's defaults and no keys");
         check(d.language == 0 && d.sound == 1 && d.progressive && !d.eu_rgb60, "the console's defaults: English, stereo, progressive");
+        check(d.component_cable, "a component cable by default (the game offers progressive scan)");
+        check(d.reset.empty(), "the reset button isn't bound by default");
         check(d.frame_rate == mkdd::FrameRate::display && d.aspect_w == 0 && d.hud == mkdd::Hud::edges && d.low_latency && !d.smaa && !d.fsr,
               "the display's defaults");
     }
@@ -277,6 +279,33 @@ int main() {
     check(error_has("[console]\nlanguage = 1\n", "language is english"), "nor a number for one");
     check(error_has("[console]\nsound = surround\n", "sound is mono or stereo"), "the console's sound is mono or stereo");
     check(error_has("[console]\nprogressive = 480p\n", "progressive is true or false"), "progressive scan is a switch");
+    {
+        // The cable is the hardware and progressive the SRAM flag: each on its own.
+        mkdd::Settings s;
+        std::string e;
+        check(mkdd::parse_settings("[console]\nprogressive = false\n", s, e) && !s.progressive && s.component_cable,
+              "progressive off leaves the cable plugged in");
+        check(mkdd::parse_settings("[console]\ncomponent_cable = false\n", s, e) && !s.component_cable && s.progressive,
+              "no cable leaves the saved progressive flag as it is");
+        mkdd::Settings back;
+        check(mkdd::parse_settings(mkdd::settings_text(s), back, e) && !back.component_cable && back.progressive,
+              "both read back as written");
+    }
+    check(error_has("[console]\ncomponent_cable = yes\n", "component_cable is true or false"), "the cable is a switch");
+    {
+        // The reset button: a list of inputs, as a player's control.
+        mkdd::Settings s;
+        std::string e;
+        check(mkdd::parse_settings("[controls]\nreset = key:Backspace, pad:Back\n", s, e) && s.reset.size() == 2 &&
+                  s.reset[0] == Binding{Binding::kKey, 0, "Backspace"} && s.reset[1] == Binding{Binding::kPad, host::kPadBack, {}},
+              "the reset button takes a key and a pad's button");
+        check(mkdd::parse_settings("[controls]\nreset =\n", s, e) && s.reset.empty(), "an empty list leaves it unbound");
+        check(error_has("[controls]\nreset = key:F1\n", "kept for the program"), "not on a key the program keeps");
+        check(error_has("[controls]\nreset = pad:Select\n", "isn't a pad input"), "an unknown pad input is named");
+        check(error_has("[controls]\nreset = Backspace\n", "isn't an input"), "an input needs its kind");
+        mkdd::Settings back;
+        check(mkdd::parse_settings(mkdd::settings_text(s), back, e) && back.reset.empty(), "unbound reads back unbound");
+    }
     check(error_has("[console]\nwidescreen = true\n", "[console] has no 'widescreen'"), "the GameCube has no widescreen setting");
 
     // The file's shape.
@@ -299,7 +328,8 @@ int main() {
         s.players[3].controls[mkdd::kCtlCUp] = {{Binding::kMouse, 0, {}}, {Binding::kPad, host::kPadRSDown, {}}, {Binding::kKey, 0, "#"}};
         s.players[3].controller = "guid:n:23#:0", s.gpu = " #GPU";
         s.players[2].controls[mkdd::kCtlStart].clear();
-        s.sound = 0, s.progressive = false;
+        s.sound = 0, s.progressive = false, s.component_cable = false;
+        s.reset = {{Binding::kKey, 0, "Right Ctrl"}, {Binding::kPad, host::kPadGuide, {}}, {Binding::kMouse, 0, {}}};
         mkdd::Settings back;
         std::string e;
         check(mkdd::parse_settings(mkdd::settings_text(s), back, e) && same(back, s), "every setting reads back as written");

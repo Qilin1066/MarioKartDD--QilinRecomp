@@ -71,6 +71,7 @@ void add_timer_source(std::function<void()> poll, std::function<uint64_t()> dead
     harness::sources.emplace_back(std::move(poll), std::move(deadline));
 }
 uint64_t time_base() { return harness::now; }
+void note_deadline(uint64_t) {}  // (no poll clock: the test moves time itself)
 bool in_interrupt() { return harness::in_interrupt; }
 void guest_callback(qilin::rt::Cpu&, uint32_t fn, uint32_t a0, uint32_t a1) {
     harness::callbacks.push_back({fn, a0, a1, harness::now});

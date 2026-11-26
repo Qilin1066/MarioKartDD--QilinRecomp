@@ -28,7 +28,7 @@ A controller's identity is its GUID with its serial number where it has one, oth
 
 **Rumble** is per player, with one strength for all. SDL's rumble is asked for a quarter of a second at a time and renewed while it is on: a program that stops, stops the rumble.
 
-**Scripts.** `MKDD_INPUT` (and `MKDD_INPUT2` to `MKDD_INPUT4`) play a port in runs without a player: `Start@12,A@14.5,Stick:-100:0@20+3,R@20+3` (a button, a stick position or a trigger value, from a time in seconds of the game's own frames, for 0.2 s or the seconds after `+`).
+**Scripts.** `MKDD_INPUT` (and `MKDD_INPUT2` to `MKDD_INPUT4`) play a port in runs without a player: `Start@12,A@14.5,Stick:-100:0@20+3,R@20+3` (a button, a stick position, a trigger value or `Reset`, the console's reset button, from a time in seconds of the game's own frames, for 0.2 s or the seconds after `+`).
 
 ## Updates and checks
 

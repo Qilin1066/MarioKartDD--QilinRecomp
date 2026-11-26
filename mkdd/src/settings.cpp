@@ -93,6 +93,19 @@ bool parse_binding(const std::string& text, Binding& b, std::string& why) {
     return false;
 }
 
+// A comma-separated list of inputs (empty items skipped).
+bool parse_bindings(const std::string& value, std::vector<Binding>& out, std::string& why) {
+    out.clear();
+    std::istringstream items(value);
+    for (std::string item; std::getline(items, item, ',');) {
+        if (trim(item).empty()) continue;
+        Binding b;
+        if (!parse_binding(item, b, why)) return false;
+        out.push_back(b);
+    }
+    return true;
+}
+
 Binding pad(uint32_t bit) { return {Binding::kPad, bit, {}}; }
 Binding key(const char* name) { return {Binding::kKey, 0, name}; }
 
@@ -413,8 +426,10 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
                 else return fail("sound is mono or stereo");
             } else if (name == "progressive") {
                 if (!boolean(s.progressive)) return false;
+            } else if (name == "component_cable") {
+                if (!boolean(s.component_cable)) return false;
             } else {
-                return fail("[console] has no '" + name + "' (language sound progressive)");
+                return fail("[console] has no '" + name + "' (language sound progressive component_cable)");
             }
             continue;
         }
@@ -427,9 +442,12 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
                 if (!number(s.trigger_threshold, 5, 95)) return false;
             } else if (name == "rumble_strength") {
                 if (!number(s.rumble_strength, 0, 100)) return false;
+            } else if (name == "reset") {
+                std::string why;
+                if (!parse_bindings(value, s.reset, why)) return fail(why);
             } else {
                 return fail("[controls] has no '" + name +
-                            "' (stick_deadzone stick_threshold trigger_threshold rumble_strength; a player's controls are in "
+                            "' (stick_deadzone stick_threshold trigger_threshold rumble_strength reset; a player's controls are in "
                             "[player1] to [player4])");
             }
             continue;
@@ -449,15 +467,8 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
         if (c == kControlCount)
             return fail("'" + name + "' isn't one of a GameCube controller's controls (a b x y z l r start up down left right "
                         "stick_up stick_down stick_left stick_right c_up c_down c_left c_right), controller or rumble");
-        p.controls[c].clear();
-        std::istringstream items(value);
-        for (std::string item; std::getline(items, item, ',');) {
-            if (trim(item).empty()) continue;
-            Binding b;
-            std::string why;
-            if (!parse_binding(item, b, why)) return fail(why);
-            p.controls[c].push_back(b);
-        }
+        std::string why;
+        if (!parse_bindings(value, p.controls[c], why)) return fail(why);
     }
     for (unsigned a = 0; a < kPlayers; ++a)
         for (unsigned b = a + 1; b < kPlayers; ++b)
@@ -564,6 +575,14 @@ std::string settings_text(const Settings& s) {
         "stick_threshold = " + std::to_string(s.stick_threshold) + "\n"
         "trigger_threshold = " + std::to_string(s.trigger_threshold) + "\n"
         "rumble_strength = " + std::to_string(s.rumble_strength) + "\n"
+        "# reset: the console's reset button, held while any of these inputs is (written as a player's controls\n"
+        "# are, below; a pad's input on any controller). The game's own reset follows: back to its start. None\n"
+        "# by default, as a stray press loses the race or cup being played.\n"
+        "reset =" + [&] {
+            std::string list;
+            for (size_t i = 0; i < s.reset.size(); ++i) list += (i ? ", " : "") + binding_text(s.reset[i]);
+            return list.empty() ? std::string() : " " + q(list);
+        }() + "\n"
         "\n"
         "# The four controller ports. controller: which controller plays the port: empty, automatic (the\n"
         "# controllers take the ports in the order each first has a button pressed); a device's identity, as\n"
@@ -599,8 +618,12 @@ std::string settings_text(const Settings& s) {
          "language = english\n"
          "# sound: mono or stereo (the game's own sound options add Surround).\n"
          "sound = " + std::string(s.sound == 0 ? "mono" : "stereo") + "\n"
-         "# progressive: true, progressive scan (480p); false, interlaced, as on a television.\n"
-         "progressive = " + b(s.progressive) + "\n";
+         "# progressive: true, progressive scan (480p); false, interlaced, as on a television. The game itself\n"
+         "# saves the player's answer here, as the console keeps it in its SRAM.\n"
+         "progressive = " + b(s.progressive) + "\n"
+         "# component_cable: whether the console has a component cable (its hardware, not a saved setting). The\n"
+         "# game asks about progressive scan only with one; without one it stays interlaced.\n"
+         "component_cable = " + b(s.component_cable) + "\n";
     return t;
 }
 

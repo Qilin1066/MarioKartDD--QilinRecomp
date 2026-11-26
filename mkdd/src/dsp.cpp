@@ -551,6 +551,7 @@ void dsp_write16(Cpu& c, uint32_t off, uint16_t v) {
                 g_dma_blocks = v & 0x7FFF;
                 if (!g_dma_blocks) rt::fatal(&c, "the audio DMA was started with 0 blocks");
                 g_dma_t0 = time_base();
+                note_deadline(dma_end());  // the poll clock: set by the game's code, not an interrupt
                 if (g_trace) dsp::trace::event("audio DMA started: source", g_dma_source), dsp::trace::event("audio DMA started: blocks", g_dma_blocks);
                 raise_flag(kAid);
             } else if (g_trace && was != dma_on()) {

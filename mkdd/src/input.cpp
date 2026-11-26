@@ -165,10 +165,12 @@ bool parse_input_script(const std::string& text, std::vector<ScriptStep>& out, s
         };
         const size_t colon = what.find(':');
         const std::string head = what.substr(0, colon);
-        if (colon == std::string::npos) {
+        if (what == "Reset") {
+            step.reset = true;
+        } else if (colon == std::string::npos) {
             for (const auto& n : kNames)
                 if (what == n.name) step.buttons = n.bit;
-            if (!step.buttons) return fail("isn't a button (A B X Y Z L R Start Up Down Left Right), Stick:x:y, C:x:y, LT:n or RT:n");
+            if (!step.buttons) return fail("isn't a button (A B X Y Z L R Start Up Down Left Right), Stick:x:y, C:x:y, LT:n, RT:n or Reset");
         } else if (head == "Stick" || head == "C") {
             long x = 0, y = 0;
             size_t next = 0;
@@ -184,7 +186,7 @@ bool parse_input_script(const std::string& text, std::vector<ScriptStep>& out, s
             (head == "LT" ? step.lt : step.rt) = true;
             step.trigger = uint8_t(n);
         } else {
-            return fail("isn't a button (A B X Y Z L R Start Up Down Left Right), Stick:x:y, C:x:y, LT:n or RT:n");
+            return fail("isn't a button (A B X Y Z L R Start Up Down Left Right), Stick:x:y, C:x:y, LT:n, RT:n or Reset");
         }
         out.push_back(step);
     }
@@ -203,6 +205,23 @@ void apply_input_script(const std::vector<ScriptStep>& script, double now, GcPad
         if (s.lt) pad.l = s.trigger;
         if (s.rt) pad.r = s.trigger;
     }
+}
+
+bool script_reset(const std::vector<ScriptStep>& script, double now) {
+    for (const ScriptStep& s : script)
+        if (s.reset && now >= s.at && now < s.at + s.duration) return true;
+    return false;
+}
+
+bool reset_held(const std::vector<BoundInput>& bound, const host::PadState* pads, unsigned count, const KeySource& keys) {
+    for (const BoundInput& in : bound) {
+        if (in.kind == Binding::kMouse && keys.mouse) return true;
+        if (in.kind == Binding::kKey && keys.key_down && in.key >= 0 && keys.key_down(in.key)) return true;
+        if (in.kind == Binding::kPad)
+            for (unsigned p = 0; p < count; ++p)
+                if (pads[p].connected && (pads[p].buttons & in.pad)) return true;
+    }
+    return false;
 }
 
 }  // namespace mkdd
