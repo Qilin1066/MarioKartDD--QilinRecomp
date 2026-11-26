@@ -133,6 +133,23 @@ What changed, in order of effect:
 - **The vertex format, its plan and the vertex size are kept between CP writes** instead of being rebuilt for each primitive.
 - **Recording is timed a batch of commands at a time**: two clock readings a primitive cost as much as the primitive.
 
+### Real race frames (2026-11-26)
+
+Captured with `MKDD_DFF` on Luigi Circuit (`frame_rate = original`, the devices agent's scripts), then `mkdd_render_test --bench-dff <file.dff>` (the same as `mkdd --bench-record`, without the game). A four-view frame is 30,000 primitives of 4.6 vertices (28,000 of them from 1,950 display lists), 137,000 vertices, 843 draws after joining and as many states, 1.3 MB of textures hashed; one view, 9,200 primitives, 41,600 vertices, 314 draws. Commands: 36,000 BP writes, 30,000 NOPs (the lists' padding), 23,000 CP writes and 9,000 XF loads a four-view frame. Decode and record, best median of alternated runs (the machine shared with other builds):
+
+| | 4 views, MSVC | 1 view, MSVC | 4 views, Clang | 1 view, Clang |
+|---|---|---|---|---|
+| before | 5.49 ms | 1.76 ms | 3.91 ms | 1.32 ms |
+| now | **3.34 ms** | **1.16 ms** | **3.35 ms** | **1.16 ms** |
+
+(Clang: Zig's, `-O2 -mcpu=x86_64_v3`, the recorder's files alone. In the game, offscreen, the four-view recording went from 6.1-6.5 ms a frame to 4.3-4.5, and the game's wait for the GPU thread from 3.2 ms a retrace to 1.2.) What changed:
+- **Vertices by layout**: nine in ten primitives come in a handful of layouts, every attribute by a 16-bit index (position f32×3; RGBA8 colour or s16 normal; s16 texture coordinates). Each has a decoder compiled for it (`decode_fused`: one pass a vertex, constant offsets and formats, every byte written once); the rest keep `decode_columns`. `MKDD_CHECK_DECODE=1` compares either with the per-vertex reader, and passes on both captured frames.
+- **Big-endian reads are a load and a byte swap** (`std::byteswap`): MSVC didn't recognise one in shifts and ors, and these run for every attribute. Most of MSVC's gain; Clang already did it.
+- Runs of NOPs are skipped at once; the scissor search allocates nothing.
+`--render-dff` pictures of both frames, at 1x and 3x, are identical byte for byte before and after.
+
+Where a four-view frame's time goes now (MSVC; `MKDD_PROFILE=1 mkdd_render_test --bench-dff`, a sampler that reads the program database: build that target with `/Zi` and link with `/DEBUG`): the command loop about 20% (130,000 commands, mostly branch costs), the fused decoders 25% (mostly waiting on the vertex arrays' memory), per-primitive recording 13% (vertex and index vectors, strips to lists), states 10% (843 copies of 5 KB, `build_bp`, the shape hash), texture hashing 3%.
+
 About 19 ns a vertex and 45 ns a primitive remain on that CPU (from the same frame as 50-vertex strips: 0.77 ms). Not done, in the order I'd take them on the Pi 4: the vertex is 76 bytes where this game's needs 44 (two texture coordinates at most), written once by the decoder and copied once more to the GPU's buffer (12 MB a 4-view frame, each way); a draw's state snapshot copies 5 KB when a matrix changes (272 a frame now, so 1.4 MB: no longer first).
 
 ## Pictures between frames

@@ -585,8 +585,9 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
         const size_t left = size - used;
         const uint8_t op = p[0];
         size_t n;
-        if (op == 0x00) {
+        if (op == 0x00) {  // NOPs, in a run (display lists are padded to 32 bytes with them: a race frame has 30,000)
             n = 1;
+            while (n < left && p[n] == 0x00) ++n;
         } else if (op == 0x08) {  // LOAD_CP_REG: register, value
             if (left < 6) return;
             const uint32_t v = be32(p + 2);

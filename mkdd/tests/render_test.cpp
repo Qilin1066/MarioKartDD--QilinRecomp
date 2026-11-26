@@ -1316,16 +1316,19 @@ struct Sampler {
     HANDLE target = nullptr;
     std::atomic<bool> stop{false};
     std::thread thread;
-    std::unordered_map<uint64_t, uint64_t> counts;
+    // (Room made beforehand: nothing may allocate while the other thread is stopped, it may hold the heap's lock.)
+    std::vector<uint64_t> pcs = std::vector<uint64_t>(1u << 22);
+    size_t taken = 0;
     void start() {
         DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &target, 0, FALSE, DUPLICATE_SAME_ACCESS);
         thread = std::thread([this] {
-            while (!stop.load(std::memory_order_relaxed)) {
+            while (!stop.load(std::memory_order_relaxed) && taken < pcs.size()) {
                 if (SuspendThread(target) != DWORD(-1)) {
                     CONTEXT c{};
                     c.ContextFlags = CONTEXT_CONTROL;
-                    if (GetThreadContext(target, &c)) ++counts[c.Rip];
+                    const bool got = GetThreadContext(target, &c);
                     ResumeThread(target);
+                    if (got) pcs[taken++] = c.Rip;
                 }
                 const uint64_t until = gx::now_ns() + 250'000;
                 while (gx::now_ns() < until) std::this_thread::yield();
@@ -1335,6 +1338,8 @@ struct Sampler {
     void report() {
         stop = true;
         thread.join();
+        std::unordered_map<uint64_t, uint64_t> counts;
+        for (size_t i = 0; i < taken; ++i) ++counts[pcs[i]];
         const HANDLE p = GetCurrentProcess();
         SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
         SymInitialize(p, nullptr, TRUE);
