@@ -23,6 +23,15 @@ std::optional<qilin::disc::Disc> disc;
 namespace mkdd {
 const qilin::disc::Disc& game_disc() { return *disc; }
 void wake_idle() {}
+// The CPU's interrupt flag, and how many callbacks came while it was off.
+bool g_enabled = true;
+size_t g_off_from = 0, g_with_interrupts_off = 0;
+bool interrupts_enabled() { return g_enabled; }
+void set_interrupts_enabled(bool on) {
+    if (!on && g_enabled) g_off_from = harness::callbacks.size();
+    if (on && !g_enabled) g_with_interrupts_off += harness::callbacks.size() - g_off_from;
+    g_enabled = on;
+}
 void deliver_interrupts(rt::Cpu& c) { harness::deliver(c); }
 }  // namespace mkdd
 
@@ -163,12 +172,15 @@ int main() {
           "a read may run past a file's end to the drive's 32 bytes: the disc's own bytes there (none)");
 
     // ---- cancelling
+    mkdd::g_with_interrupts_off = 0;
     dvd("DVDReadAsyncPrio", file1, buffer, 0x1000, 0, cb, 2);
     dvd("DVDReadAsyncPrio", file2, buffer2, 0x1000, 0, cb + 4, 2);
     check(dvd("DVDCancel", file2) == 0 && rt::peek32(file2 + 0x0C) == 10 && callbacks.size() == 1 && callbacks[0].fn == cb + 4 &&
               callbacks[0].a0 == 0xFFFFFFFDu,
           "a waiting read is cancelled at once: state 10, its callback hears -3");
     check(dvd("DVDClose", file1) == 1 && rt::peek32(file1 + 0x0C) == 10 && dvd("DVDGetDriveStatus") == 0, "closing a file cancels its read in flight");
+    check(mkdd::g_with_interrupts_off == 2 && mkdd::g_enabled,
+          "a cancel's callbacks run with interrupts off, as the SDK's DVDCancelAsync calls them; on again after");
     advance(cpu, ms(500));
     check(callbacks.size() == 2 && callbacks[1].a0 == 0xFFFFFFFDu, "and nothing more comes of either");
     check(dvd("DVDCheckDisk") == 1 && dvd("DVDGetCurrentDiskID") == 0x80000000u, "the disc is in; its ID is where the boot ROM read it");

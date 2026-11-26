@@ -44,14 +44,14 @@ constexpr uint32_t kCreateThread = 0x800EB780u, kResumeThread = 0x800EBCA8u, kSu
                    kUnmaskInterrupts = 0x800E8BCCu, kDisableInterrupts = 0x800E877Cu, kRestoreInterrupts = 0x800E87A4u,
                    kGetSoundMode = 0x800EAAF8u, kSetSoundMode = 0x800EAB78u, kLockSram = 0x800EA6ACu, kUnlockSram = 0x800EAAA0u,
                    kOSInit = 0x800E5B8Cu, kEXIInit = 0x800C4B00u, kSIInit = 0x800EEFF4u, kDVDInit = 0x800ABE14u,
-                   kInitAudioSystem = 0x800E6DD0u;
+                   kInitAudioSystem = 0x800E6DD0u, kRegisterResetFunction = 0x800E9C28u;
 
 // Guest memory the tests use (MEM1, clear of the addresses the OS fixes).
 constexpr uint32_t kThreadC = 0x80100800u, kStackC = 0x80128000u;
 constexpr uint32_t kThreadA = 0x80100000u, kThreadB = 0x80100400u, kStackA = 0x80110000u, kStackB = 0x80120000u,
                    kStackSize = 0x8000u, kMutex = 0x80130000u, kCond = 0x80130100u, kQueue = 0x80130200u,
                    kQueueArray = 0x80130300u, kAlarm = 0x80130400u, kOut = 0x80130500u, kCalendar = 0x80130600u,
-                   kSleepQueue = 0x80130700u, kBi2 = 0x80140000u;
+                   kSleepQueue = 0x80130700u, kResetInfo = 0x80130800u, kBi2 = 0x80140000u;
 
 std::vector<std::string> g_log;
 int g_failures = 0;
@@ -98,7 +98,16 @@ constexpr uint32_t kFnHigh = 0x80004000u, kFnLowSender = 0x80004010u, kFnMutexTa
                    kFnCounter = 0x80004030u, kFnExiter = 0x80004040u, kFnAlarm = 0x80004050u,
                    kFnSelf = 0x80004060u, kFnHolder = 0x80004070u, kFnWanter = 0x80004080u, kFnMiddle = 0x80004090u,
                    kFnCancelled = 0x800040A0u, kFnWake = 0x800040B0u, kFnInterrupt = 0x800040C0u, kFnChain = 0x800040D0u,
-                   kFnChainWaiter = 0x800040E0u, kFnNothing = 0x800040F0u;
+                   kFnChainWaiter = 0x800040E0u, kFnNothing = 0x800040F0u, kFnResumeA = 0x80004100u,
+                   kFnLoopingHandler = 0x80004110u, kFnReset = 0x80004120u, kFnRanInReset = 0x80004130u;
+
+// A lifted loop as qilin lift emits it: each time round its back edge tests
+// the poll flag and, when it's set, calls the poll hook (a safe point).
+void lifted_loop(Cpu& c, int ms) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (std::chrono::steady_clock::now() < end)
+        if (rt::poll_due()) c.hooks->poll(c);
+}
 
 void fn_high(Cpu& c) {  // runs as soon as it's resumed, and returns a value
     note("high " + std::to_string(c.r[3]));
@@ -180,6 +189,28 @@ void fn_interrupt(Cpu& c) {  // an interrupt handler: (interrupt, context)
     note("interrupt " + std::to_string(c.r[3]) + (mkdd::interrupts_enabled() ? " on" : " off"));
 }
 void fn_nothing(Cpu&) {}
+void fn_resume_a(Cpu& c) {  // an alarm handler that readies thread A
+    os(c, kResumeThread, kThreadA);
+}
+void fn_looping_handler(Cpu& c) {  // one that readies A, then loops: nothing may switch inside it
+    os(c, kResumeThread, kThreadA);
+    lifted_loop(c, 10);
+    note("handler-done");
+}
+// A reset function (OSRegisterResetFunction): on its first call it readies a
+// thread above main's and loops; none may run while the reset functions do.
+void fn_reset(Cpu& c) {
+    if (!c.r[3]) {
+        create(c, kThreadA, kFnRanInReset, 0, kStackA, 8);
+        os(c, kResumeThread, kThreadA);
+        lifted_loop(c, 5);
+    }
+    c.r[3] = 1;
+}
+void fn_ran_in_reset(Cpu&) {
+    std::printf("FAIL a thread ran while the reset functions did\n");
+    std::fflush(nullptr);
+}
 
 void fn_chain(Cpu& c) {
     os(c, kLockMutex, kMutex + 0x40);
@@ -215,6 +246,10 @@ const rt::FunctionEntry kFunctions[] = {  // sorted by address
     {kFnChain, fn_chain},
     {kFnChainWaiter, fn_chain_waiter},
     {kFnNothing, fn_nothing},
+    {kFnResumeA, fn_resume_a},
+    {kFnLoopingHandler, fn_looping_handler},
+    {kFnReset, fn_reset},
+    {kFnRanInReset, fn_ran_in_reset},
     {kDVDInit, fn_nothing},  // OSInit calls these four: other libraries', or lifted
     {kInitAudioSystem, fn_nothing},
     {kEXIInit, fn_nothing},
@@ -234,6 +269,7 @@ const rt::FunctionEntry kFunctions[] = {  // sorted by address
     STUB(kLockMutex),
     STUB(kUnlockMutex),
     STUB(kResetSystem),
+    STUB(kRegisterResetFunction),
     STUB(kLockSram),
     STUB(kUnlockSram),
     STUB(kGetSoundMode),
@@ -478,6 +514,44 @@ void test_interrupts(Cpu& c) {
     expect("interrupts wait for the CPU's enable and the OS's mask", {"raised", "interrupt 19 off", "masked", "mask-was-right", "interrupt 7 off", "unmasked"});
 }
 
+// Safe points in lifted loops (poll_point, with the poll clock): an alarm
+// that readies a higher thread switches to it inside a loop that calls
+// nothing; not while interrupts are off, nor inside a handler that loops.
+void test_safe_points(Cpu& c) {
+    const uint64_t ms = mkdd::kTimerHz / 1000;
+    const auto alarm_in = [&](uint64_t ticks, uint32_t handler) {
+        os(c, kCreateAlarm, kAlarm);
+        c.r[3] = kAlarm, c.r[4] = 0, c.r[5] = 0, c.r[6] = static_cast<uint32_t>(ticks), c.r[7] = handler;
+        rt::call(c, kSetAlarm);
+    };
+    create(c, kThreadA, kFnHigh, 7, kStackA, 8);
+    alarm_in(3 * ms, kFnResumeA);
+    note("looping");
+    lifted_loop(c, 100);
+    note("loop-done");
+    join(c, kThreadA);
+    expect("a loop's back edge is a safe point: an alarm's thread runs inside it", {"looping", "high 7", "loop-done"});
+
+    create(c, kThreadA, kFnHigh, 8, kStackA, 8);
+    const uint32_t was = os(c, kDisableInterrupts);
+    alarm_in(3 * ms, kFnResumeA);
+    lifted_loop(c, 30);
+    note("loop-done");
+    os(c, kRestoreInterrupts, was);  // the alarm arrives here
+    note("restored");
+    join(c, kThreadA);
+    expect("with interrupts off, a loop takes nothing", {"loop-done", "high 8", "restored"});
+
+    create(c, kThreadA, kFnHigh, 9, kStackA, 8);
+    alarm_in(3 * ms, kFnLoopingHandler);
+    note("looping");
+    lifted_loop(c, 100);
+    note("loop-done");
+    join(c, kThreadA);
+    expect("a handler's loop switches nothing: the thread it readied runs after it",
+           {"looping", "handler-done", "high 9", "loop-done"});
+}
+
 // SRAM's settings, as the game reads and writes them.
 void test_sram(Cpu& c) {
     note(std::to_string(os(c, kGetSoundMode)));  // stereo: set_console's
@@ -562,6 +636,8 @@ int main(int argc, char** argv) {
     rt::init({functions, replaced});
     rt::provide(mkdd::thread_replacements());
     rt::provide(mkdd::os_replacements());
+    rt::set_poll(mkdd::poll_point);  // as the game's hardware layer does (hw.cpp)
+    mkdd::start_poll_clock();
 
     static Cpu main_cpu = rt::new_cpu();
     main_cpu.r[1] = 0x80180000u;
@@ -577,7 +653,11 @@ int main(int argc, char** argv) {
     // Each is a ctest of its own (CMakeLists.txt): the first must exit cleanly,
     // the second must come back and pass.
     if (const char* mode = std::getenv("THREADS_TEST_LEAVE")) {
-        if (std::strcmp(mode, "shutdown") == 0) os(c, kResetSystem, 1, 0, 1);
+        if (std::strcmp(mode, "shutdown") == 0) {
+            rt::poke32(kResetInfo, kFnReset), rt::poke32(kResetInfo + 4, 127);
+            os(c, kRegisterResetFunction, kResetInfo);
+            os(c, kResetSystem, 1, 0, 1);
+        }
         if (std::strcmp(mode, "restart") == 0) {
 #if defined(_WIN32)
             _putenv("THREADS_TEST_LEAVE=restarted");
@@ -599,6 +679,7 @@ int main(int argc, char** argv) {
     test_donation_withdrawal(c);
     test_alarm_and_sleep(c);
     test_interrupts(c);
+    test_safe_points(c);
     test_sram(c);
     test_calendar(c);
     test_memory_map(c);

@@ -136,7 +136,15 @@ void start_next() {
 
 void finish(Cpu& c, const Command& cmd, uint32_t state, int32_t result) {
     rt::poke32(cmd.block + kState, state);
-    if (cmd.callback) guest_callback(c, cmd.callback, static_cast<uint32_t>(result), cmd.block);
+    if (cmd.callback) {
+        // The SDK calls it from the drive's interrupt, interrupts off. A cancel
+        // comes here from the caller's own thread: off for the callback there
+        // too, so nothing is delivered (and no thread switched to) inside it.
+        const bool enabled = interrupts_enabled();
+        set_interrupts_enabled(false);
+        guest_callback(c, cmd.callback, static_cast<uint32_t>(result), cmd.block);
+        set_interrupts_enabled(enabled);
+    }
     wake_all(c, kSyncQueue);
 }
 
