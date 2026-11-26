@@ -64,6 +64,8 @@ What the game does with the card, as seen in scripted runs:
   With the file it reads it and goes on.
 - After a time trial with a new record it writes the file ("Saving game data."); the save history takes the copy
   from before.
+- A Grand Prix cup finished in the first three: after the ceremony and the name entry the file is written, and
+  RECORDS shows the cup, time, points and name after a restart. Fourth or worse: no ceremony and no save.
 - Time Trials lists the ghosts by asking the status of all 127 entries. SAVE GHOST after a run creates the
   ghost's file (new files have no earlier copy to keep).
 - A probe (`CARDProbeEx`) comes every frame from the game's card thread; a card busy with anything but mounting
