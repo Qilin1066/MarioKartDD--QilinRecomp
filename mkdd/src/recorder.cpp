@@ -1142,8 +1142,10 @@ void bind_textures(const Registers& r, Draw& d) {
 
 // ---- the frame queue
 
-std::mutex g_queue_lock;
-std::condition_variable g_queue_cv;
+// Never destroyed: the GPU thread (detached) may be waiting in submit() at exit,
+// where glibc's pthread_cond_destroy would block (see gpu.cpp).
+std::mutex& g_queue_lock = *new std::mutex;
+std::condition_variable& g_queue_cv = *new std::condition_variable;
 std::deque<std::unique_ptr<Frame>> g_queue;
 bool g_rendering = false;
 
