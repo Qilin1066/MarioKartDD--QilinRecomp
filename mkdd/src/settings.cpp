@@ -630,7 +630,9 @@ std::string settings_text(const Settings& s) {
 std::filesystem::path settings_file(const std::filesystem::path& folder) { return folder / "mkdd.ini"; }
 
 bool save_settings(const std::filesystem::path& folder, const Settings& s) {
-    const std::filesystem::path file = settings_file(folder), tmp = file.string() + ".tmp";
+    const std::filesystem::path file = settings_file(folder);
+    std::filesystem::path tmp = file;
+    tmp += ".tmp";  // (not through string(): a name outside the code page would throw there without the manifest)
     // Flush and close before replacement; either failure leaves the old file intact.
 #if defined(_WIN32)
     FILE* out = _wfopen(tmp.c_str(), L"wb");
@@ -677,8 +679,12 @@ Settings load_settings(const std::filesystem::path& folder) {
     if (std::filesystem::exists(file, read_ec) || read_ec)
         qilin::rt::fatal(nullptr, "cannot read %s (the existing settings have been kept)", file.string().c_str());
     const Settings s = default_settings();
-    if (!save_settings(folder, s)) qilin::rt::fatal(nullptr, "cannot write %s", file.string().c_str());
-    qilin::rt::log("settings: wrote the defaults to %s", file.string().c_str());
+    // A folder that can't be written (read-only, full) needn't stop the game: the defaults, said so.
+    if (!save_settings(folder, s))
+        qilin::rt::log("settings: %s can't be written (a read-only or full folder?): playing with the defaults, and changes "
+                       "made in the menu won't be kept", file.string().c_str());
+    else
+        qilin::rt::log("settings: wrote the defaults to %s", file.string().c_str());
     return s;
 }
 

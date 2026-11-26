@@ -1,0 +1,3 @@
+// The application manifest for MinGW builds (MSVC's linker embeds mkdd.manifest itself).
+// 1: CREATEPROCESS_MANIFEST_RESOURCE_ID; 24: RT_MANIFEST.
+1 24 "mkdd.manifest"

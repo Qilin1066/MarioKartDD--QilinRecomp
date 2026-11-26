@@ -421,6 +421,24 @@ set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/latency.cpp mkdd/src
 list(APPEND mkdd_runtime_sources mkdd/src/dsp_trace.cpp)  # (MKDD_AUDIO_DUMP, MKDD_AUDIO_TRACE)
 list(APPEND mkdd_runtime_sources mkdd/src/input.cpp)  # the controller ports (input.hpp)
 list(APPEND mkdd_runtime_sources mkdd/src/enhance.cpp mkdd/src/hud.cpp)  # the widened picture (enhance.hpp)
+# Windows: the game's manifest (UTF-8 for every narrow path and string, long paths): MSVC's linker
+# takes the .manifest, MinGW links the resource.
+if(WIN32 AND NOT MSVC)
+    enable_language(RC)
+endif()
+function(mkdd_manifest target)
+    if(MSVC)
+        target_sources(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mkdd/res/mkdd.manifest)
+    elseif(WIN32)
+        target_sources(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mkdd/res/mkdd.rc)
+    endif()
+endfunction()
+if(WIN32)  # the manifest at work: paths in any script through the narrow APIs
+    add_executable(mkdd_utf8_paths_test mkdd/tests/utf8_paths_test.cpp)
+    target_link_libraries(mkdd_utf8_paths_test PRIVATE qilin_warnings)
+    mkdd_manifest(mkdd_utf8_paths_test)
+    add_test(NAME mkdd_utf8_paths_test COMMAND mkdd_utf8_paths_test)
+endif()
 
 # ---- The game: built only from the player's own main.dol ----
 # cmake -DQILIN_GAME_DOL=<extracted disc>/sys/main.dol: qilin lift turns it
@@ -452,6 +470,7 @@ if(QILIN_GAME_DOL)
         DEPENDS qilin ${QILIN_GAME_DOL} ${QILIN_GAME_PLAN}
         COMMENT "Lifting the game's main.dol to C++")
     add_executable(mkdd ${mkdd_runtime_sources} ${gen_sources})
+    mkdd_manifest(mkdd)
     target_include_directories(mkdd PRIVATE mkdd/src ${gen})
     target_link_libraries(mkdd PRIVATE qilin_rt qilin_dol qilin_disc qilin_host qilin_imgui SDL3::SDL3-static)
     if(WIN32)
@@ -538,10 +557,13 @@ if(QILIN_PLAYER_KIT)
         "# Written by CMake for the player kit (QILIN_PLAYER_KIT).\n"
         "cxxflags = -O2 -DNDEBUG -std=c++23 -w -ffp-contract=off -I$kit/include\n"
         "ldflags = -static -O2 -Wl,--stack,16777216\n"
-        "libs = $kit/lib/libmkdd_kit.a ${kit_system_text}\n")
+        "libs = $kit/lib/mkdd_manifest.o $kit/lib/libmkdd_kit.a ${kit_system_text}\n")
+    # The manifest's resource, linked as an object of its own (from an archive, nothing would pull it in).
+    add_library(mkdd_kit_manifest OBJECT mkdd/res/mkdd.rc)
+    install(FILES $<TARGET_OBJECTS:mkdd_kit_manifest> DESTINATION kit/lib RENAME mkdd_manifest.o COMPONENT player)
     # Linked with stand-ins for the lifted code (the game's, and the DSP microcode's empty
     # table): the kit is complete.
-    add_executable(mkdd_kit_link_check tools/player-kit/link_check.cpp mkdd/src/dsp_no_ucode.cpp)
+    add_executable(mkdd_kit_link_check tools/player-kit/link_check.cpp mkdd/src/dsp_no_ucode.cpp $<TARGET_OBJECTS:mkdd_kit_manifest>)
     target_include_directories(mkdd_kit_link_check PRIVATE mkdd/src)
     target_link_libraries(mkdd_kit_link_check PRIVATE qilin_rt "${kit_archive}" ${kit_system_libraries})
     add_dependencies(mkdd_kit_link_check mkdd_kit)
@@ -558,6 +580,7 @@ endif()
 # Compile/link the complete runtime without distributing or requiring game data.
 if(QILIN_HOST AND NOT QILIN_GAME_DOL AND NOT QILIN_PLAYER_KIT)
     add_executable(mkdd_runtime_check ${mkdd_runtime_sources} tools/player-kit/link_check.cpp)
+    mkdd_manifest(mkdd_runtime_check)
     target_sources(mkdd_runtime_check PRIVATE mkdd/src/dsp_no_ucode.cpp)
     target_include_directories(mkdd_runtime_check PRIVATE mkdd/src)
     target_link_libraries(mkdd_runtime_check PRIVATE qilin_rt qilin_dol qilin_disc qilin_host qilin_imgui SDL3::SDL3-static qilin_warnings)
