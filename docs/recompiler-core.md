@@ -168,6 +168,50 @@ The Wii game's hottest code in a fight was a handful of leaf loops that skin ver
 
 It changes no result: the unit test runs three million random and edge-case operands through every single helper against the double ones (exact and rounded ties among them), and every other trial of the differential test starts from single-valued registers so the single versions are the ones compared with the interpreter. In that game's practice fight on a 2-core test machine, frames drawn per 300 retraces went from 275-289 to 293-297.
 
+### Single mode across calls, and the movie decoder (2026-11-26)
+
+The opening movie showed what the leaf rule above leaves out. THP's row decoder (`__THPDecompressiMCURowNxN`, `800F4E50`: the inverse DCT of every block, all paired singles) calls the Huffman decoders and saves `f27`–`f31` with `stfd`/`lfd`, so it ran in double mode: a 608x448 frame, 3.09 million guest instructions, took 12 ms, and the movie plays at 59.94 frames a second. Single mode now reaches such functions:
+- **A call** gets the halves the function has written written back, as a way out does; after it every half is the `Cpu`'s again. The halves read as singles later are fetched again there, and if one of them isn't a single-precision value the function's double version takes over from that very point: it takes a second argument, the resume point, and switches on it to a label after the call (all the state is in the `Cpu` then). Conditional calls keep a function out of single mode; compilers don't emit them.
+- **`stfd`** stores the register as it stands: the float written back as a double if this run wrote it, else the `Cpu`'s own double, single or not (a prologue saving the caller's register). **`lfd`** loads straight into the `Cpu`, and the half is the `Cpu`'s from there (an epilogue's restore).
+- **Left in double mode on purpose:** a function that loads a double and then uses it as a single (the constants of an integer conversion, 2^52 and the like), or that rounds with `frsp` a value it didn't make (a double argument, or what a call returned): it would leave single mode every time it ran.
+- The halves written on some paths only are one bit mask (`written`), not a flag each.
+
+Single-mode functions in this game: 522 as leaves, **2,073** now (453 with resume points).
+
+**The helpers** (`cpu.hpp`), measured per operation on a quiet Ryzen 5800X:
+
+| | MSVC before | after | Clang for MinGW before | after |
+|---|---|---|---|---|
+| `single(add)` | 2.3 ns | 1.0 | 1.0 | 1.1 |
+| `single(mul(round25))` | 3.8 | 2.5 | 1.5 | 1.4 |
+| `flush(madd)` | 2.3 | 1.3 | 17.3 | 1.8 |
+| `single(madd_single)` | 5.6 | 5.5 | 19.3 | 4.8 |
+
+- `is_nan`, `flush`, `single` and single mode's `ordinary` are compares now, not bit tests (same answers; MSVC takes a double's bits through memory), and the arithmetic helpers are forced inline.
+- `fused()` asks the CPU once and uses the FMA instruction where it is there, on an x86-64 build for every CPU: MinGW's library `fma` is software (the 17 ns), and that is the compiler a Windows player's build uses. A build with FMA enabled, and ARM64, use the instruction directly as before.
+- Single mode's quantised `psq_l`/`psq_st` stay in floats (a movie's DCT coefficients are loaded as `s16` pairs), and `pow2f` is the exponent field, not `ldexp`.
+
+**Measured on the decoder itself** (`qilin_game_difftest main.dol --thp movie.thp`: `THPInit`, then `THPVideoDecode` on the first frames of the disc's movie, on the reference interpreter and lifted, every register and every byte compared, the locked cache included; then the lifted decode alone, timed):
+
+| | Before | After |
+|---|---|---|
+| MSVC 19.44 `/O2` | 12.07 ms a frame (1,890 ns an 8x8 block) | **6.63 ms** (1,038 ns) |
+| Clang (zig, `x86_64-windows-gnu`, `-O2`) | 10.0 ms (1,565 ns) | **6.0 ms** (940 ns), the lifter's part alone |
+
+0 differences on the frames, in the instruction test and in the test over the game's functions. For scale: a Gekko needs about 6 ms for those instructions, so the lifted decoder now costs what the console's did, on one core of a far faster machine: the row function is still 70% of it at about 1.5 ns a guest instruction, and is where a second round would look.
+
+### Safe points in loops (2026-11-26)
+
+Interrupts reach lifted code only where it lets them: a replaced call, a poll loop. A loop that calls no replacement (a file being decompressed at a load, a movie frame decoded) held the sound's DMA interrupt back 33 to 44 ms, and frames of sound were lost. Every backward branch in lifted code is now a safe point *when one is due*: it tests `rt::g_poll_due`, an atomic flag (`if (poll_due()) [[unlikely]] goto P_<pc>;`), and the block it jumps to, at the function's end and out of the loop's way, writes the stack pointer back and calls `hooks->poll`, then goes round. The registers stay in the function's locals: an interrupt's handler saves and restores the `Cpu`, and a thread switch comes back to the same one, so nothing needs reading back; the handler's frame goes below `r1`, which is why that alone is written.
+- The game's runtime sets the flag every millisecond from a thread of its own (`start_poll_clock`, os.cpp) and its hook (`poll_point`) clears it and delivers what's due, under the same rules as every other safe point (nothing while the guest has interrupts off or is inside a handler).
+- **Cost:** with the call inside the loop the movie decoder lost 6% (7.03 ms against 6.63: a call in a loop keeps the compiler from holding the loop's values in registers it must save around it); with the call's block at the function's end, nothing measurable (6.63 ms), and 1% with the hook taken on every pass (6.71 ms).
+- The differential tests run with the flag set (`--poll 1`), the hook doing nothing: 0 differences.
+- **In the game** (headless, 95 s: the opening movie, the title, the load and the first demo race; `MKDD_POLL=0` turns the clock off to compare): the longest stretch with the timers unpolled was 49.9 ms without safe points (the load before the race) and 8.6 ms with them, which is the idle sleep between retraces and no longer a loop; the game's threads worked 10.2 to 10.6 ms a retrace through the movie and 8.4 to 9.1 ms in the race either way.
+
+### Wrapped functions (`plan.tsv`'s `wrap`, 2026-11-26)
+
+A fourth kind beside lift, replace and drop, for native code that wants to run *around* a function of the game rather than instead of it. A `wrap` range is one function. Its address is the runtime's, exactly as a replaced one's is: `fn_<address>` is the thunk into `hooks->replaced`, in the dispatch table and the replaced table, so direct and indirect calls reach the native wrapper registered with `rt::provide`. The lifted original is emitted beside it as `fn_<address>_wrapped`, outside the dispatch table, and listed in `kWrapped` (replaced.cpp); the wrapper gets it with `rt::GuestFn rt::wrapped(address)` (fatal if the plan doesn't wrap that address) and calls it with the `Cpu` it was given. `qilin lift` refuses a wrap whose function is branched to or fallen into by another (it must only ever be called), whose range doesn't start at the function, or whose body doesn't lift. `tools/analysis/make_plan.py` takes the kind in its table of single functions; `rt::Program` has a third member, `wrapped`.
+
 ### `qilin` CLI (`recomp/src/main.cpp`)
 `info` (JSON), `insns` (every word of the text sections: address, word, text), `disasm` (a raw file of big-endian words, for the sweep), `profile` (instruction mix of the text sections, with paired-single, floating-point and privileged counts), `cfg` (summary, `--json` for every function), `coverage` (exit status 3 while any word is unknown), `suspects` (with the rejected starts' addresses), `polls` (the poll loops, below) and `lift`. Exit status is non-zero on any error.
 

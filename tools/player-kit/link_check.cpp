@@ -8,4 +8,6 @@ extern const ::qilin::rt::FunctionEntry kFunctions[] = {{0, nullptr}};
 extern const unsigned kFunctionCount = 0;
 extern const ::qilin::rt::ReplacedEntry kReplaced[] = {{0, nullptr, false}};
 extern const unsigned kReplacedCount = 0;
+extern const ::qilin::rt::FunctionEntry kWrapped[] = {{0, nullptr}};
+extern const unsigned kWrappedCount = 0;
 }  // namespace qilin::gen

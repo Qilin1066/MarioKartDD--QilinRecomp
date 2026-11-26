@@ -578,6 +578,18 @@ void test_lift() {
     const Lifted sw = lifted(0x80003140);
     CHECK(sw.ok);
     CHECK(sw.code.contains("switch (ctr) { case 0x80003160u: goto L_80003160; case 0x80003168u: goto L_80003168; case 0x80003178u: goto L_80003178;"));
+    // A loop's back edge is a safe point when one is due: addi r3,r3,1; cmpwi r3,9; blt -8; stwu r1,-16(r1); blr.
+    // Only the stack pointer is written back for it (the function has r1), and a forward branch has none.
+    LiftInput loop;
+    loop.start = 0x80003000;
+    loop.insns = {{0x80003000, ppc::decode(0x38630001u)}, {0x80003004, ppc::decode(0x2C030009u)}, {0x80003008, ppc::decode(0x4180FFF8u)},
+                  {0x8000300C, ppc::decode(0x41820008u)}, {0x80003010, ppc::decode(0x9421FFF0u)}, {0x80003014, ppc::decode(0x4E800020u)}};
+    const Lifted looped = lift(loop);
+    CHECK(looped.ok && looped.code.contains("if ((cr0 & 8u)) { if (poll_due()) [[unlikely]] goto P_80003008; goto L_80003000; }"));
+    CHECK(looped.code.contains("return;\nP_80003008: c.r[1] = r1; c.hooks->poll(c); goto L_80003000;\n}"));
+    CHECK(looped.code.contains("if ((cr0 & 2u)) goto L_80003014;"));
+    loop.name = "fn_80003000_wrapped";  // (a wrapped function's body: lifted under another name)
+    CHECK(lift(loop).code.contains("void fn_80003000_wrapped(Cpu& c) {") && !lift(loop).code.contains("static void"));
     const Lifted pc = lifted(0x800031A0);  // the get-PC idiom: LR gets the next address, no call
     CHECK(pc.ok && pc.code.contains("lr = 0x800031A4u;") && !pc.code.contains("fn_800031A4"));
     const Lifted itail = lifted(0x80003210);

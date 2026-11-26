@@ -122,7 +122,13 @@ void on_idle(Cpu& c) {
     if (g_idle) g_idle(c);
 }
 
-const CpuHooks kHooks{on_read, on_write, on_call, on_trap, on_replaced, on_idle};
+IdleHook g_poll = nullptr;
+void on_poll(Cpu& c) {
+    if (g_poll) g_poll(c);
+    else g_poll_due.store(false, std::memory_order_relaxed);
+}
+
+const CpuHooks kHooks{on_read, on_write, on_call, on_trap, on_replaced, on_idle, on_poll};
 
 bool in_ram(uint32_t a, uint32_t n) {
     return a >= kMem1 && a - kMem1 + n <= kMem1Size;
@@ -184,6 +190,7 @@ void provide(std::span<const Provided> replacements) {
 }
 
 void set_idle(IdleHook hook) { g_idle = hook; }
+void set_poll(IdleHook hook) { g_poll = hook; }
 void set_mmio(MmioRead read, MmioWrite write) {
     g->mmio_read = read;
     g->mmio_write = write;
@@ -217,6 +224,13 @@ void call(Cpu& c, uint32_t address) {
         fatal(&c, "call to %08X, which isn't the start of a function (from %08X)", address, c.lr);
     slot.store(uint64_t{address} << 32 | uint32_t(it - f.begin() + 1), std::memory_order_relaxed);
     it->fn(c);
+}
+
+GuestFn wrapped(uint32_t address) {
+    const auto& w = g->program.wrapped;
+    const auto it = std::lower_bound(w.begin(), w.end(), address, [](const FunctionEntry& x, uint32_t a) { return x.address < a; });
+    if (it == w.end() || it->address != address) fatal(nullptr, "%08X isn't a wrapped function: the plan (plan.tsv) has no wrap range for it", address);
+    return it->fn;
 }
 
 uint32_t function_containing(uint32_t address) {

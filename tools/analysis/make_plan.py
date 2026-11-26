@@ -4,6 +4,9 @@
 Every function of the retail DOL belongs to an object file of the debug map
 (port_symbols.py), and the plan is decided per object here: lift (recompiled
 with the game), replace (native, at the library's API) or drop (never runs).
+A single function can also be wrap (FUNCTIONS): native at its address, as
+replace is, with the lifted original kept for the native code to call
+(rt::wrapped); qilin lift refuses one that is branched or fallen into.
 docs/code-analysis.md gives the reasons. Consecutive objects with the same
 decision become one range; a range runs from its first function to the next
 range's first function (or the end of the code in its section), so the ranges
@@ -94,7 +97,7 @@ INIT = {
     "mem_TRK.c": ("drop", ".init: debugger stub and exception vectors"),
     "dolphin_trk.c": ("drop", ".init: debugger stub and exception vectors"),
 }
-# Single functions decided apart from their object.
+# Single functions decided apart from their object: lift, replace or wrap.
 FUNCTIONS = {
     "OSReport": ("lift", "dolphin/os: OSReport (formats through MSL's vprintf)"),
     "__PADDisableRecalibration": ("lift", "dolphin/pad: __PADDisableRecalibration (a flag in low memory)"),
@@ -171,7 +174,7 @@ def build(symbols, dol):
             lib, obj = "JSystemV.a", "J3DUMotion.cpp"
         plan, label = decide(address, name, lib, obj, init_end)
         section = next(i for i, (lo, hi) in enumerate(text) if lo <= address < hi)
-        if rows and rows[-1][2:] == [plan, label, section]:
+        if rows and rows[-1][2:] == [plan, label, section] and plan != "wrap":  # (a wrap range is one function)
             continue
         rows.append([address, None, plan, label, section])
     # a range ends where the next begins; the last of a section at the end of its code

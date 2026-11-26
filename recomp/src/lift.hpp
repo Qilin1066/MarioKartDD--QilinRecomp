@@ -29,6 +29,7 @@ struct LiftInput {
     std::vector<JumpTable> jtabs;
     std::set<uint32_t> not_calls;                       // `bl` to the next instruction (reads the PC)
     uint32_t falls_into = 0;                            // the next function, if execution runs into it
+    std::string name;                                   // its C++ name, if not fn_<start> (a wrapped function's body)
     bool single_leaf_only = false;                      // single mode for leaf functions only, as before v0.23 (to measure against)
     std::function<bool(uint32_t)> is_function;          // a known function start (tail and call targets)
     std::function<bool(uint32_t)> outside_image;        // not in the DOL's image: a `bla` there goes to the dispatcher

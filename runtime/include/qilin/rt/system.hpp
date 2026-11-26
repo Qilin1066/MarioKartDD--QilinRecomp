@@ -34,6 +34,9 @@ struct ReplacedEntry {
 struct Program {
     std::span<const FunctionEntry> functions;  // sorted by address
     std::span<const ReplacedEntry> replaced;   // sorted by address
+    // Functions the plan wraps: the address is the runtime's, as a replaced one's is (direct and
+    // indirect calls reach the native wrapper), and the lifted original is here for it to call.
+    std::span<const FunctionEntry> wrapped = {};  // sorted by address
 };
 
 // A native replacement for a guest function: arguments in r3-r10 and f1-f8,
@@ -64,10 +67,18 @@ void set_mmio(MmioRead read, MmioWrite write);
 // Without one, they spin.
 using IdleHook = void (*)(Cpu&);
 void set_idle(IdleHook hook);
+// Every other lifted loop tests rt::g_poll_due on its way round (cpu.hpp) and
+// calls this when it is set: the hook clears the flag and delivers what's due.
+// Whoever keeps time sets the flag (from any thread). Without a hook, nothing.
+void set_poll(IdleHook hook);
 
 // A Cpu for a new guest thread: zeroed registers, guest memory and the hooks.
 Cpu new_cpu();
 uint8_t* guest_base();
+
+// The lifted original of a function the plan wraps (plan.tsv's `wrap`), for its
+// native wrapper to call around its own work. Fatal if the plan doesn't wrap `address`.
+GuestFn wrapped(uint32_t address);
 
 // Call the guest function at `address` (lifted, or replaced): fatal if there's none.
 void call(Cpu& c, uint32_t address);

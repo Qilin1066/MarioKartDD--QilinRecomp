@@ -92,6 +92,12 @@ bool has_pending_interrupts();
 // The back edge of a lifted poll loop (rt::set_idle): deliver what's due, or
 // sleep until the next timed event (a millisecond at most).
 void poll_loop(qilin::rt::Cpu& c);
+// The back edge of any other lifted loop, when rt::g_poll_due is set
+// (rt::set_poll): a safe point like the others, so a loop that calls nothing
+// (a file being decompressed, a movie frame decoded) can't hold the sound's
+// interrupt back. start_poll_clock sets the flag every millisecond.
+void poll_point(qilin::rt::Cpu& c);
+void start_poll_clock();
 bool interrupts_enabled();
 uint32_t interrupt_mask();  // the OS's: bit 31-n set masks interrupt n
 void set_interrupts_enabled(bool on);  // a thread switch restores the new thread's

@@ -215,7 +215,8 @@ void on_trap(rt::Cpu&, uint32_t pc, const char* why) {
 void on_replaced(rt::Cpu& c, uint32_t f) {  // replaced or dropped code: returns at once here
     if (g_native) g_native(f, c.r, c.mem);
 }
-const rt::CpuHooks kHooks{slow_read, slow_write, on_call, on_trap, on_replaced, [](rt::Cpu&) {}};
+// (Loops' safe points: taken on every pass here, when --poll says so, to show they disturb nothing.)
+const rt::CpuHooks kHooks{slow_read, slow_write, on_call, on_trap, on_replaced, [](rt::Cpu&) {}, [](rt::Cpu&) {}};
 
 uint32_t g_current = 0;
 unsigned g_trial = 0;
@@ -293,6 +294,7 @@ int main(int argc, char** argv) {
         else if (o == "--steps") max_steps = parse_u32(argv[i + 1], 10);
         else if (o == "--only") only = parse_u32(argv[i + 1], 16);
         else if (o == "--data") data_path = argv[i + 1];
+        else if (o == "--poll") rt::g_poll_due = parse_u32(argv[i + 1], 10) != 0;
         else if (o == "--thp") thp_path = argv[i + 1];
         else if (o == "--frames") thp_frames = parse_u32(argv[i + 1], 10);
         else if (o == "--reps") thp_reps = parse_u32(argv[i + 1], 10);
