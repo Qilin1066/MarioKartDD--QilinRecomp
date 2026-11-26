@@ -43,6 +43,12 @@ public:
     // one in use.
     void request_scale(unsigned scale);
     unsigned scale() const;
+    // The picture is shown `times` as wide as the game drew it for (1 to 3; enhance::widening()):
+    // from the next frame drawn the EFB has enough whole columns for each of the console's that
+    // the stretch doesn't blur it (scale x times, rounded up; width_scale() says how many).
+    // Lines stay `scale`. As request_scale, it remakes the EFB between two frames.
+    void request_widening(float times);
+    unsigned width_scale() const;
     // The latest external frame buffer copied to `address` (in
     // TRANSFER_SRC_OPTIMAL layout, sampled usage), or null if there's none.
     const qilin::host::Image* xfb(uint32_t address) const;

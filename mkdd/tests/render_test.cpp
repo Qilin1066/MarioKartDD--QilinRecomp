@@ -1083,6 +1083,80 @@ void between_four_views(Target& t, Stream& st) {
                                                     "(145.9 139.8 60.8 158.1)");
 }
 
+// A picture shown wider than drawn for (16:9 and 21:9 on the game's 4:3) gets more columns
+// than lines: enough whole ones for the stretch (Renderer::request_widening). The console's
+// pixel positions must hold in them: a copy's rectangle, the Z the CPU reads, the dither's
+// grid; and a one-pixel line stays as wide as the lines are high, not as the columns are many.
+void widened(Target& t, Stream& st) {
+    constexpr uint32_t kZTile = 0x00970000u;
+    struct Case { float times; unsigned scale, columns; const char* name; };
+    static constexpr Case kCases[] = {{4.0f / 3.0f, 1, 2, "16:9 at 1x"}, {1.75f, 1, 2, "21:9 at 1x"}, {4.0f / 3.0f, 2, 3, "16:9 at 2x"}, {1.75f, 2, 4, "21:9 at 2x"}};
+    for (const Case& k : kCases) {
+        t.renderer.request_scale(k.scale), t.renderer.request_widening(k.times);
+        const unsigned xs = k.columns, ys = k.scale;
+        std::memset(guest(kZTile), 0xFF, 64);
+        stream_begin(st);
+        stream_quad(st, 0, 0, 101, 528, -0.3f, 0xFF0000FFu);            // red, depth 0x4CCCCC, up to column 101
+        stream_quad(st, 101, 0, 640, 528, -0.6f, 0x0000FFFFu);          // blue, depth 0x999999
+        st.bp(0x49, 64u | (200u << 10)), st.bp(0x4A, 63u | (63u << 10)), st.bp(0x4B, kCopyTex >> 5), st.bp(0x4D, 64 / 16);
+        st.bp(0x52, 8u << 3);                                           // RGB565, 64x64 from (64, 200)
+        st.bp(0x43, 3);
+        st.bp(0x49, 100u | (200u << 10)), st.bp(0x4A, 1u | (1u << 10)), st.bp(0x4B, kZTile >> 5), st.bp(0x4D, 1);
+        st.bp(0x52, 12u << 3);                                          // Z24X8, 2x2 at (100, 200): one pixel of each depth
+        st.bp(0x43, 0);
+        st.texture(kCopyTex, 64, 64, 4);
+        st.bp(0xC0, 8u | (15u << 4) | (15u << 8) | (15u << 12) | (1u << 19));
+        stream_quad(st, 300, 300, 364, 364, -0.1f, 0xFFFFFFFFu, true);  // the copy, a texel a pixel
+        st.xf(0x103F, {0}), st.bp(0x28, 0);
+        st.bp(0xC0, 10u | (15u << 4) | (15u << 8) | (15u << 12) | (1u << 19));
+        st.cp(0x50, (1u << 9) | (1u << 13)), st.cp(0x60, 0), st.cp(0x70, 1u | (4u << 1) | (5u << 14));
+        st.u8(0xA8), st.u16(2);                                         // a line one pixel wide, down the picture at x 500
+        for (float y : {50.0f, 150.0f}) st.u32(f2u(500.5f)), st.u32(f2u(y)), st.u32(f2u(-0.05f)), st.u32(0xFFFFFFFFu);
+        st.end_frame();
+        st.send();
+        const auto px = t.shown();
+        t.renderer.finish_copies();
+        const uint32_t w = 640 * xs, h = 528 * ys;
+        const bool sized = t.renderer.width_scale() == xs && px.size() == size_t(w) * h * 4;
+        check(sized, std::string(k.name) + ": the frame buffer has " + std::to_string(xs) + " columns for each of the console's and " +
+                         std::to_string(ys) + " lines (" + std::to_string(px.size() / 4 / (528 * ys)) + " wide)");
+        if (!sized) continue;
+        const auto at2 = [&](unsigned x, unsigned y, unsigned sub = 0) { return px.data() + (size_t(y * ys + ys / 2) * w + x * xs + sub) * 4; };
+        int line = 0;
+        for (unsigned c = 495 * xs; c < 506 * xs; ++c) line += px[(size_t(100 * ys) * w + c) * 4 + 1] > 128;
+        check(line == int(ys), std::string(k.name) + ": a one-pixel line is " + std::to_string(line) + " columns wide (" + std::to_string(ys) + ")");
+        // The copy's edge was at column 101, 37 texels into it: red up to 336, blue from 337, in every column of each.
+        bool edge = true;
+        for (unsigned sub = 0; sub < xs; ++sub) edge = edge && near(at2(336, 330, sub), 255, 0, 0, 8) && near(at2(337, 330, sub), 0, 0, 255, 8);
+        check(edge, std::string(k.name) + ": a texture copy holds the console's pixels: " + rgb(at2(336, 330)) + " | " + rgb(at2(337, 330)));
+        const uint8_t* m = guest(kZTile);
+        char got[24];
+        std::snprintf(got, sizeof got, "%02X %02X", m[1], m[3]);
+        check(m[1] == 0x4C && m[3] == 0x99, std::string(k.name) + ": the Z read back is each column's own (4C 99): " + got);
+        // The dither's grid is the console's pixels: 129 less its top two bits is 127, plus 0 to 3 by
+        // position: one pixel in four stays under 128, the top-left of each 2x2.
+        stream_begin(st);
+        st.bp(0x43, 1), st.bp(0x41, (1u << 2) | (1u << 3) | (1u << 4));
+        stream_quad(st, 0, 0, 640, 528, -0.5f, 0x818181FFu);
+        st.end_frame();
+        st.send();
+        const auto dp = t.shown();
+        bool grid = dp.size() == px.size();
+        for (unsigned y = 100; grid && y < 104; ++y)
+            for (unsigned x = 200; grid && x < 204; ++x)
+                for (unsigned sy = 0; grid && sy < ys; ++sy)
+                    for (unsigned sx = 0; grid && sx < xs; ++sx) {
+                        const int v = dp[(size_t(y * ys + sy) * w + x * xs + sx) * 4];
+                        grid = (v < 128) == ((x & 1) == 0 && (y & 1) == 0);
+                    }
+        check(grid, std::string(k.name) + ": the dither repeats every two of the console's pixels each way");
+    }
+    t.renderer.request_scale(1), t.renderer.request_widening(1.0f);
+    stream_begin(st), st.end_frame(), st.send();
+    t.shown();
+    check(t.renderer.width_scale() == 1 && t.renderer.scale() == 1, "and back to one column a pixel");
+}
+
 // mkdd_render_test --bench [players] [frames] [vertices a strip] [pictures between]: what such a frame costs to decode and record,
 // and to draw (the renderer's own time on the CPU, and the GPU's where it has timestamps).
 int bench(host::Gpu& gpu, unsigned players, unsigned frames, unsigned strip, unsigned pictures) {
@@ -1216,6 +1290,7 @@ int main(int argc, char** argv) {
         z_before_alpha_test(t, st);
         between_frames(t, st);
         between_four_views(t, st);
+        widened(t, st);
         stream_begin(st), st.end_frame(), st.send();
         t.shown();
     }

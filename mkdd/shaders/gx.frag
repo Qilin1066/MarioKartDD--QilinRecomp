@@ -533,7 +533,7 @@ void main() {
     // are kept and nothing is dithered.
     bool rgba6 = bits(bp(0x43u), 0u, 3u) == 1u && (pc.flags & 0x100u) == 0u;
     if (rgba6 && bits(bp(0x41u), 2u, 1u) != 0u) {  // dither, 2x2 Bayer
-        ivec2 d = ivec2(gl_FragCoord.xy / pc.scale) & 1;
+        ivec2 d = ivec2(gl_FragCoord.xy / vec2(pc.scale_x, pc.scale)) & 1;
         TevResult.rgb = (TevResult.rgb - (TevResult.rgb >> 6)) + (d.x ^ d.y) * 2 + d.y;
     }
 
@@ -547,7 +547,7 @@ void main() {
         else
             ze = S.fog[0].x * float(zCoord) / 16777216.0;
         if (bits(bp(0xE8u), 10u, 1u) != 0u) {
-            float offset = (2.0 * ((gl_FragCoord.x / pc.scale) / S.fog[0].w)) - 1.0 - S.fog[0].z;
+            float offset = (2.0 * ((gl_FragCoord.x / pc.scale_x) / S.fog[0].w)) - 1.0 - S.fog[0].z;
             float floatindex = clamp(9.0 - abs(offset) * 9.0, 0.0, 9.0);
             uint lo = uint(floatindex), hi = lo + 1u;
             float k = mix(S.fog_range[lo >> 2u][lo & 3u], S.fog_range[hi >> 2u][hi & 3u], fract(floatindex));

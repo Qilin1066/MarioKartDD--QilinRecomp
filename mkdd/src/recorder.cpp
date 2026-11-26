@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -1286,6 +1287,85 @@ void record_tlut_load(const Registers& r, uint32_t command) {
 
 
 
+// ---- MKDD_SURVEY=<file>: where a frame's 3D drawing falls across the picture, and where its
+// cameras are. For checking that what the game culls on the CPU follows a widened picture: with
+// the cameras widened, the middle 1 / widening of the width is what a 4:3 picture showed, and
+// things culled against that would leave the bands beside it thin. Every 600 frames: of the
+// perspective draws' vertices (one in four) on screen, how many fall in each eighth of the half
+// width from the middle out; and of the draws, how many lie wholly within each eighth's outer
+// edge (by their outermost vertex) and wholly beyond each eighth's inner edge (by their
+// innermost). And every 20th frame, each view's eye and the direction it looks.
+namespace {
+struct Survey {
+    FILE* out = nullptr;
+    uint64_t frames = 0, vertices[8] = {}, within[8] = {}, beyond[8] = {}, draws = 0;
+};
+Survey* const g_survey = [] () -> Survey* {
+    const char* path = std::getenv("MKDD_SURVEY");
+    FILE* f = path && *path ? std::fopen(path, "w") : nullptr;
+    if (!f) return nullptr;
+    auto* s = new Survey;
+    s->out = f;
+    return s;
+}();
+
+void survey(const Frame& f, uint64_t frame_number) {
+    Survey& s = *g_survey;
+    for (const Draw& d : f.draws) {
+        const State& st = f.states[d.state];
+        if (st.projection[3][2] != -1.0f || d.pipeline.topology != 0) continue;
+        float lo = 2.0f, hi = -1.0f;
+        const auto vertex = [&](uint32_t i) {
+            const float* p;
+            uint32_t row;
+            if (d.pipeline.small_vertices) p = f.small[i].pos, row = f.small[i].matrices[0] & 0xFFu;
+            else p = f.vertices[i].pos, row = f.vertices[i].matrices[0] & 0xFFu;
+            if (row > 61) return;
+            float v[3];
+            for (int k = 0; k < 3; ++k) v[k] = st.posmtx[row + k][0] * p[0] + st.posmtx[row + k][1] * p[1] + st.posmtx[row + k][2] * p[2] + st.posmtx[row + k][3];
+            const float w = -v[2];
+            if (!(w > 0)) return;
+            const float x = std::fabs((st.projection[0][0] * v[0] + st.projection[0][2] * v[2]) / w);
+            const float y = std::fabs((st.projection[1][1] * v[1] + st.projection[1][2] * v[2]) / w);
+            lo = std::min(lo, x), hi = std::max(hi, x);
+            if (x < 1.0f && y < 1.0f) ++s.vertices[unsigned(x * 8.0f)];
+        };
+        if (d.direct) {
+            for (uint32_t i = 0; i < d.index_count; i += 4) vertex(d.first_index + i);
+        } else {
+            for (uint32_t i = 0; i < d.index_count; i += 4) vertex(f.indices[d.first_index + i]);
+        }
+        if (hi < 0) continue;
+        ++s.draws;
+        for (unsigned b = 0; b < 8; ++b) {
+            if (hi < float(b + 1) / 8.0f) ++s.within[b];
+            if (lo >= float(b) / 8.0f && lo < 1.0f) ++s.beyond[b];
+        }
+    }
+    if (frame_number % 20 == 0)
+        for (size_t v = 0; v < f.views.size(); ++v) {
+            const float* m = f.views[v].m;
+            const float eye[3] = {-(m[0] * m[3] + m[4] * m[7] + m[8] * m[11]), -(m[1] * m[3] + m[5] * m[7] + m[9] * m[11]),
+                                  -(m[2] * m[3] + m[6] * m[7] + m[10] * m[11])};
+            std::fprintf(s.out, "view %llu %u of %u: eye %.0f %.0f %.0f looks %.2f %.2f %.2f\n", static_cast<unsigned long long>(frame_number),
+                         unsigned(v), unsigned(f.views.size()), double(eye[0]), double(eye[1]), double(eye[2]), double(-m[8]), double(-m[9]), double(-m[10]));
+        }
+    if (++s.frames < 600) return;
+    std::fprintf(s.out, "survey to frame %llu: %llu draws;", static_cast<unsigned long long>(frame_number), static_cast<unsigned long long>(s.draws));
+    const auto row = [&](const char* name, const uint64_t* h) {
+        std::fprintf(s.out, " %s", name);
+        for (unsigned i = 0; i < 8; ++i) std::fprintf(s.out, " %llu", static_cast<unsigned long long>(h[i]));
+        std::fprintf(s.out, ";");
+    };
+    row("vertices by eighth", s.vertices), row("draws wholly within", s.within), row("draws wholly beyond", s.beyond);
+    std::fprintf(s.out, "\n");
+    std::fflush(s.out);
+    FILE* keep = s.out;
+    s = Survey{};
+    s.out = keep;
+}
+}  // namespace
+
 static void record_copy_timed(const Registers& r, uint32_t command) {
     Frame& f = *g_frame;
     Copy c{};
@@ -1353,6 +1433,7 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
     if (c.to_xfb) {
         f.captured = g_capture_next;
         g_capture_next = false;
+        if (g_survey) [[unlikely]] survey(f, g_stats.frames.load(std::memory_order_relaxed));
         textures_end_frame(f);
         hud::place(f);  // (a widened picture: the flat parts back in proportion)
         g_stats.frames.fetch_add(1, std::memory_order_relaxed);

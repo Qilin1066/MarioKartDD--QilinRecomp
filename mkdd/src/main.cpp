@@ -710,6 +710,7 @@ int main(int argc, char** argv) {
                 match_retrace_to_display(*display);
                 // And the render resolution follows the settings and, on auto, the window (looked at
                 // once a second, so a window being dragged to a new size settles first).
+                renderer->request_widening(mkdd::enhance::widening());  // (the EFB's columns follow the picture's shape)
                 if (!std::getenv("MKDD_SCALE")) {
                     int ww = 0, wh = 0;
                     if (auto* w = static_cast<SDL_Window*>(display->sdl_window())) SDL_GetWindowSizeInPixels(w, &ww, &wh);
