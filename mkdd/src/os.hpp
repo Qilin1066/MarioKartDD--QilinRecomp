@@ -36,6 +36,7 @@ void post_interrupt(std::function<void(qilin::rt::Cpu&)> work);
 // every thread blocked knows how long to sleep.
 void add_timer_source(std::function<void()> poll, std::function<uint64_t()> deadline);
 uint64_t next_timer_deadline();
+// (It also publishes that deadline to the poll clock: start_poll_clock.)
 // Sleep up to `ns` while every guest thread waits, or until another host
 // thread calls wake_idle because it has something for a timer source to
 // post (the GPU thread, reaching a draw-done command). `on_time`: the end is a
@@ -95,8 +96,17 @@ void poll_loop(qilin::rt::Cpu& c);
 // The back edge of any other lifted loop, when rt::g_poll_due is set
 // (rt::set_poll): a safe point like the others, so a loop that calls nothing
 // (a file being decompressed, a movie frame decoded) can't hold the sound's
-// interrupt back. start_poll_clock sets the flag every millisecond.
+// interrupt back. start_poll_clock's thread sets the flag when the next timer
+// deadline the guest's thread published (next_timer_deadline publishes it)
+// has come, every millisecond while it stays due undelivered, and 4 ms after
+// the last publication in case a timer was set since; MKDD_POLL=ms sets it
+// every millisecond instead, MKDD_POLL=0 never.
 void poll_point(qilin::rt::Cpu& c);
+// A timer due at `t` was just set (an alarm): the poll clock hears of it now
+// if it's sooner than what it waits for.
+void note_deadline(uint64_t t);
+uint64_t poll_point_count();  // how many times it has run (the report's)
+uint64_t poll_clock_count();  // how many times the clock has set the flag
 void start_poll_clock();
 bool interrupts_enabled();
 uint32_t interrupt_mask();  // the OS's: bit 31-n set masks interrupt n

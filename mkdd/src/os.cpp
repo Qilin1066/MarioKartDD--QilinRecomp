@@ -31,6 +31,7 @@
 
 #include "boot.hpp"
 #include "build.hpp"
+#include "priority.hpp"
 
 namespace mkdd {
 namespace rt = qilin::rt;
@@ -436,6 +437,10 @@ void OSResetSystem(Cpu& c) {  // (reset: 0 restart, 1 hot reset, 2 shutdown; res
     const uint32_t reset = c.r[3], code = c.r[4], menu = c.r[5];
     if (reset > 1) rt::fatal(&c, "OSResetSystem(%u, %08X, %u): only a restart (0) and a hot reset (1) are modelled", reset, code, menu);
     const Cpu saved = c;
+    // As the OS's first call: no other thread runs while the reset functions
+    // do, though interrupts come (what they wait for), at a lifted loop too.
+    constexpr uint32_t kOSDisableScheduler = 0x800EB1B8u;
+    rt::call(c, kOSDisableScheduler);
     for (unsigned tries = 0; !call_reset_functions(c, false); ++tries) {
         if (tries == 10000) rt::fatal(&c, "OSResetSystem: a reset function never says it's ready");
         poll_loop(c);  // what it waits for arrives as an interrupt
@@ -690,6 +695,7 @@ static void idle_sleep_for(uint64_t ns, bool on_time) {
     }
 }
 void wake_idle() {
+    rt::g_poll_due.store(true, std::memory_order_relaxed);  // (a guest thread busy in a loop sees it at its next back edge)
     g_idle_woken.store(true, std::memory_order_release);
     if (const HANDLE e = idle_event()) SetEvent(e);
 }
@@ -724,6 +730,7 @@ static void idle_sleep_for(uint64_t ns, bool on_time) {
     }
 }
 void wake_idle() {
+    rt::g_poll_due.store(true, std::memory_order_relaxed);  // (a guest thread busy in a loop sees it at its next back edge)
     {
         std::lock_guard l(g_idle_lock);
         g_idle_woken.store(true, std::memory_order_relaxed);
@@ -743,9 +750,51 @@ void idle_sleep(uint64_t ns, bool on_time) {
 }
 uint64_t idle_time_ns() { return g_idle_ns.load(std::memory_order_relaxed); }
 
+// ---- the poll clock (start_poll_clock): its thread sets rt::g_poll_due for
+// lifted loops when the next deadline comes. The guest's thread publishes the
+// deadline wherever it works it out; the clock waits for it, woken early if a
+// sooner one is published.
+namespace {
+std::atomic<uint64_t> g_poll_points{0}, g_clock_sets{0};
+std::atomic<uint64_t> g_due_at{UINT64_MAX};  // the next deadline, as the guest's thread last published it
+std::atomic<uint64_t> g_published_at{0};     // when (time base)
+std::atomic<uint64_t> g_clock_until{0};      // what the clock waits for
+std::atomic<bool> g_clock_running{false};
+#if defined(_WIN32)
+HANDLE clock_event() {
+    static const HANDLE e = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // auto-reset
+    return e;
+}
+void wake_clock() {
+    if (const HANDLE e = clock_event()) SetEvent(e);
+}
+#else
+std::mutex g_clock_lock;
+std::condition_variable g_clock_cv;
+bool g_clock_woken = false;  // under g_clock_lock
+void wake_clock() {
+    {
+        std::lock_guard l(g_clock_lock);
+        g_clock_woken = true;
+    }
+    g_clock_cv.notify_one();
+}
+#endif
+void publish_deadline(uint64_t t, uint64_t now) {
+    const uint64_t was = g_due_at.exchange(t, std::memory_order_relaxed);
+    g_published_at.store(now, std::memory_order_relaxed);
+    if (t < was && t < g_clock_until.load(std::memory_order_relaxed) && g_clock_running.load(std::memory_order_relaxed)) wake_clock();
+}
+}  // namespace
+
+void note_deadline(uint64_t t) {
+    if (t < g_due_at.load(std::memory_order_relaxed)) publish_deadline(t, time_base());
+}
+
 uint64_t next_timer_deadline() {
     uint64_t t = UINT64_MAX;
     for (const auto& timer : g_timers) t = std::min(t, timer.deadline());
+    publish_deadline(t, time_base());
     return t;
 }
 bool has_pending_interrupts() { return !g_pending.empty(); }
@@ -766,6 +815,7 @@ bool run_pending(Cpu& c) {
         g_enabled = true;
         ran = true;
     }
+    if (ran) next_timer_deadline();  // handlers set timers (the next audio DMA): published for the poll clock
     return ran;
 }
 }  // namespace
@@ -790,20 +840,95 @@ void poll_loop(Cpu& c) {
     if (next > now) idle_sleep((next - now) * 2000 / 81, next == timer);
 }
 
+uint64_t poll_point_count() { return g_poll_points.load(std::memory_order_relaxed); }
+uint64_t poll_clock_count() { return g_clock_sets.load(std::memory_order_relaxed); }
+
 void poll_point(Cpu& c) {
     rt::g_poll_due.store(false, std::memory_order_relaxed);
+    g_poll_points.fetch_add(1, std::memory_order_relaxed);
     deliver_interrupts(c);
+    next_timer_deadline();  // published: the clock's next wait
 }
 
-void start_poll_clock() {
-    // MKDD_POLL=0: no safe points in loops, as before them (development: to measure against).
-    if (const char* off = std::getenv("MKDD_POLL"); off && *off == '0') return;
-    std::thread([] {
-        for (;;) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            rt::g_poll_due.store(true, std::memory_order_relaxed);
+namespace {
+// Wait until the time base reaches `until`, or wake_clock.
+void clock_wait(uint64_t until) {
+    const uint64_t now = time_base();
+    if (until <= now) return;
+    const int64_t ns = static_cast<int64_t>(std::min<uint64_t>(until - now, kTimerHz) * 2000 / 81);
+#if defined(_WIN32)
+    // A high-resolution waitable timer (as idle_sleep_for's): within half a
+    // millisecond of the deadline, where a sleep ends on the 1 ms tick.
+    thread_local IdleTimer timer;
+    const HANDLE event = clock_event();
+    LARGE_INTEGER due;
+    due.QuadPart = -std::max<int64_t>(1, ns / 100);
+    if (!timer.h || !event || !SetWaitableTimer(timer.h, &due, 0, nullptr, nullptr, FALSE)) {
+        std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
+        return;
+    }
+    const HANDLE both[2] = {event, timer.h};
+    WaitForMultipleObjects(2, both, FALSE, INFINITE);
+#else
+    std::unique_lock l(g_clock_lock);
+    g_clock_cv.wait_for(l, std::chrono::nanoseconds(ns), [] { return g_clock_woken; });
+    g_clock_woken = false;
+#endif
+}
+
+void clock_main() {
+    set_this_thread_priority(Priority::high);  // late, it makes a deadline late
+    constexpr uint64_t kRetry = kTimerHz / 1000, kStale = kTimerHz / 250;  // 1 ms, 4 ms
+    const auto set = [] {
+        rt::g_poll_due.store(true, std::memory_order_relaxed);
+        g_clock_sets.fetch_add(1, std::memory_order_relaxed);
+    };
+    for (uint64_t flagged_stale = UINT64_MAX;;) {
+        const uint64_t now = time_base(), due = g_due_at.load(std::memory_order_relaxed);
+        const uint64_t published = g_published_at.load(std::memory_order_relaxed);
+        uint64_t until;
+        if (now >= due) {
+            // Due: the flag, and again a millisecond after the guest takes it
+            // while it stays undelivered (the guest has interrupts off). Not
+            // taken: the guest's thread is asleep or parked, and wakes itself.
+            if (rt::g_poll_due.load(std::memory_order_relaxed)) {
+                until = now + kStale;
+            } else {
+                set();
+                until = now + kRetry;
+            }
+        } else if (now >= published + kStale && flagged_stale != published) {
+            // Nothing published for 4 ms: a timer may have been set since
+            // without a word (an audio DMA started by the game's own code).
+            set();
+            flagged_stale = published;
+            until = due;
+        } else {
+            until = flagged_stale == published ? due : std::min(due, published + kStale);
         }
-    }).detach();
+        g_clock_until.store(until, std::memory_order_relaxed);
+        clock_wait(until);
+    }
+}
+}  // namespace
+
+void start_poll_clock() {
+    // MKDD_POLL=0: no safe points in loops, as before them; MKDD_POLL=ms: the
+    // flag every millisecond, deadline or not (development: to measure against).
+    const char* mode = std::getenv("MKDD_POLL");
+    if (mode && *mode == '0') return;
+    if (mode && std::strcmp(mode, "ms") == 0) {
+        std::thread([] {
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                rt::g_poll_due.store(true, std::memory_order_relaxed);
+                g_clock_sets.fetch_add(1, std::memory_order_relaxed);
+            }
+        }).detach();
+        return;
+    }
+    g_clock_running.store(true, std::memory_order_relaxed);
+    std::thread(clock_main).detach();
 }
 
 bool deliver_interrupts_idle(Cpu& c) {

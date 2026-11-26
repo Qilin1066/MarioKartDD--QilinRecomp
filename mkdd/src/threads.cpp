@@ -332,6 +332,7 @@ uint64_t alarm_deadline() {
 void arm(uint32_t a, uint64_t fire, uint64_t period, uint32_t handler) {
     Alarm& al = g_alarms[a];
     al = {fire, period, handler, ++g_generation};
+    note_deadline(fire);  // for a lifted loop running when it comes (the poll clock)
     rt::poke32(a, handler);
     rt::poke32(a + 8, static_cast<uint32_t>(fire >> 32));
     rt::poke32(a + 12, static_cast<uint32_t>(fire));

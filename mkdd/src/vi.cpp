@@ -87,16 +87,17 @@ void report() {
     // retrace's 16.7 ms, the game can't keep up and retraces come late.
     {
         static auto t_last = std::chrono::steady_clock::now();
-        static uint64_t idle_last = 0, fifo_last = 0;
+        static uint64_t idle_last = 0, fifo_last = 0, polls_last = 0, sets_last = 0;
         static uint32_t retraces_last = 0;
         const auto t = std::chrono::steady_clock::now();
-        const uint64_t idle = idle_time_ns(), fifo = fifo_wait_ns();
+        const uint64_t idle = idle_time_ns(), fifo = fifo_wait_ns(), polls = poll_point_count(), sets = poll_clock_count();
         const double n = double(std::max<uint32_t>(1, g_retraces - retraces_last));
         const double wall = std::chrono::duration<double, std::milli>(t - t_last).count();
         const double busy = std::max(0.0, wall - double(idle - idle_last) / 1e6);
-        rt::log("  the game's threads: %.2f ms of work a retrace (%.0f%% of one), of which waiting for the GPU thread %.2f ms",
-                busy / n, busy / wall * 100.0, double(fifo - fifo_last) / 1e6 / n);
-        t_last = t, idle_last = idle, fifo_last = fifo, retraces_last = g_retraces;
+        rt::log("  the game's threads: %.2f ms of work a retrace (%.0f%% of one), of which waiting for the GPU thread %.2f ms; "
+                "%.1f safe points taken inside loops a retrace, the poll clock raising the flag %.1f times",
+                busy / n, busy / wall * 100.0, double(fifo - fifo_last) / 1e6 / n, double(polls - polls_last) / n, double(sets - sets_last) / n);
+        t_last = t, idle_last = idle, fifo_last = fifo, polls_last = polls, sets_last = sets, retraces_last = g_retraces;
     }
     // Drawing: per frame, the guest thread's recording and the main thread's drawing.
     struct Drawing {

@@ -313,7 +313,7 @@ add_test(NAME mkdd_threads_test COMMAND mkdd_threads_test)
 set_tests_properties(mkdd_threads_test PROPERTIES TIMEOUT 30)
 add_test(NAME mkdd_threads_test_shutdown COMMAND mkdd_threads_test)
 set_tests_properties(mkdd_threads_test_shutdown PROPERTIES TIMEOUT 30 ENVIRONMENT THREADS_TEST_LEAVE=shutdown
-                     PASS_REGULAR_EXPRESSION "the game chose the console's menu: closing")
+                     PASS_REGULAR_EXPRESSION "the game chose the console's menu: closing" FAIL_REGULAR_EXPRESSION "FAIL")
 add_test(NAME mkdd_threads_test_restart COMMAND mkdd_threads_test)
 set_tests_properties(mkdd_threads_test_restart PROPERTIES TIMEOUT 30 ENVIRONMENT THREADS_TEST_LEAVE=restart
                      PASS_REGULAR_EXPRESSION "OSResetSystem started the program again(.|\n)*all passed")
