@@ -13,11 +13,11 @@ build-game/mkdd "<extracted disc>"      # the folder with sys/ and files/
                                             # --offscreen: draw without a window; --headless: don't draw
 ```
 
-At build time `qilin lift <main.dol> -o build-game/generated --plan data/R7PP01/plan.tsv --files 32` writes the C++ (32 files of functions, the function table, the replaced-function table), which is compiled into `mkdd` with the runtime and the replacements in `mkdd/src/`. A full build takes about 7 minutes on two cores (GCC 14, `-O2`); after that, changes to the replacements rebuild in seconds. The extracted disc is what Dolphin's *Extract Entire Disc* or `wit extract` produces: `sys/main.dol`, `sys/boot.bin`, `sys/fst.bin` and `files/`.
+At build time `qilin lift <main.dol> -o build-game/generated --plan data/GM4E01/plan.tsv --files 32` writes the C++ (32 files of functions, the function table, the replaced-function table), which is compiled into `mkdd` with the runtime and the replacements in `mkdd/src/`. A full build takes about 7 minutes on two cores (GCC 14, `-O2`); after that, changes to the replacements rebuild in seconds. The extracted disc is what Dolphin's *Extract Entire Disc* or `wit extract` produces: `sys/main.dol`, `sys/boot.bin`, `sys/fst.bin` and `files/`.
 
 ## The library plan as data
 
-`data/R7PP01/plan.tsv` is the plan of `code-analysis.md` as address ranges: lifted, replaced or dropped. `tools/analysis/identify_libraries.py --plan-out` writes it. Narrower ranges override the library they sit in. These are code inside a replaced library that is lifted after all, because it touches no hardware and its exact behaviour matters more than a native version:
+`data/GM4E01/plan.tsv` is the plan of `code-analysis.md` as address ranges: lifted, replaced or dropped. `tools/analysis/make_plan.py` writes it from the ported symbols. Narrower ranges override the library they sit in. These are code inside a replaced library that is lifted after all, because it touches no hardware and its exact behaviour matters more than a native version:
 
 | Range | Lifted | Why |
 |---|---|---|

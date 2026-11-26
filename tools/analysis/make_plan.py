@@ -99,6 +99,8 @@ FUNCTIONS = {
     "OSReport": ("lift", "dolphin/os: OSReport (formats through MSL's vprintf)"),
     "__PADDisableRecalibration": ("lift", "dolphin/pad: __PADDisableRecalibration (a flag in low memory)"),
     "EXIGetType": ("lift", "dolphin/exi: EXIGetType (a table over EXIGetID)"),
+    # The OS agent's choice: the boot's DSP hand-shake runs as written, against the emulated DSP.
+    "__OSInitAudioSystem": ("lift", "dolphin/os: __OSInitAudioSystem (runs its stub program on the emulated DSP)"),
     # The aspect ratio the cameras are built from: answered natively for wide screens
     # (docs/enhancements.md). Each returns one float of SystemData (lfs f1,..(r13); blr).
     "getPerspAspect__6SystemFv": ("replace", "game: aspect getters (enhancements)"),
