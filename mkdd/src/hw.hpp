@@ -1,5 +1,5 @@
-// The hardware registers (0xCC000000-0xCD00FFFF): each device maps its own
-// ranges; an access outside every range is fatal.
+// The hardware registers (0xCC000000-0xCC00FFFF on a GameCube): each device
+// maps its own ranges; an access outside every range is fatal.
 #pragma once
 
 #include <cstdint>

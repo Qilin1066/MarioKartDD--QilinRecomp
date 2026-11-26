@@ -1,6 +1,6 @@
 // mkdd: the recompiled game.
 //
-//   mkdd [--headless | --offscreen] <folder with the extracted disc: sys/main.dol, sys/boot.bin, files/>
+//   mkdd [--headless | --offscreen] <the disc: an image (.iso, .gcm, .ciso) or an extracted folder (sys/, files/)>
 //
 // The guest runs on threads of its own (threads.cpp); this thread owns the
 // window and the GPU: it handles the window's events, draws the frames the
@@ -302,7 +302,7 @@ int main(int argc, char** argv) {
         else folder = nullptr, i = argc;  // too many: usage
     }
     if (!folder) {
-        std::fprintf(stderr, "usage: mkdd [--headless | --offscreen] <folder with the extracted disc: sys/main.dol, sys/boot.bin, files/>\n"
+        std::fprintf(stderr, "usage: mkdd [--headless | --offscreen] <the disc: an image (.iso, .gcm, .ciso) or an extracted folder (sys/, files/)>\n"
                              "       mkdd --bench-record <file.dff> [times] | --render-dff <file.dff> <out.ppm> [loops]\n");
         return 2;
     }
@@ -329,7 +329,6 @@ int main(int argc, char** argv) {
     rt::provide(mkdd::dvd_replacements());
     rt::provide(mkdd::vi_replacements());
     rt::provide(mkdd::thread_replacements());
-    rt::provide(mkdd::sc_replacements());
     rt::provide(mkdd::pad_replacements());
     rt::provide(mkdd::card_replacements());
     rt::provide(mkdd::exi_replacements());
@@ -393,9 +392,8 @@ int main(int argc, char** argv) {
 
     const std::filesystem::path data = qilin::host::user_folder();
     mkdd::Settings settings = mkdd::load_settings(data);
-    // (The Wii's settings, until the os layer answers the GameCube's own from settings.language,
-    // settings.sound, settings.progressive and settings.eu_rgb60: English, 4:3.)
-    mkdd::set_console(1, false, settings.sound);
+    // SRAM's language, sound mode and progressive flag; the progressive setting also stands for the component cable.
+    mkdd::set_console(settings.language, settings.sound != 0, settings.progressive);
     // The picture's shape: the game's own 4:3, until its cameras can be widened (enhance.hpp).
     float aspect = 4.0f / 3.0f;
     std::unique_ptr<qilin::host::Display> display;

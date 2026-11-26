@@ -1,9 +1,11 @@
-// The video interface's replacements: the retrace, as a timed interrupt from
-// the host clock, and the frame buffer the game hands over each frame, which
-// the renderer will present (roadmap step 4).
+// The video interface's replacements (dolphin/vi): the retrace, as a timed
+// interrupt from the host clock, and the frame buffer the game hands over each
+// frame, which the renderer presents.
 //
-// The rate is 60 Hz: the console's settings report EuRGB60 (sc.cpp), which
-// this game supports, so it runs at the NTSC rate. VIGetTvFormat says so too.
+// The console is NTSC: 59.94 fields a second, interlaced (480i), or the same
+// number of whole frames with progressive scan (480p), which the game offers
+// when a component cable is there (the port's progressive setting stands for
+// the cable) and SRAM's progressive flag or the player says so.
 #include <algorithm>
 #include <chrono>
 #include <atomic>
@@ -22,20 +24,27 @@ using rt::Cpu;
 
 namespace {
 
-constexpr uint64_t kRetraceTicks = kTimerHz / 60;  // 60 Hz until the main thread matches it to the display
+constexpr uint64_t kRetraceTicks = kTimerHz * 1001 / 60000;  // 59.94 Hz until the main thread matches it to the display
 // The retrace period in time-base ticks: set by the main thread, read by the game's.
 std::atomic<uint64_t> g_period{kRetraceTicks};
-constexpr uint32_t kVI_EURGB60 = 5;
 constexpr uint32_t kRetraceQueue = 0x00000100u;  // threads in VIWaitForRetrace (a key of our own)
 
 uint32_t g_pre_cb = 0, g_post_cb = 0;
 uint32_t g_retraces = 0;       // VIGetRetraceCount
 uint64_t g_next_retrace = 0;   // time base of the next retrace
-uint32_t g_next_fb = 0, g_current_fb = 0;
+// What the game has set, what VIFlush has passed on for the next retrace, and
+// what is on the screen: the hardware's registers change only at a retrace,
+// and only after a flush.
+struct Picture {
+    uint32_t fb = 0;      // the frame buffer (VISetNextFrameBuffer)
+    bool black = true;    // VISetBlack
+    uint32_t width = 0, height = 0;  // the frame buffer's size (VIConfigure)
+    bool progressive = false;
+};
+Picture g_set, g_flushed, g_shown;
+bool g_flush_pending = false;
 uint32_t g_frames = 0;  // frame buffers handed over
 std::atomic<uint32_t> g_frames_seen{0};  // the same, for other threads
-bool g_black = true;
-uint32_t g_mode = 0;           // the GXRenderModeObj last configured
 
 // How on time the retraces are (the host's timers and the guest's load decide):
 // for the five-second report, and the frame-time overlay.
@@ -141,10 +150,8 @@ void poll_retrace() {
             ++g_retraces;
             if (g_retraces % 300 == 0) report();
             if (g_pre_cb) guest_callback(c, g_pre_cb, g_retraces, 0);
-            g_current_fb = g_next_fb;  // VIFlush'd settings take effect at the retrace
-            // The render mode's frame buffer size: fbWidth at +4, xfbHeight at +8.
-            const uint32_t w = g_mode ? rt::peek16(g_mode + 4) : 0, h = g_mode ? rt::peek16(g_mode + 8) : 0;
-            show_frame(g_black ? 0 : g_current_fb, w, h);
+            if (g_flush_pending) g_shown = g_flushed, g_flush_pending = false;
+            show_frame(g_shown.black ? 0 : g_shown.fb, g_shown.width, g_shown.height);
             if (g_post_cb) guest_callback(c, g_post_cb, g_retraces, 0);
             wake_all(c, kRetraceQueue);
         });
@@ -175,37 +182,51 @@ void VIWaitForRetrace(Cpu& c) {
     while (g_retraces == start) wait_on(c, kRetraceQueue);
 }
 
-void VIConfigure(Cpu& c) { g_mode = c.r[3]; }
-void VIFlush(Cpu&) {}
+// VIConfigure(GXRenderModeObj*): the TV mode at +0 (format in the bits above
+// the two of the scan mode: 0 interlaced, 1 double-strike, 2 progressive), the
+// frame buffer's width at +4 and height at +8.
+void VIConfigure(Cpu& c) {
+    const uint32_t mode = c.r[3], tv = rt::peek32(mode);
+    if (tv >> 2 != 0) rt::fatal(&c, "VIConfigure for TV format %u: this is an NTSC console (0)", tv >> 2);
+    g_set.width = rt::peek16(mode + 4);
+    g_set.height = rt::peek16(mode + 8);
+    g_set.progressive = (tv & 3) == 2;
+}
+void VIFlush(Cpu&) {
+    g_flushed = g_set;
+    g_flush_pending = true;
+}
 void VISetNextFrameBuffer(Cpu& c) {
-    g_next_fb = c.r[3];
+    g_set.fb = c.r[3];
     ++g_frames;
     g_frames_seen.store(g_frames, std::memory_order_relaxed);
 }
-void VISetBlack(Cpu& c) { g_black = c.r[3] != 0; }
+void VIGetNextFrameBuffer(Cpu& c) { c.r[3] = g_set.fb; }
+void VIGetCurrentFrameBuffer(Cpu& c) { c.r[3] = g_shown.fb; }
+void VISetBlack(Cpu& c) { g_set.black = c.r[3] != 0; }
 void VIGetRetraceCount(Cpu& c) { c.r[3] = g_retraces; }
-void VIGetTvFormat(Cpu& c) { c.r[3] = kVI_EURGB60; }
-void VIGetDTVStatus(Cpu& c) { c.r[3] = 0; }  // no component cable: interlaced or EuRGB60 only
-
-// Screen-burn dimming: the Wii dims the picture after minutes without input.
-// Not here (a PC monitor isn't a plasma TV), so these only answer.
-void VIResetDimmingCount(Cpu& c) { c.r[3] = 1; }
-void VIEnableDimming(Cpu&) {}
+// The field after the one being shown: interlaced, they alternate with the
+// retraces; progressive, every frame is whole and the answer is always 1
+// (VIGetNextField, 800B064C, with the picture at its default position).
+void VIGetNextField(Cpu& c) { c.r[3] = g_shown.progressive ? 1 : (g_retraces & 1) ^ 1; }
+void VIGetTvFormat(Cpu& c) { c.r[3] = 0; }  // VI_NTSC
+void VIGetDTVStatus(Cpu& c) { c.r[3] = component_cable(); }
 
 const rt::Provided kReplacements[] = {
-    {0x80213B8Cu, "VIResetDimmingCount", VIResetDimmingCount},
-    {0x80215604u, "VIEnableDimming", VIEnableDimming},
-    {0x80212028u, "VIInit", VIInit},
-    {0x80211C78u, "VISetPreRetraceCallback", VISetPreRetraceCallback},
-    {0x80211CBCu, "VISetPostRetraceCallback", VISetPostRetraceCallback},
-    {0x80212570u, "VIWaitForRetrace", VIWaitForRetrace},
-    {0x80212AF0u, "VIConfigure", VIConfigure},
-    {0x80213528u, "VIFlush", VIFlush},
-    {0x8021363Cu, "VISetNextFrameBuffer", VISetNextFrameBuffer},
-    {0x802136A8u, "VISetBlack", VISetBlack},
-    {0x80213720u, "VIGetRetraceCount", VIGetRetraceCount},
-    {0x802137B8u, "VIGetTvFormat", VIGetTvFormat},
-    {0x80213818u, "VIGetDTVStatus", VIGetDTVStatus},
+    {0x800AEEB0u, "VISetPreRetraceCallback", VISetPreRetraceCallback},
+    {0x800AEEF4u, "VISetPostRetraceCallback", VISetPostRetraceCallback},
+    {0x800AF1D8u, "VIInit", VIInit},
+    {0x800AF688u, "VIWaitForRetrace", VIWaitForRetrace},
+    {0x800AFB50u, "VIConfigure", VIConfigure},
+    {0x800B0378u, "VIFlush", VIFlush},
+    {0x800B04A8u, "VISetNextFrameBuffer", VISetNextFrameBuffer},
+    {0x800B0514u, "VIGetNextFrameBuffer", VIGetNextFrameBuffer},
+    {0x800B051Cu, "VIGetCurrentFrameBuffer", VIGetCurrentFrameBuffer},
+    {0x800B0524u, "VISetBlack", VISetBlack},
+    {0x800B05A0u, "VIGetRetraceCount", VIGetRetraceCount},
+    {0x800B064Cu, "VIGetNextField", VIGetNextField},
+    {0x800B0780u, "VIGetTvFormat", VIGetTvFormat},
+    {0x800B07E8u, "VIGetDTVStatus", VIGetDTVStatus},
 };
 
 }  // namespace
@@ -224,7 +245,7 @@ void apply_period() {
 }  // namespace
 
 void set_retrace_rate(uint32_t num, uint32_t den) {
-    if (num == 0 || den == 0) num = 60, den = 1;
+    if (num == 0 || den == 0) num = 60000, den = 1001;  // the console's own
     g_base_period.store(double(kTimerHz) * double(den) / double(num), std::memory_order_relaxed);
     apply_period();
 }

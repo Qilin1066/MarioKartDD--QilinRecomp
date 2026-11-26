@@ -1,5 +1,5 @@
-// Threads, mutexes, condition variables, message queues and alarms
-// (revolution/os's OSThread, OSMutex, OSMessage, OSAlarm), natively.
+// Threads, mutexes, message queues and alarms (dolphin/os's OSThread,
+// OSMutex, OSMessage, OSAlarm), natively.
 //
 // Each guest thread runs on a host thread of its own, with its own registers
 // (a Cpu), and exactly one of them runs at a time: the scheduler hands the
@@ -12,7 +12,8 @@
 //
 // Guest structures stay up to date where the game can read them: an OSThread's
 // state, suspend count, priority and exit value, the current thread at
-// 0x800000E4, a mutex's owner and count, a message queue's ring. Who waits on
+// 0x800000E4 and its context at 0x800000D4, the list of active threads from
+// 0x800000DC, a mutex's owner and count, a message queue's ring. Who waits on
 // what is kept here, by the guest address of the queue waited on.
 #include <algorithm>
 #include <bit>
@@ -38,6 +39,7 @@
 #endif
 
 #include "boot.hpp"
+#include "build.hpp"
 #include "os.hpp"
 #include "threads.hpp"
 #include "priority.hpp"
@@ -49,16 +51,18 @@ using rt::Cpu;
 
 namespace {
 
-// OSThread (0x318 bytes): its OSContext, then these.
+// OSThread (0x318 bytes), as OSCreateThread (800EB780) and __OSThreadInit
+// (800EB010) fill it: its OSContext (0x2C8 bytes), then these.
 constexpr uint32_t kState = 0x2C8, kAttr = 0x2CA, kSuspend = 0x2CC, kPriority = 0x2D0, kBase = 0x2D4, kVal = 0x2D8,
-                   kQueue = 0x2DC, kQueueJoin = 0x2E8, kStackBase = 0x304, kStackEnd = 0x308;
+                   kQueue = 0x2DC, kQueueJoin = 0x2E8, kActiveNext = 0x2FC, kActivePrev = 0x300, kStackBase = 0x304,
+                   kStackEnd = 0x308;
 enum : uint16_t { kReady = 1, kRunning = 2, kWaiting = 4, kMoribund = 8 };
 constexpr uint32_t kCurrentThread = 0x800000E4u, kDefaultThreadPtr = 0x800000D8u;
+constexpr uint32_t kCurrentContext = 0x800000D4u, kCurrentContextPhysical = 0x800000C0u;
 constexpr uint32_t kActiveHead = 0x800000DCu, kActiveTail = 0x800000E0u;
-constexpr uint32_t kDefaultThread = 0x803CB098u;     // __OSThreadInit's DefaultThread
-constexpr uint32_t kMainStackEnd = 0x804192E4u;      // _stack_end
-constexpr uint32_t kOSExitThread = 0x80208838u;      // a new thread's return address
-constexpr uint32_t kFpuContextFlag = 0x803CAD30u;    // OSCreateThread fills FPRs with -1 when set
+constexpr uint32_t kDefaultThread = build::kDefaultThread;
+constexpr uint32_t kOSExitThread = build::kOSExitThread;
+constexpr uint32_t kFpeHandler = build::kErrorTable + 4 * 16;  // OSCreateThread fills FPRs with -1 when one is set
 constexpr size_t kHostStack = 16u << 20;
 
 struct ThreadCancelled {};
@@ -82,7 +86,6 @@ struct Thread {
     uint32_t entry = 0;
     bool started = false, go = false;
     bool cancelled = false;  // under g_lock: wake a parked host so it can unwind
-    uint64_t sleep_generation = 0;
     std::condition_variable cv;
     std::vector<uint32_t> mutexes;  // held, for OSExitThread's unlock
 };
@@ -93,9 +96,29 @@ Thread* g_current = nullptr;
 std::deque<Thread*> g_ready[32];
 std::map<uint32_t, std::deque<Thread*>> g_waiters;
 std::set<uint32_t> g_owned;  // the mutexes that have an owner
+int g_scheduler_off = 0;     // OSDisableScheduler's count: no switch while it's above 0
+
+// The OS's list of active threads (__OSActiveThreadQueue), through each
+// thread's link at +0x2FC: appended on creation, left on exit once detached.
+void active_add(uint32_t t) {
+    const uint32_t tail = rt::peek32(kActiveTail);
+    if (tail) rt::poke32(tail + kActiveNext, t);
+    else rt::poke32(kActiveHead, t);
+    rt::poke32(t + kActivePrev, tail);
+    rt::poke32(t + kActiveNext, 0);
+    rt::poke32(kActiveTail, t);
+}
+void active_remove(uint32_t t) {
+    const uint32_t next = rt::peek32(t + kActiveNext), prev = rt::peek32(t + kActivePrev);
+    if (next) rt::poke32(next + kActivePrev, prev);
+    else rt::poke32(kActiveTail, prev);
+    if (prev) rt::poke32(prev + kActiveNext, next);
+    else rt::poke32(kActiveHead, next);
+}
 
 void store(Thread* t) {
-    rt::poke16(t->guest + kState, t->state);
+    // A finished thread reads as moribund until it's detached, then as 0.
+    rt::poke16(t->guest + kState, t->state == kMoribund && t->detached ? 0 : t->state);
     rt::poke32(t->guest + kSuspend, static_cast<uint32_t>(t->suspend));
     rt::poke32(t->guest + kPriority, static_cast<uint32_t>(t->priority));
     rt::poke32(t->guest + kQueue, t->waiting_on);
@@ -155,6 +178,8 @@ void switch_to(Thread* next, bool leaving = false) {
     store(next);
     g_current = next;
     rt::poke32(kCurrentThread, next->guest);
+    rt::poke32(kCurrentContext, next->guest);  // its OSContext is its first member
+    rt::poke32(kCurrentContextPhysical, next->guest & 0x3FFFFFFFu);
     if (!next->started) start_host(next);
     {
         std::lock_guard l(g_lock);
@@ -241,7 +266,7 @@ void sleep_on(Cpu& c, uint32_t queue) {
 
 // Switch to a thread readied by the running one, if it outranks it.
 void reschedule(Cpu& c) {
-    if (in_interrupt()) return;  // the interrupt's end switches (preempt)
+    if (in_interrupt() || g_scheduler_off > 0) return;  // the interrupt's end switches (preempt)
     Thread* me = g_current;
     Thread* best = best_ready();
     if (best && best->priority < me->priority) {
@@ -251,8 +276,9 @@ void reschedule(Cpu& c) {
     (void)c;
 }
 
-// ---- alarms: by guest address; an OSAlarm keeps its handler at +0 and the
-// time it fires at +8, for code that reads them.
+// ---- alarms: by guest address; an OSAlarm keeps its handler at +0, the time
+// it fires at +8, its period at +0x18 and a periodic alarm's start at +0x20
+// (OSSetAlarm, 800E667C; OSSetPeriodicAlarm, 800E66E4), for code that reads them.
 struct Alarm {
     uint64_t fire = 0, period = 0;
     uint32_t handler = 0;
@@ -260,13 +286,6 @@ struct Alarm {
 };
 std::map<uint32_t, Alarm> g_alarms;
 uint64_t g_generation = 0;
-struct Wake {
-    uint64_t at;
-    uint32_t thread;
-    uint64_t generation;
-};
-uint64_t g_sleep_generation = 0;
-std::vector<Wake> g_sleepers;  // OSSleepTicks
 
 void poll_alarms() {
     const uint64_t now = time_base();
@@ -288,27 +307,11 @@ void poll_alarms() {
             guest_callback(c, handler, alarm, g_current ? g_current->guest : 0);
         });
     }
-    for (size_t i = 0; i < g_sleepers.size();) {
-        if (g_sleepers[i].at <= now) {
-            const uint32_t t = g_sleepers[i].thread;
-            const uint64_t generation = g_sleepers[i].generation;
-            g_sleepers.erase(g_sleepers.begin() + static_cast<long>(i));
-            post_interrupt([t, generation](Cpu& c) {
-                const auto it = g_threads.find(t);
-                if (it != g_threads.end() && it->second->sleep_generation == generation &&
-                    it->second->state == kWaiting && it->second->waiting_on == t + kQueue)
-                    wake_all(c, t + kQueue);
-            });
-        } else {
-            ++i;
-        }
-    }
 }
 uint64_t alarm_deadline() {
     uint64_t t = UINT64_MAX;
     for (const auto& [a, al] : g_alarms)
         if (al.handler) t = std::min(t, al.fire);
-    for (const auto& s : g_sleepers) t = std::min(t, s.at);
     return t;
 }
 
@@ -336,6 +339,7 @@ void OSCreateThread(Cpu& c) {  // (thread, func, param, stack, stackSize, priori
     if (auto it = g_threads.find(t); it != g_threads.end()) {
         if (it->second->state != kMoribund)
             rt::fatal(&c, "OSCreateThread on %08X, a thread that is still alive", t);
+        if (!it->second->detached) active_remove(t);  // never joined or detached: the OS would leave it listed
         g_threads.erase(it);
     }
     auto th = std::make_shared<Thread>();
@@ -356,7 +360,7 @@ void OSCreateThread(Cpu& c) {  // (thread, func, param, stack, stackSize, priori
     n.r[13] = c.r[13];
     n.r[3] = param;
     n.lr = kOSExitThread;
-    if (rt::peek32(kFpuContextFlag) != 0)
+    if (rt::peek32(kFpeHandler) != 0)
         for (int i = 0; i < 32; ++i) n.ps0[i] = n.ps1[i] = std::bit_cast<double>(~uint64_t{0});
     // The guest's OSThread, as OSCreateThread fills it.
     std::memset(rt::guest_ptr(t + kState), 0, 0x318 - kState);
@@ -369,6 +373,7 @@ void OSCreateThread(Cpu& c) {  // (thread, func, param, stack, stackSize, priori
     Thread* p = th.get();
     g_threads[t] = std::move(th);
     store(p);
+    active_add(t);
     c.r[3] = 1;
 }
 
@@ -408,7 +413,7 @@ void OSYieldThread(Cpu& c) {
     deliver_interrupts(c);
     Thread* me = g_current;
     Thread* best = best_ready();
-    if (best && best->priority <= me->priority) {
+    if (best && best->priority <= me->priority && g_scheduler_off <= 0) {
         make_ready(me);
         switch_to(best);
     }
@@ -440,8 +445,7 @@ void OSCancelThread(Cpu& c) {
     }
     t->state = kMoribund;
     t->waiting_on = 0;
-    t->sleep_generation = 0;
-    std::erase_if(g_sleepers, [t](const Wake& wake) { return wake.thread == t->guest; });
+    if (t->detached) active_remove(t->guest);
     store(t);
     {
         std::lock_guard lock(g_lock);
@@ -453,30 +457,32 @@ void OSCancelThread(Cpu& c) {
     reschedule(c);
 }
 
-void OSJoinThread(Cpu& c) {  // (thread, val*) -> BOOL
+void OSDetachThread(Cpu& c) {  // nobody will join it: a finished one leaves the active list now
     Thread* t = thread_at(c, c.r[3]);
-    const uint32_t out = c.r[4];
-    if (t->detached) {
-        c.r[3] = 0;
-        return;
-    }
-    while (t->state != kMoribund) sleep_on(c, t->guest + kQueueJoin);
-    if (out) rt::poke32(out, rt::peek32(t->guest + kVal));
-    c.r[3] = 1;
+    const bool was = t->detached;
+    t->detached = true;
+    rt::poke16(t->guest + kAttr, rt::peek16(t->guest + kAttr) | 1);
+    if (t->state == kMoribund && !was) active_remove(t->guest);
+    store(t);
+    wake_all(c, t->guest + kQueueJoin);
 }
+
+void OSIsThreadTerminated(Cpu& c) {  // moribund, or finished and detached (0)
+    const uint16_t state = rt::peek16(c.r[3] + kState);
+    c.r[3] = state == kMoribund || state == 0;
+}
+
+// While the count is above 0 the running thread keeps the CPU whatever is
+// readied; as on the OS, enabling again doesn't itself switch (the next
+// interrupt's end, or the next call that would, does).
+void OSDisableScheduler(Cpu& c) { c.r[3] = static_cast<uint32_t>(g_scheduler_off++); }
+void OSEnableScheduler(Cpu& c) { c.r[3] = static_cast<uint32_t>(g_scheduler_off--); }
 
 void OSSleepThread(Cpu& c) { sleep_on(c, c.r[3]); }
 void OSWakeupThread(Cpu& c) { wake_all(c, c.r[3]); }
 void OSInitThreadQueue(Cpu& c) {
     rt::poke32(c.r[3], 0);
     rt::poke32(c.r[3] + 4, 0);
-}
-
-void OSSleepTicks(Cpu& c) {  // (OSTime ticks): r3:r4
-    const uint64_t ticks = arg64(c, 3);
-    g_current->sleep_generation = ++g_sleep_generation;
-    g_sleepers.push_back({time_base() + ticks, g_current->guest, g_current->sleep_generation});
-    sleep_on(c, g_current->guest + kQueue);
 }
 
 // ---- mutexes: queue (+0), owner (+8), count (+0xC).
@@ -559,22 +565,6 @@ void OSUnlockMutex(Cpu& c) {
     wake_all(c, m);
 }
 
-// ---- condition variables: a thread queue.
-void OSWaitCond(Cpu& c) {  // (cond, mutex)
-    const uint32_t cond = c.r[3], m = c.r[4];
-    Thread* me = g_current;
-    if (rt::peek32(m + 8) != me->guest) return;
-    const uint32_t count = rt::peek32(m + 0xC);
-    // Releasing the mutex and going to sleep on the condition are one step: the
-    // OS wakes the mutex's waiters with the scheduler off (OSDisableScheduler),
-    // so none of them can signal before this thread is waiting.
-    release_mutex(me, m);
-    wake_waiters(m);
-    sleep_on(c, cond);
-    lock_mutex(c, m);
-    rt::poke32(m + 0xC, count);
-}
-
 // ---- message queues: send queue (+0), receive queue (+8), msgArray (+0x10),
 // msgCount (+0x14), firstIndex (+0x18), usedCount (+0x1C).
 void OSInitMessageQueue(Cpu& c) {  // (mq, msgArray, msgCount)
@@ -654,38 +644,37 @@ void OSCancelAlarm(Cpu& c) {
     g_alarms.erase(c.r[3]);
     rt::poke32(c.r[3], 0);
 }
-void OSSetAlarmUserData(Cpu& c) { rt::poke32(c.r[3] + 0x28, c.r[4]); }
-void OSGetAlarmUserData(Cpu& c) { c.r[3] = rt::peek32(c.r[3] + 0x28); }
 
 const rt::Provided kReplacements[] = {
-    {0x80208024u, "OSGetCurrentThread", OSGetCurrentThread},
-    {0x802085CCu, "OSCreateThread", OSCreateThread},
-    {0x80208C3Cu, "OSResumeThread", OSResumeThread},
-    {0x80208ED4u, "OSSuspendThread", OSSuspendThread},
-    {0x80208590u, "OSYieldThread", OSYieldThread},
-    {0x80208838u, "OSExitThread", OSExitThread},
-    {0x8020891Cu, "OSCancelThread", OSCancelThread},
-    {0x80208AFCu, "OSJoinThread", OSJoinThread},
-    {0x80209068u, "OSSleepThread", OSSleepThread},
-    {0x80209154u, "OSWakeupThread", OSWakeupThread},
-    {0x80208014u, "OSInitThreadQueue", OSInitThreadQueue},
-    {0x802092C8u, "OSSleepTicks", OSSleepTicks},
-    {0x802064A4u, "OSInitMutex", OSInitMutex},
-    {0x802064DCu, "OSLockMutex", OSLockMutex},
-    {0x802065B8u, "OSUnlockMutex", OSUnlockMutex},
-    {0x802066ECu, "OSInitCond", OSInitThreadQueue},
-    {0x802066F0u, "OSWaitCond", OSWaitCond},
-    {0x802067CCu, "OSSignalCond", OSWakeupThread},
-    {0x80205A98u, "OSInitMessageQueue", OSInitMessageQueue},
-    {0x80205AF8u, "OSSendMessage", OSSendMessage},
-    {0x80205BC0u, "OSReceiveMessage", OSReceiveMessage},
-    {0x80205C9Cu, "OSJamMessage", OSJamMessage},
-    {0x801FFCE4u, "OSCreateAlarm", OSCreateAlarm},
-    {0x801FFF44u, "OSSetAlarm", OSSetAlarm},
-    {0x801FFFB4u, "OSSetPeriodicAlarm", OSSetPeriodicAlarm},
-    {0x80200038u, "OSCancelAlarm", OSCancelAlarm},
-    {0x80200458u, "OSSetAlarmUserData", OSSetAlarmUserData},
-    {0x80200460u, "OSGetAlarmUserData", OSGetAlarmUserData},
+    // OSThread.c
+    {0x800EB168u, "OSInitThreadQueue", OSInitThreadQueue},
+    {0x800EB178u, "OSGetCurrentThread", OSGetCurrentThread},
+    {0x800EB184u, "OSIsThreadTerminated", OSIsThreadTerminated},
+    {0x800EB1B8u, "OSDisableScheduler", OSDisableScheduler},
+    {0x800EB1F8u, "OSEnableScheduler", OSEnableScheduler},
+    {0x800EB744u, "OSYieldThread", OSYieldThread},
+    {0x800EB780u, "OSCreateThread", OSCreateThread},
+    {build::kOSExitThread, "OSExitThread", OSExitThread},
+    {0x800EBA4Cu, "OSCancelThread", OSCancelThread},
+    {0x800EBC08u, "OSDetachThread", OSDetachThread},
+    {0x800EBCA8u, "OSResumeThread", OSResumeThread},
+    {0x800EBF30u, "OSSuspendThread", OSSuspendThread},
+    {0x800EC0A0u, "OSSleepThread", OSSleepThread},
+    {0x800EC18Cu, "OSWakeupThread", OSWakeupThread},
+    // OSMutex.c
+    {0x800E9680u, "OSInitMutex", OSInitMutex},
+    {0x800E96B8u, "OSLockMutex", OSLockMutex},
+    {0x800E9794u, "OSUnlockMutex", OSUnlockMutex},
+    // OSMessage.c
+    {0x800E9000u, "OSInitMessageQueue", OSInitMessageQueue},
+    {0x800E9060u, "OSSendMessage", OSSendMessage},
+    {0x800E9128u, "OSReceiveMessage", OSReceiveMessage},
+    {0x800E9204u, "OSJamMessage", OSJamMessage},
+    // OSAlarm.c
+    {0x800E641Cu, "OSCreateAlarm", OSCreateAlarm},
+    {0x800E667Cu, "OSSetAlarm", OSSetAlarm},
+    {0x800E66E4u, "OSSetPeriodicAlarm", OSSetPeriodicAlarm},
+    {0x800E6760u, "OSCancelAlarm", OSCancelAlarm},
 };
 
 }  // namespace
@@ -707,13 +696,16 @@ void init_threads(Cpu& main_cpu) {
     rt::poke16(t + kAttr, 1);
     rt::poke32(t + kBase, 16);
     rt::poke32(t + kVal, 0xFFFFFFFFu);
-    rt::poke32(t + kStackBase, 0x804292E8u);
-    rt::poke32(t + kStackEnd, kMainStackEnd);
-    rt::poke32(kMainStackEnd, 0xDEADBABEu);
-    rt::poke32(kDefaultThreadPtr, t);
+    rt::poke32(t + kStackBase, build::kStackTop);
+    rt::poke32(t + kStackEnd, build::kStackEnd);
+    rt::poke32(build::kStackEnd, 0xDEADBABEu);
+    rt::poke32(kDefaultThreadPtr, t);  // the FPU's owner
     rt::poke32(kCurrentThread, t);
-    rt::poke32(kActiveHead, t);
-    rt::poke32(kActiveTail, t);
+    rt::poke32(kCurrentContext, t);
+    rt::poke32(kCurrentContextPhysical, t & 0x3FFFFFFFu);
+    rt::poke32(kActiveHead, 0);
+    rt::poke32(kActiveTail, 0);
+    active_add(t);
     store(th.get());
     g_threads[t] = std::move(th);
     add_timer_source(poll_alarms, alarm_deadline);
@@ -758,7 +750,7 @@ void run_on_host_thread(void (*fn)(void*), void* arg) {
 }
 
 void preempt(Cpu& c) {
-    if (!g_current) return;
+    if (!g_current || g_scheduler_off > 0) return;
     Thread* best = best_ready();
     if (best && best->priority < g_current->priority) {
         make_ready(g_current);
@@ -777,6 +769,7 @@ void finish_thread(Cpu& c, uint32_t value) {
         wake_waiters(m);
     }
     me->state = kMoribund;
+    if (me->detached) active_remove(me->guest);
     store(me);
     wake_waiters(me->guest + kQueueJoin);
     block(c, true);  // the guest CPU belongs to another thread now; this host thread ends

@@ -1,6 +1,6 @@
-# The runtime (roadmap step 3)
+# The runtime
 
-Last updated 2026-11-18 (v0.11.0). How the lifted game runs: the guest machine, booting, and the native replacements for the libraries the plan replaces (`docs/code-analysis.md`).
+Last updated 2026-11-26. How the lifted game runs: the guest machine, booting, and the native replacements for the OS, DVD and VI libraries. Controllers, audio RAM and the expansion ports are in `input.md`, memory cards in `saves.md`, the disc's formats in `disc.md`, sound in `audio.md`, what the game asks of the GPU in `graphics.md`, the library plan and the names in `code-analysis.md`.
 
 ## Building and running
 
@@ -9,38 +9,122 @@ The game is built only from the player's own `main.dol`; nothing derived from it
 ```sh
 cmake -S . -B build-game -DQILIN_GAME_DOL="<extracted disc>/sys/main.dol"
 cmake --build build-game --target mkdd
-build-game/mkdd "<extracted disc>"      # the folder with sys/ and files/
-                                            # --offscreen: draw without a window; --headless: don't draw
+build-game/mkdd "<the disc>"      # an image (.iso, .gcm, .ciso) or an extracted folder (sys/, files/)
+                                  # --offscreen: draw without a window; --headless: don't draw
 ```
 
-At build time `qilin lift <main.dol> -o build-game/generated --plan data/GM4E01/plan.tsv --files 32` writes the C++ (32 files of functions, the function table, the replaced-function table), which is compiled into `mkdd` with the runtime and the replacements in `mkdd/src/`. A full build takes about 7 minutes on two cores (GCC 14, `-O2`); after that, changes to the replacements rebuild in seconds. The extracted disc is what Dolphin's *Extract Entire Disc* or `wit extract` produces: `sys/main.dol`, `sys/boot.bin`, `sys/fst.bin` and `files/`.
+At build time `qilin lift <main.dol> -o build-game/generated --plan data/GM4E01/plan.tsv --files 32` writes the C++, which is compiled into `mkdd` with the runtime and the replacements in `mkdd/src/`. `-DQILIN_GAME_PLAN=<file>` builds with another plan (for trying a boundary before changing the one in the repository).
 
-## The library plan as data
+The supported build is Mario Kart: Double Dash!! (USA), disc `GM4E01` revision 0. `boot.cpp` checks the disc's ID and revision and main.dol's SHA-256 (`recomp/src/dol.cpp`), and stops on anything else.
 
-`data/GM4E01/plan.tsv` is the plan of `code-analysis.md` as address ranges: lifted, replaced or dropped. `tools/analysis/make_plan.py` writes it from the ported symbols. Narrower ranges override the library they sit in. These are code inside a replaced library that is lifted after all, because it touches no hardware and its exact behaviour matters more than a native version:
+## The library plan
 
-| Range | Lifted | Why |
+`data/GM4E01/plan.tsv` is the plan of `code-analysis.md` as address ranges: lifted, replaced or dropped. For the libraries this document covers:
+
+| Range | Plan | Why |
 |---|---|---|
-| `80200520`–`802008F0` | OSAlloc (heaps), OSArena (arena bounds) | The allocator decides the game's memory layout. |
-| `80201C50`–`80201CDC` | `OSReport` | It formats through MSL's `vprintf` (lifted). |
-| `8020C674`–`8020C728` | `__init_user`, `__init_cpp`, `exit` | The EABI's constructors and destructors. |
-| `801FE598`–`801FE770` | MTX's vector functions | A boundary fix (v0.11.0): the OS range began with three paired-single vector functions. |
-| `8025E6C0`–`8025E840` | CX (`CXGetUncompressedSize`, `CXUncompressLZ`) | A boundary fix (v0.11.0): pure decompression after NAND, before the HOME Button Menu. |
-| `8021636C`–`8021698C` | WBC's API | A boundary fix (v0.10.0): the evidence left WBC/WPAD open by ±8 functions. These seven keep WBC's state and do its calibration maths, so WBC (lifted) runs on to WPAD's first function, `__wpadNoAlloc`. |
+| `80003100`–`80003458` | replaced | `__start` and what it calls: done natively by `boot.cpp`. |
+| `800A9600`–`800A9714` | replaced | PPCArch: the CPU's special registers. |
+| `800AA6B8`–`800AEC3C` | replaced | DVD: the drive is the disc library and a timing model. |
+| `800AEC3C`–`800B0AA0` | replaced | VI: the retrace is a timed interrupt; the picture goes to the renderer. |
+| `800E58D8`–`800EC7B8` | replaced | OS, but for the three below. |
+| `800E6B9C`–`800E6DD0` | lifted | OSAlloc and OSArena: bookkeeping that decides the game's memory layout. |
+| `800E6DD0`–`800E6F8C` | lifted | `__OSInitAudioSystem`: it runs the SDK's stub program on the DSP, which is emulated (`audio.md`). |
+| `800E8078`–`800E80F8` | lifted | `OSReport`: it formats through MSL's `vprintf`. |
+| `800EC7B8`–`800EC84C` | lifted | `__init_user`, `__init_cpp`, `_ExitProcess`: the EABI's constructors. |
+| `801116DC`–`80111854` | replaced | MetroTRK's console procedures: MSL's `__write_console` calls `__TRK_write_console` after the UART, so that one function of the dropped debugger stub is reached. It does nothing. |
 
-GX is lifted whole (v0.8.0, `code-analysis.md`): its command stream is the boundary.
+A replaced function runs only if `mkdd/src` registers a replacement for its address; a call to one without stops the game and names it. `tools/analysis/check_replacements.py` lists those that lifted code calls directly.
 
-One range goes the other way. `801C93D8`–`801C9494`, MetroTRK's `__TRK_write_console`, is replaced by nothing: MSL's `__write_console` passes console output to the debugger after the UART, so that one function of the dropped debugger stub is reached in normal running.
-
-With the plan, the lifter turns every replaced or dropped function into a thunk, `c.hooks->replaced(c, address)`, into the runtime's registry. On the game, **11,535 functions are lifted, 1,759 replaced and 193 dropped, with no stubs: every instruction outside replaced and dropped code is lifted.**
+The game loads no REL modules: `OSLink.c` contributes only `__OSModuleInit` to this DOL, and nothing calls `OSLink`.
 
 ## The guest machine (`runtime/`)
 
-- **Memory:** the 4 GB guest address space is reserved in one block. MEM1 (`0x80000000`, 24 MB), MEM2 (`0x90000000`, 64 MB) and the locked cache (`0xE0000000`, 16 KB) are backed by memory. Lifted code reaches cached MEM1 and MEM2 directly, and everything from `0xC0000000` up through the hooks. There, the uncached mirrors of MEM1 and MEM2 map to the same memory, and the locked cache is plain memory. Hardware registers (`0xCC000000`–`0xCD00FFFF`) go to the game's MMIO handlers (`rt::set_mmio`); anything else stops the runtime with its address.
-- **Dispatcher:** an indirect call searches the function table, which is sorted by address. A target that starts no function is fatal.
-- **Registry:** the game's replacements are registered by address (`rt::provide`). Registering an address the plan lifts or drops, or one address twice, is fatal at start-up. A call to a replaced function with nothing registered stops the runtime, naming the function, its library and its caller.
+- **Memory:** the 4 GB guest address space is reserved in one block; MEM1 (`0x80000000`, 24 MB) and the locked cache (`0xE0000000`, 16 KB) are backed by memory. There is no MEM2. Lifted code reaches cached MEM1 directly and everything from `0xC0000000` up through the hooks: the uncached mirror maps to the same memory, hardware registers (`0xCC000000`–`0xCC008FFF`) go to the game's handlers (`rt::set_mmio`), anything else stops the runtime with its address.
+- **Dispatcher:** an indirect call searches the function table, sorted by address. A target that starts no function is fatal.
+- **Registry:** replacements are registered by address (`rt::provide`). Registering an address the plan lifts or drops, or one address twice, is fatal at start-up.
 - **Fatal errors** print the reason and the guest's call stack, walked through the back chain. The exit status is 70.
-- **Tracing:** with `MKDD_TRACE=1`, every call into a replacement is logged with `r3`, `r4` and the caller. That's how a guest stuck waiting for something shows what it waits for.
+- **Tracing:** with `MKDD_TRACE=1`, every call into a replacement is logged with `r3`, `r4` and the caller.
+
+## Booting (`mkdd/src/boot.cpp`, `build.hpp`)
+
+1. **The disc.** One `qilin::disc::Disc` is opened from the path given (an image or an extracted folder); its main.dol is copied into MEM1.
+2. **Low memory**, as a retail NTSC console's boot ROM (the IPL) and the disc's apploader leave it. Where each value comes from:
+
+   | Address | Value | From |
+   |---|---|---|
+   | `80000000` | the disc header's first 0x20 bytes (ID, magic `C2339F3D`) | the IPL reads them there |
+   | `80000020`, `24` | `0D15EA5E`, 1 | the apploader (its routine at `81200728`) |
+   | `80000028`, `F0` | `01800000`: physical and simulated memory | hardware; BI2's second word (the apploader, `812008A8`) |
+   | `8000002C` | `00000003`: a retail console, HW2 | hardware (`OSGetConsoleType`, `800E5A00`, returns the word) |
+   | `80000030` | 0: no arena low, so OSInit takes the linker's | the apploader |
+   | `80000034`, `38` | `817FECE0`: arena high and the file table's address, `(81800000 − FSTMaxLength) & ~31` | the apploader (`81200A34`); FSTMaxLength is the header's word at 0x42C |
+   | `8000003C` | the header's FSTMaxLength (`1313`) | the apploader |
+   | `800000CC` | 0: NTSC | hardware (Dolphin) |
+   | `800000D0` | `01000000`: 16 MB of ARAM | hardware (Dolphin) |
+   | `800000E8`, `EC` | 0, `81800000`: no debug monitor | BI2's first word (the apploader, `8120087C`) |
+   | `800000F4` | `817FCCE0`: BI2, 0x2000 bytes straight below the file table | the apploader (`81200A4C`) |
+   | `800000F8`, `FC` | 162,000,000 and 486,000,000: the bus and CPU clocks | hardware (Dolphin) |
+   | `800030D8` | 0: system time's offset from the time base | `__OSGetSystemTime` (`800EC35C`) adds it |
+   | `800030E4` | 0: controller 4's buttons at boot | `__check_pad3` (`80003100`) resets on a combination |
+
+   The apploader's addresses are in its own code (the disc's apploader, loaded at `81200000`), read with `qilin disasm`. BI2 lies inside the arena (arena high is the file table); `__start` and OSInit read it before anything is allocated. The time base is the bus clock over four: 40.5 MHz.
+3. **`__start` (`80003154`), natively**, in its order: `r1` (`_stack_addr`, `803E22F8`), `r2` (`803D45A0`) and `r13` (`803D1420`) as `__init_registers` (`800032B0`) sets them; the outermost frame; `__init_data`'s copy and zero tables (`80005544`, `800055D4`, read from guest memory); `DBInit` and `OSInit`; `__init_user` (`800EC7B8`); `main(0, NULL)` (`801CC6A8`); `exit` (`800FFE28`). BI2's debug flag and argument offset are checked to be 0, since the debugger's and the arguments' parts of `__start` are left out on that account.
+
+## Replacements
+
+Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64-bit results), as the EABI passes them. Every address bound was taken from the retail code and checked against `work/symbols.txt`'s names; the structure offsets below were read from this SDK's own functions (named in the sources), not assumed from the Wii's.
+
+### OS (`os.cpp`)
+
+- **`OSInit`** (`800E5B8C`) runs once, in the SDK's order less what only hardware needs (performance counters, exception vectors, caches, memory protection): the boot-info and BI2 pointers, `__PADSpec`, the arena (low `803E4300`, the linker's `__ArenaLo`, since low memory gives none and no debugger is attached; high from `80000034`), the interrupt table cleared and everything masked, `EXIInit` and `SIInit` (other libraries' replacements, called at their addresses), SRAM, `__OSInitAudioSystem` (lifted), the arena zeroed as after a cold boot, interrupts on, `DVDInit`. The drive's inquiry isn't run: its result, the device code in `800030E6`, is stored directly (`8000`: a retail drive).
+- **Interrupts:** `OSDisableInterrupts`, `OSEnableInterrupts`, `OSRestoreInterrupts`, and `PPCMfmsr`/`PPCMtmsr` for code that changes MSR itself, keep one flag, as MSR[EE] does; each thread keeps its own across switches.
+- **Interrupt handlers:** the table is the OS's own at `80003040`, the mask its two words at `800000C4`/`C8` (`__OSSetInterruptHandler`, `__OSGetInterruptHandler`, `__OSMaskInterrupts`, `__OSUnmaskInterrupts`). The numbers, from `__OSDispatchInterrupt` (`800E8C54`): 0–4 memory protection, 5 audio DMA, 6 ARAM, 7 DSP, 8 audio streaming, 9–16 EXI, 17 CP, 18 PE token, 19 PE finish, 20 SI, 21 DVD, 22 reset switch, 23 PI error, 24 VI, 25 debugger, 26 high-speed port. `raise_interrupt(n)` runs a handler as an interrupt, with the number and the current context as the OS passes them; a masked one is held and arrives when the OS unmasks it, as the hardware's line stays up.
+- **Safe points:** interrupts are queued and delivered whenever the guest enables interrupts and inside every replacement that waits or polls. Each is entered with the guest's registers written back, so a delivery is the same as an interrupt arriving at that instruction. Handlers and callbacks run on a fresh frame below the interrupted thread's stack, with interrupts off and every register restored afterwards. If one wakes a thread of higher priority, the switch happens right after it.
+- **Contexts:** thread switching is native, so `OSSetCurrentContext`, `OSGetCurrentContext` and `OSClearContext` keep only the words in low memory that lifted interrupt handlers (GX, AI, DSP, JAudio) set around their callbacks. `OSFillFPUContext` and `OSGetStackPointer` serve the game's crash screen.
+- **Caches:** every flush and invalidate is a no-op, because the host is coherent; `DCZeroRange` zeroes memory. The locked cache's DMA (`LCStoreBlocks`, `LCStoreData`) is a copy done at once.
+- **Time:** the time base counts at 40.5 MHz by the host's steady clock, from the PC's local date and time counted from 1 January 2000, as the console's does from its clock chip (`OSGetTime`, `OSGetTick`, `__OSGetSystemTime`). `OSTicksToCalendarTime` is exact for any date.
+- **SRAM** (`OSRtc.c`): the console's settings live where the SDK keeps its copy (`80375620`), filled from the port's settings instead of the clock chip's memory over EXI: language, the stereo flag, the progressive flag, with the checksum the SDK computes. `OSGetSoundMode`, `OSSetSoundMode`, `OSGetProgressiveMode`, `OSSetProgressiveMode`, the wireless-pad and Game Boy Player words, and the lock and unlock calls work on it. What the game changes is kept until the program ends; it isn't written back to the settings file yet.
+- **Reset** (`OSReset.c`): `OSResetSystem` calls the registered reset functions as the OS does (each with FALSE until all agree, then with TRUE). A restart or hot reset starts the program again with the same command line (`restart.cpp`); a hot reset to the console's menu closes it. The shutdown form isn't modelled and stops the runtime. `OSGetResetSwitchState` reads `g_reset_button` (`os.hpp`), which nothing sets yet.
+- **Errors:** `OSPanic` is fatal. `OSSetErrorHandler` keeps the handlers in the OS's table, never called: a fault in the guest stops the runtime with its own report. A handler for floating-point exceptions is logged; none are raised.
+- **Console output:** the C library's console writes go to the debug serial port (`InitializeUART`, `WriteUARTN`), which a retail console doesn't have; here they become the log's `game: ...` lines.
+- **The IPL's font** (`OSFont.c`): only `OSGetFontEncode` is in the DOL (it answers ANSI); the game doesn't load the ROM font.
+
+### Threads (`threads.cpp`)
+
+- **How they run:** each guest thread runs on a host thread of its own (16 MB host stack) with its own registers, and exactly one runs at a time. The scheduler hands over where the OS would, with the OS's rules: priorities 0–31, first come first served within one, suspend counts, threads created suspended, priority lent through mutexes.
+- **Yield is a safe point**, and so is the idle loop: with every thread blocked, the blocked thread sleeps to the next timer deadline and delivers interrupts. If nothing can ever wake a thread, the runtime reports a deadlock.
+- **Guest-visible state:** an `OSThread`'s state, suspend count, priority and exit value; the current thread at `800000E4` and its context at `800000D4`; the list of active threads from `800000DC`; a mutex's owner and count; a message queue's ring; an alarm's handler, fire time and period.
+- **Covered** (all that is in this DOL): create, resume, suspend, yield, exit, cancel, detach, `OSIsThreadTerminated`, sleep and wake on a thread queue, `OSDisableScheduler`/`OSEnableScheduler` (a count; enabling doesn't itself switch, as on the OS); mutexes; message queues (send, jam, receive); alarms, one-shot and periodic. This SDK build has no `OSJoinThread`, conditions or `OSSleepTicks`.
+- **Tested without the game** (`mkdd/tests/threads_test.cpp`): the real scheduler and interrupt layer run small guest programs written in C++, and the order of events is checked against the OS's rules: preemption on resume; blocking receive and the send that preempts; queue order, a full queue and jam; a mutex, recursion included; priority inheritance and its withdrawal on suspend and cancel; yield within a priority; suspend counts; exit values, detaching and the active list; the scheduler switched off; an alarm firing while every thread waits; interrupts held by the CPU's flag and by the OS's mask; SRAM's sound mode, lock and checksum; calendar dates; `OSResetSystem` closing and restarting the program.
+
+### DVD (`dvd.cpp`)
+
+- **The disc:** every read is by disc offset through `qilin::disc::Disc` (`disc.md`), image or folder alike. The file table is also in guest memory where the apploader puts it, though no lifted code reads it.
+- **Lookups** resolve as the SDK does: from the root, `.` and `..`, without case. Long names are allowed, as OSInit sets the SDK's flag for them.
+- **Structures**, from this SDK's code: a command block's state at +0x0C (0 done, 1 busy, 2 waiting, 10 cancelled), offset, length and buffer at +0x10, +0x14, +0x18, bytes transferred at +0x20; a file's start in bytes at +0x30, its length at +0x34. The bounds `DVDReadPrio` and `DVDReadAsyncPrio` panic on stop the runtime here.
+- **The drive** runs one command at a time, the rest waiting by priority, each finishing as an interrupt after the time a drive takes: 2 MiB/s at the start of the disc to 3.125 at the end (Dolphin's figures, taken as linear in the offset), plus a seek of 20–120 ms when the head moves. The data reaches guest memory when the read completes. A synchronous read sleeps its thread until then, so others run. `MKDD_DVD_SPEED=<n>` divides the times (0: none), for tests.
+- **Simplified:** a long read completes in one piece (the SDK splits it into 512 KB transfers and advances the count after each); there are no drive errors, no cover, no audio streaming.
+- **Covered:** `DVDInit`, `DVDConvertPathToEntrynum`, `DVDFastOpen`, `DVDOpen`, `DVDClose`, `DVDReadPrio`, `DVDReadAsyncPrio`, `DVDCancel`, `DVDGetCommandBlockStatus`, `DVDGetDriveStatus`, `DVDCheckDisk`, `DVDGetCurrentDiskID`: every DVD function lifted code calls directly.
+
+### VI (`vi.cpp`, `video.cpp`)
+
+- **The retrace** is a timed interrupt from the host clock at the NTSC rate, 60000/1001 Hz, until the main loop matches it to the display (`set_retrace_rate`; 0/0 returns to the console's own). It counts, runs the pre-retrace callback, applies what `VIFlush` passed on (frame buffer, black, size, scan mode), hands the picture to the main thread (`video.cpp`), runs the post-retrace callback and wakes the threads in `VIWaitForRetrace`. More than a frame late, the schedule restarts from now rather than posting the missed retraces in a burst.
+- **Settings take effect at a retrace after `VIFlush`**, as the hardware's registers do: `VISetNextFrameBuffer`, `VISetBlack`, `VIConfigure`. `VIGetNextFrameBuffer` and `VIGetCurrentFrameBuffer` read the two sides of that.
+- **Modes:** `VIGetTvFormat` says NTSC; `VIConfigure` accepts NTSC modes (interlaced, double-strike, progressive) and stops on another TV format. `VIGetDTVStatus` reports a component cable when the progressive setting is on, which is what makes the game offer progressive scan. `VIGetNextField` alternates with the retraces when interlaced and is constant when progressive.
+- **Not in:** `VIGetCurrentLine` (nothing calls it).
+
+## Hardware registers (`hw.cpp`)
+
+Each device maps its own ranges of `0xCC000000`–`0xCC008FFF`: the GPU's CP (`CC000000`), PE (`CC001000`), PI (`CC003000`) and write-gather pipe (`CC008000`) in `gpu.cpp`; the DSP (`CC005000`) and AI (`CC006C00`) in `dsp.cpp`; the memory interface (`CC004000`) in `hw.cpp`, where only the two counters GX's abort samples (+0x4E, +0x50) read, as 0. An access outside every range, or to another MI register, is fatal and names the address. VI's, SI's, EXI's and the DVD interface's registers have no device: their libraries are replaced above them.
+
+## Poll loops
+
+Code that waits for an interrupt by spinning would never see it, because interrupts arrive at safe points. The lifter finds such loops (`recompiler-core.md`) and their back edges call the runtime's idle hook (`poll_loop`), which delivers what's due or sleeps until the next timed event, a millisecond at most.
+
+## The host's side, as inherited
+
+The sections from here to "Frame pacing, sound, logs" are the base project's (a Wii game's port), kept because the design they describe is this port's too; where they speak of the Wii Remote, MEM2, 16:9 or AX they describe the base. What differs for this game is in `graphics.md`, `input.md`, `audio.md` and `enhancements.md`.
 
 ## The host platform (`host/`, v0.9.0)
 
@@ -49,88 +133,6 @@ With the plan, the lifter turns every replaced or dropped function into a thunk,
 - **Input:** the first SDL gamepad (any, by an Xbox pad's button names) and the keyboard. Arrows are the D-pad, X and Z are A and B, C or Space is Y, Enter is Start, Backspace is View, H is Guide (Escape and F1 open the settings menu). The left stick counts as the D-pad past half way. Rumble goes to the pad.
 - **Vulkan:** `Gpu` makes a Vulkan 1.3 device, preferring a discrete GPU. It requires dynamic rendering and synchronization2 (both in v3dv's set) and names whatever a device lacks. `Display` presents through a FIFO swapchain, rebuilt when the window changes. Headless, it draws into an image of its own, which `qilin_vktest` reads back to check the letterboxing (skipped where there's no Vulkan 1.3 device; it passes on Mesa's llvmpipe).
 - **Frames:** at each retrace VI hands over the frame buffer the game set (`video.cpp`), and the main thread shows it at 16:9, letterboxed. For now that's the XFB in guest memory, YUV 4:2:2, converted on the CPU. The renderer's EFB copies will take its place.
-
-## Booting (`mkdd/src/boot.cpp`)
-
-1. **Load and check.** `main.dol` must be the supported build (SHA-256); its image is copied into MEM1.
-2. **Boot information.** Low memory gets what the boot program, IOS53 (the game's IOS) and the apploader leave on a retail console. That covers the disc header, MEM1 and MEM2 sizes and arenas, the IPC buffer, the clocks, the console type and the video mode. The values are Dolphin's (hardware observations; facts only, `prior-art.md`). `hardware_access.py` now classifies low memory too: lifted code reads only the bus clock (`0x800000F8`), from 24 instructions that turn ticks into milliseconds.
-3. **`__start`, natively.** The runtime does what `__start` does, in the same order:
-   - set `r1`, `r2` and `r13`;
-   - write the outermost frame (back chain and LR of −1);
-   - run `__init_data`'s copy and zero tables (read from guest memory);
-   - call `DBInit` and `OSInit`, then `__init_user` (the static constructors);
-   - call `main(0, NULL)`, then `exit`.
-
-   There's no debugger, no BI2 and no arguments.
-
-## Replacements so far
-
-Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64-bit results), as the EABI passes them.
-
-- **OS start-up:**
-  - `OSInit` runs once and sets the four arena bounds. MEM1's arena starts after the main stack (`80429300`), as with no debugger attached; the others come from what IOS left (`81800000`, `90000800`–`935E0000`).
-  - `DBInit` does nothing.
-  - `OSPanic` and `OSSetErrorHandler`: a panic is fatal, and error handlers are kept but never called.
-- **CPU registers:** `PPCSync`; `PPCHalt` ends the process; `PPCMfhid2`/`PPCMthid2`.
-- **Interrupts:** `OSDisableInterrupts`, `OSEnableInterrupts` and `OSRestoreInterrupts` keep one flag, as MSR[EE] does, and each thread keeps its own across switches. `OSInit` ends with interrupts on, as the real one does; without that, nothing queued for the main thread ever arrives.
-- **Caches:** every flush and invalidate is a no-op, because the host is coherent. `DCZeroRange` zeroes memory.
-- **Locked cache:** its DMA (`LCLoadBlocks`, `LCStoreBlocks`, `LCStore`) is a copy done at once, so `LCQueueWait` has nothing to wait for.
-- **Time:** the time base counts at 60.75 MHz, by the host's steady clock (`OSGetTime`, `OSGetTick`).
-  - It starts where the console's would: at the PC's local date and time, counted from 1 January 2000, 00:00. So `OSGetTime` is the date, as on a Wii (v0.13.6; before, it counted from start-up and every date was 1 January 2000).
-  - `OSTicksToCalendarTime` turns it into a date: Gregorian, exact for any date, before 2000 included.
-- **Leaving:** the game's exit code (`800E249C`, behind the HOME Button Menu and the power and reset buttons) blanks the screen, calls one of these, then spins, because on a Wii they never return.
-  - `OSReturnToMenu`, `OSReturnToDataManager` and `OSShutdownSystem` close the program, logging which the game chose.
-  - `OSRestart` (Reset) starts it again with the same command line (`restart.cpp`). On Windows it uses the command line exactly as given, quoting and all; elsewhere it uses `execvp`. Saves are already on disk, as NAND writes are synchronous.
-- **MetroTRK's host files:** MSL's `fopen`, which the game calls from four places, opens files on a debugger's host through MetroTRK. With no debugger, that open fails (returns 1), so the replacement does just that and `fopen` returns NULL, as on a retail Wii (v0.13.7; before, the call reached dropped code and stopped the game).
-- **Every replaced function that lifted code calls directly has a replacement** (v0.13.6), and no lifted code calls dropped code (v0.13.7). `tools/analysis/check_replacements.py` checks both from `qilin cfg --json`, deciding each address by the narrowest plan range as the lifter does. It fails if anything is missing, listing it with its callers. With `--dol` it checks function pointers too (v0.19.0): every function whose address lifted code builds or a data word holds, outside libraries whose tables only their own replaced code reads. A pointer made at run time by replaced code still stops the game, by name, if nothing answers it.
-- **Memory sizes and buttons:** the memory-size queries, `OSSetResetCallback` and `OSSetPowerCallback`.
-- **Threads** (`threads.cpp`):
-  - **How they run:** each guest thread runs on a host thread of its own (16 MB host stack) with its own registers, and exactly one runs at a time.
-  - **When they switch:** the scheduler hands over where the OS would, with the OS's rules: priorities 0–31, first come first served within one, suspend counts, threads created suspended. A switch happens when a thread blocks, yields or wakes one of higher priority.
-  - **Yield is a safe point:** the game waits for its loader thread in a loop around `OSYieldThread`, polling for an asynchronous read, so a yield delivers interrupts, as one would arrive mid-loop on the Wii.
-  - **The idle loop:** with every thread blocked, the blocked thread acts as the OS's idle loop. It sleeps to the next timer deadline and delivers interrupts. If nothing can ever wake a thread, the runtime stops and reports a deadlock.
-  - **Guest-visible state:** guest structures stay current where the game can read them: an `OSThread`'s state, suspend count, priority and exit value, the current thread at `0x800000E4`, a mutex's owner and count, a message queue's ring.
-  - **Covered:**
-    - threads: create, resume, suspend, yield, exit, cancel, join, sleep, wake;
-    - mutexes, condition variables, message queues (send, jam, receive);
-    - alarms (one-shot and periodic, with user data) and `OSSleepTicks`.
-  - **Atomic steps:** two steps can't be interrupted by a switch, as on the OS.
-    - `OSWaitCond` releases the mutex and goes to sleep on the condition in one step. The OS wakes the mutex's waiters with the scheduler off.
-    - A finishing thread wakes its joiners, and the waiters on its mutexes, without switching, then hands the CPU on once.
-  - **Tested without the game** (`mkdd/tests/threads_test.cpp`, v0.13.1). The real scheduler and interrupt layer run small guest programs written in C++, entered through a function table as lifted code is. The order of events is checked against the OS's rules:
-    - preemption on resume;
-    - a blocking receive and the send that preempts;
-    - queue order, a full queue and jam;
-    - a mutex with a condition, recursion included;
-    - yield within a priority;
-    - suspend counts;
-    - exit values, detached threads, mutexes released on exit;
-    - an alarm firing while every thread waits;
-    - `OSSleepTicks`.
-  - **Priority inheritance:** a thread that blocks on a mutex lends its priority to the owner, and on through any mutex the owner is itself waiting for (the OS's `__OSPromoteThread`); releasing a mutex takes the owner back to its own priority, or the best still lent through the mutexes it keeps.
-- **Interrupts and callbacks** (`os.hpp`):
-  - **Safe points:** completions are queued and delivered at safe points, which are whenever the guest enables interrupts and inside every replacement that waits or polls. Each is entered with the guest's registers written back, so a delivery is the same as an interrupt arriving at that instruction. If a delivery wakes a thread of higher priority, the switch happens right after it.
-  - **Callbacks:** run on a fresh frame below the interrupted thread's stack, with every register restored afterwards.
-- **DVD** (`dvd.cpp`):
-  - **Lookups:** the disc's file table comes from `sys/fst.bin`. Paths resolve as the SDK does: relative to the current directory, `.` and `..`, without case.
-  - **Reads:** data is read from `files/`. Synchronous reads return at once. Asynchronous reads complete as an interrupt (command block busy until then, then the callback). A read from a file that isn't there stops the runtime, naming it.
-- **VI** (`vi.cpp`):
-  - **The retrace:** a timed interrupt at 60 Hz (EuRGB60) from the host clock. It runs the pre- and post-retrace callbacks and wakes the threads in `VIWaitForRetrace`.
-  - **Frame buffers:** `VISetNextFrameBuffer` is recorded for the renderer.
-- **Console output:** `OSGetConsoleType` reports a retail Wii. The C library's console writes go to the debug serial port (`InitializeUART`, `WriteUARTN`), which a retail console doesn't have; here it becomes the game's own log, as `game: ...` lines.
-- **NAND** (`nand.cpp`, v0.11.0): the Wii's flash file system as a folder, `<user folder>/nand/...`. The user folder is the game's data folder, `qilin/mkdd` in the platform's per-user application data (Windows: `%LOCALAPPDATA%\qilin\mkdd`; until v0.18.0 SDL's `%APPDATA%\Qilin\MarioKartDD-QilinComp`, moved on the first run), or `MKDD_SAVE_DIR`.
-  - **Paths:** absolute or relative to the current directory (the game's home, `/title/00010000/52375050/data`, to start with).
-  - **Coverage:** create, delete, open, read, write, seek, length, move, type, change directory, the free-space check, and the asynchronous forms, whose callbacks run as interrupts. Errors are NAND's codes.
-  - **Safe writes:** the "safe" open writes to a copy in `/tmp`; the close flushes it to the disk and renames it over the save, so a write cut short leaves the old save. Leftover copies are removed at start.
-- **Console settings** (`sc.cpp`): 16:9, EuRGB60, English, stereo, a European console. These will become settings.
-- **WPAD** (`wpad.cpp`, v0.10.0): one sideways Wii Remote on channel 0, buttons only (the port's decision: no motion, no Nunchuk, no Balance Board).
-  - **What the game sees:** a bare core controller, resting flat, with nothing in its pointer's view; channels 1–3 are empty.
-  - **Connecting:** it connects when the game sets a connect callback. That callback and the extension callback ("core") then run as interrupts, and the sampling callback runs at the remote's 200 Hz.
-  - **Buttons:** they come from the window's pad or keyboard (`host/`), mapped as the design doc says. The cross pad is turned a quarter for the sideways grip; A is the 2 button (right punch), B the 1 button (left punch), X or Y the A button (Star Punch); Start, View and Guide are +, − and HOME.
-  - **Rumble** reaches the pad.
-  - **Speaker:** its stream is accepted and dropped for now.
-  - **Names:** five one-instruction WPAD functions are branches into WUD, and their targets name them. The size-matched names had them one off.
-- **Interrupt handlers:** `__OSSetInterruptHandler`, `__OSGetInterruptHandler`, `__OSMaskInterrupts` and `__OSUnmaskInterrupts` keep the OS's table and mask. `raise_interrupt(n)` runs a handler as an interrupt; a masked one is held and arrives when the OS unmasks it, as the hardware's line stays up (none has been seen masked in play). Context and shutdown bookkeeping are no-ops, as is the write-gather pipe's address register (its "not yet sent" bit always reads clear).
 
 ## The GPU's front end (`gpu.cpp`, v0.8.0)
 
@@ -210,23 +212,6 @@ Two threads share the work. The game's thread records what the command stream as
   - One difference is the player's and stays: it clears the EFB once, before its first frame. The game's last copy of a practice-fight frame doesn't clear the depth, so the next frame's hologram is drawn behind the depth the frame before left where Little Mac stood, and doesn't show through him; the player's first frame has it showing through. Replayed twice (`--render-dff ... 2`), ours shows the game's own.
   - `MKDD_PROBE=x,y` (EFB pixels at 1x) logs, for the captured frame, every draw and copy that changes that pixel's colour or depth: before and after, with the draw's primitive number and its state (blending, depth, TEV stages, konstants, lighting channels and lights, textures); `MKDD_PROBE_DIR=dir` saves the frame's texture copies. `MKDD_PROBE_SOLO=<draw>` draws that one unblended, so the probe shows what its pixel shader gives; `MKDD_PROBE_SOLO_MODE=z` (and `c`) also sets its depth test to always (and culling off).
 
-## Input (`wpad.cpp`)
-
-WPAD is replaced, and KPAD is lifted on top of it. The remote is held sideways and buttons only, with no motion controls, per the design targets. Which inputs press which of its buttons is the player's choice, in the settings file (below). By default the first pad maps as:
-- D-pad or left stick: the cross;
-- A: 2;
-- B: 1;
-- X or Y: A;
-- Start: +;
-- Back: −;
-- Guide: HOME.
-
-Every controller SDL lists is opened and their buttons are added up (the first listed can be a virtual pad or a wheel's base). **A second player** (`[controls] second_player`, off by default) takes one controller as a second remote on channel 1, with the same pad buttons: `second controller` gives player one the first controller to have a button pressed (with the keyboard and mouse) and player two the next; `first controller` leaves player one on the keyboard and mouse and gives player two the first controller. The second remote connects when its controller has pressed a button and disconnects when it's unplugged (the game's connect callback, as a remote coming and going); it has buttons, rumble and a pointer of its own, moved by its controller's right stick (Head-to-Head's menus ask player two to choose). `MKDD_INPUT2` and `MKDD_POINTER2` script them in tests.
-
-**The speaker** (`speaker.hpp`, `[controls] speaker`): the game mixes each remote's sound in AX at 6 kHz, encodes it 40 samples at a time with the SDK's encoder and sends the 20 bytes with `WPADSendStreamData`, 150 times a second. The remote's side is here: Yamaha's 4-bit ADPCM decoder (a step's eighth plus a whole, half and quarter of it for the code's bits, each rounded down), a queue of one to four blocks per remote, and each audio DMA buffer adds the queued sound, resampled linearly and scaled by the remote's volume, to both channels. `WPADControlSpeaker`'s "on" resets the decoder, as the game's encoder starts afresh after it; mute and unmute are kept. `mkdd --check-speaker <disc>` calls the game's own lifted encoder on five test signals (2,000 blocks) and checks that the signal and step it keeps are the decoder's after every block.
-
-The keyboard's defaults are the arrows, Z and X for 1 and 2, C or Space for A, Enter for +, Backspace for − and H for HOME. The pointer is real input, since the menus need it. The runtime places the sensor bar's two lights where the remote's camera would see them, after Dolphin's camera geometry. KPAD then works out the pointer from them as on hardware. The mouse over the picture moves the pointer, and its left button is A. The right stick also moves it, a screen's width a second. The angles are calibrated so the pointer lands where the mouse is, with the bar below the TV, the console's default setting.
-
 ## Settings (`settings.cpp`, v0.13.2; rebuilt in v0.18.0)
 
 `mkdd.ini` sits in the game's data folder, next to the saves. The first run writes it with every key and comments; the settings menu (`menu.cpp`) changes it and saves it back through a temporary file. Its layout follows the other Qilin recomps (BeatTheBeat's `beatthebeat.ini`):
@@ -265,45 +250,24 @@ The main thread turns the pad, the keys and the mouse into the remote's buttons 
 - **Dynamic blend state** (`Gpu::dynamic_blend`, `dynamic_logic`): with VK_EXT_extended_dynamic_state3 the renderer keys pipelines on `base_key` (topology, depth output, vertex layout; the logic op only where it's static) and sets blending per draw (`set_dynamic_blend`, again after each copy, whose pipelines don't have it dynamic); the full keys are still what `pipelines.keys` remembers.
 - **Measuring**: `Display::frame_times()` keeps the intervals between new frames presented (`host/include/qilin/host/frame_times.hpp`, 1200 frames); F3 or `performance_overlay` shows them, and the log has them and the retraces' lateness every 5 s.
 
-## Hardware registers (`hw.cpp`, v0.12.0)
-
-Each device maps its own ranges of `0xCC000000`-`0xCD00FFFF` (the GPU's CP, PE, PI and write-gather pipe; the DSP; the audio interface). An access outside every range is fatal and names the address.
-
-## Sound (`dsp.cpp`, `ax.cpp`, v0.12.0)
-
-AI, AX and DSP are lifted; the hardware under them is emulated.
-- **The DSP's registers:** the mailboxes both ways, the control register (reset, halt, init, the three interrupt flags with their enables, written 1 to clear), the audio DMA (source, length in 32-byte blocks, blocks left). The interrupt is a level, as on hardware: while a flag is set with its enable, the OS's handler for it runs (5 AI DMA, 6 ARAM, 7 DSP), again until it's acknowledged. The OS's own mask functions set those enables, as the real OS does.
-- **The microcode:** the DSP starts in its ROM's task loader, which takes the uploaded program's address, length and start by mail. The program is identified by its hash; three Wii AX versions are known (they differ in command numbering and parameter-block layout), and an unknown one is fatal. Mario Kart: Double Dash!! boots `4CC52064`.
-- **AX at a high level** (`ax.cpp`): the mail protocol (`0xBABE` + length, then the list's address; `DSP_SYNC` after the output, `DSP_YIELD` at the end, then the task manager's resume or continue), and every command: buffer setup, the voice list, aux send and return, the compressor, the output (96 stereo samples, every 3 ms), the Wii Remote speakers' buses. For each voice: the accelerator reads ADPCM, PCM8 or PCM16 from memory with its loop rules; a sample-rate converter (polyphase if `dsp_coef.bin`, a dump of the DSP ROM's table, is in the user folder, else linear); the volume envelope, low-pass and biquad filters; per-bus volumes with ramps. Formats, arithmetic and order are Dolphin's facts; the code is ours.
-- **The audio DMA** is the clock: 8 samples a block at the AI's rate (32 kHz). When a buffer has played it reloads and raises the AI DMA flag; AX answers by queueing the next buffer and sending the next command list, so the DMA paces all of the sound. Its samples go to SDL3 (`host/audio.hpp`); more than 150 ms queued is dropped, and if the guest falls 100 ms behind the clock skips ahead.
-- **The AI's registers:** the control (rates, the sample counter running), volume, the sample counter. Its sample-counter interrupt is fatal if enabled; nothing does yet.
-
-## Poll loops (v0.12.0)
-
-Code that waits for an interrupt by spinning, as in `while (flag == 0) {}` or `while (RFLGetAsyncStatus() == BUSY) {}`, would never see it, because interrupts arrive at safe points. The lifter finds such loops (`recomp/src/idle.*`): a loop is a poll when no pass can tell itself from the last. It may only load, compute into registers, store into its own stack frame, and call pure getters. Nothing may be carried from one pass to the next, in registers or stack slots, on any path. Their back edges call the runtime's idle hook, which delivers what's due or sleeps until the next timed event (at most 1 ms). In this game: the DSP mailbox waits, AX's start-up and the Mii library's status loops (49 back edges, 11 functions). A scan such as `while (*p++)` isn't one, and the unit tests say so.
-
 ## Where the game stands
 
-The game boots as `__start` boots it, runs its static constructors (which bring up the OS, DVD, VI and the heaps through the lifted OSAlloc), enters `main`, and runs: Wwise on AX with the DSP's AX microcode mixing every 3 ms, the HOME Button Menu's archives, the Mii library, NAND saves, the pointer and buttons. From the strap screen it goes through the save dialog, the intro movie, the title and the menus into fights, at the console's 60 frames a second, with sound.
+Checked on 2026-11-26, on Windows, from the extracted disc, with no controller and an empty memory-card folder:
 
-Tested (2026-11-21):
-- scripted runs from a fresh save and from a profile into the Exhibition practice fight and through its first rounds, headless and drawn, for 215 s at a time;
-- pictures of five scenes against Dolphin, pixel for pixel (above);
-- the owner's own play on Windows, fights included.
+- **Headless** (`mkdd <disc> --headless`), 240 s: the game boots as `__start` boots it, runs OSInit, its static constructors and `main`, brings up JKernel's heaps, ARAM, the controllers, GX, VI, JAudio on the DSP with its own microcode, the memory-card manager, and reaches its main loop. It then runs at the retrace rate without a stop: 300 frame buffers every 5 s, about 300 draws a frame, the audio DMA at 32 kHz.
+- **Drawn without a window** (`--offscreen`, frames dumped): the progressive-scan question appears with its countdown (the progressive setting is on by default, so the cable is "plugged in"), then the Lakitu loading scene, drawn correctly. After about 27 s of game time the dumped frames are black while the game goes on drawing about 300 primitives a frame. Whether that is the game (the opening movie needs THP, or a fade) or the renderer was not determined.
+- **Tests:** `mkdd_threads_test` (and its shutdown and restart forms) and `mkdd_dvd_test` pass.
 
 Not yet:
-- **Every opponent and mode played through.** Career past the first fights, title defence, the credits: anything they reach that nothing so far has (a replaced function with no native code stops the game and names itself).
-- **Head-to-Head by two people.** A scripted run (both players' presses and pointers: `MKDD_INPUT2`, `MKDD_POINTER2`) registers the second remote, picks player two's Mii, and plays the split-screen fight; its frame matches Dolphin's. Two people at one PC haven't played it.
-- **The Wii Remote's speaker in use.** Its sound is decoded and mixed in (`speaker.hpp`; the decoder is exact against the game's own encoder), but in every scene played here the game sends it only silence: when the game does use it is unconfirmed.
-- Smaller, where the console's behaviour isn't modelled: the DSP's polyphase resampler is linear unless the console's coefficient table (`dsp_coef.bin`, which isn't on the disc) is in the user folder, texture offsets for lines and points.
 
-## Reliability additions (v0.22.0)
-
-Audio callbacks and producers now share the SDL stream lock; see `host/src/audio.cpp`. Cancelling a parked guest releases its mutexes, withdraws inherited priorities and wakes its native thread to unwind. Shared ownership retains the old thread until it exits even if the guest address is reused; sleep completions carry generation tokens.
-
-[Recovery and controller behaviour](reliability-and-recovery.md) documents bounded save history, restart-time restoration, explicit assignments, reconnection and focus behaviour. [Fight-timing validation](timing-validation.md) explains the paired-capture tool and its evidence requirements. Its synthetic fixtures do not establish any opponent's actual timing.
+- **Anything past start-up with input.** No controller was plugged in for these runs, so no menu was entered and no race started. A replaced function with no native code stops the game and names itself; of those lifted code can reach, only the eight ETH functions lack one (reached only with a Broadband Adapter, which no port reports).
+- **A disc image.** The disc library's own tests cover images; the game was run from the extracted folder only.
+- **SRAM changes kept** between runs (`OSSetSoundMode`, `OSSetProgressiveMode`).
+- **The reset switch**: nothing sets `g_reset_button`.
+- **`OSResetSystem`'s shutdown form**, `VIGetCurrentLine`, drive errors and the cover, the DVD's 512 KB steps: not modelled; the first two stop the runtime if reached.
 
 ## Next
 
-1. **The renderer's gaps** as the game reaches them, and checking pictures against hardware behaviour on the player's PC.
-2. **The rest of the game's paths:** what the menus, fights and movies reach that the front end doesn't.
+1. Find what the black frames after the loading scene are.
+2. Play with a controller: the title, the menus, a race; write whatever replaced function that reaches.
+3. SRAM changes back into the settings file, and a key or pad button for the reset switch.

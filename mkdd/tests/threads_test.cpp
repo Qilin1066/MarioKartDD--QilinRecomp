@@ -3,9 +3,11 @@
 // The real scheduler and interrupt layer run "guest" functions written here
 // in C++, entered through a function table as lifted code would be. Each test
 // is a small program in the OS's API, and the order of events it records is
-// checked against what the Wii's OS does: priorities and preemption, blocking
-// on message queues, mutexes and condition variables, suspend counts, joins
-// and exit values, alarms and OSSleepTicks.
+// checked against what the GameCube's OS does: priorities and preemption,
+// blocking on message queues and mutexes, suspend counts, exit values and
+// detaching, the scheduler switched off, alarms, the interrupt mask, SRAM.
+// (This SDK has no OSJoinThread, conditions or OSSleepTicks in the game: the
+// tests wait as its code does, on a thread queue.)
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -30,20 +32,26 @@ void dsp_interrupt_enables(uint32_t) {}  // no DSP here
 namespace {
 
 // The OS functions, at their addresses in the supported build (threads.cpp).
-constexpr uint32_t kCreateThread = 0x802085CCu, kResumeThread = 0x80208C3Cu, kSuspendThread = 0x80208ED4u,
-                   kCancelThread = 0x8020891Cu, kYieldThread = 0x80208590u, kExitThread = 0x80208838u, kJoinThread = 0x80208AFCu,
-                   kGetCurrentThread = 0x80208024u, kInitMutex = 0x802064A4u, kLockMutex = 0x802064DCu,
-                   kUnlockMutex = 0x802065B8u, kInitCond = 0x802066ECu, kWaitCond = 0x802066F0u,
-                   kSignalCond = 0x802067CCu, kInitMessageQueue = 0x80205A98u, kSendMessage = 0x80205AF8u,
-                   kReceiveMessage = 0x80205BC0u, kJamMessage = 0x80205C9Cu, kCreateAlarm = 0x801FFCE4u,
-                   kSetAlarm = 0x801FFF44u, kSleepTicks = 0x802092C8u, kGetTime = 0x80209370u,
-                   kTicksToCalendarTime = 0x802095BCu, kShutdownSystem = 0x80206B84u, kRestart = 0x80206CA0u;
+constexpr uint32_t kCreateThread = 0x800EB780u, kResumeThread = 0x800EBCA8u, kSuspendThread = 0x800EBF30u,
+                   kCancelThread = 0x800EBA4Cu, kYieldThread = 0x800EB744u, kExitThread = 0x800EB968u,
+                   kDetachThread = 0x800EBC08u, kIsThreadTerminated = 0x800EB184u, kSleepThread = 0x800EC0A0u,
+                   kWakeupThread = 0x800EC18Cu, kDisableScheduler = 0x800EB1B8u, kEnableScheduler = 0x800EB1F8u,
+                   kGetCurrentThread = 0x800EB178u, kInitMutex = 0x800E9680u, kLockMutex = 0x800E96B8u,
+                   kUnlockMutex = 0x800E9794u, kInitMessageQueue = 0x800E9000u, kSendMessage = 0x800E9060u,
+                   kReceiveMessage = 0x800E9128u, kJamMessage = 0x800E9204u, kCreateAlarm = 0x800E641Cu,
+                   kSetAlarm = 0x800E667Cu, kGetTime = 0x800EC33Cu, kTicksToCalendarTime = 0x800EC5B4u,
+                   kResetSystem = 0x800E9D64u, kSetInterruptHandler = 0x800E87C8u, kMaskInterrupts = 0x800E8B44u,
+                   kUnmaskInterrupts = 0x800E8BCCu, kDisableInterrupts = 0x800E877Cu, kRestoreInterrupts = 0x800E87A4u,
+                   kGetSoundMode = 0x800EAAF8u, kSetSoundMode = 0x800EAB78u, kLockSram = 0x800EA6ACu, kUnlockSram = 0x800EAAA0u,
+                   kOSInit = 0x800E5B8Cu, kEXIInit = 0x800C4B00u, kSIInit = 0x800EEFF4u, kDVDInit = 0x800ABE14u,
+                   kInitAudioSystem = 0x800E6DD0u;
 
 // Guest memory the tests use (MEM1, clear of the addresses the OS fixes).
 constexpr uint32_t kThreadC = 0x80100800u, kStackC = 0x80128000u;
 constexpr uint32_t kThreadA = 0x80100000u, kThreadB = 0x80100400u, kStackA = 0x80110000u, kStackB = 0x80120000u,
                    kStackSize = 0x8000u, kMutex = 0x80130000u, kCond = 0x80130100u, kQueue = 0x80130200u,
-                   kQueueArray = 0x80130300u, kAlarm = 0x80130400u, kOut = 0x80130500u, kCalendar = 0x80130600u;
+                   kQueueArray = 0x80130300u, kAlarm = 0x80130400u, kOut = 0x80130500u, kCalendar = 0x80130600u,
+                   kSleepQueue = 0x80130700u, kBi2 = 0x80140000u;
 
 std::vector<std::string> g_log;
 int g_failures = 0;
@@ -64,6 +72,13 @@ void create(Cpu& c, uint32_t thread, uint32_t entry, uint32_t param, uint32_t st
         rt::fatal(&c, "OSCreateThread failed");
 }
 
+// Wait for a thread to end, as OSJoinThread would: asleep on its join queue
+// (+0x2E8), which its exit wakes; then its exit value (+0x2D8).
+uint32_t join(Cpu& c, uint32_t thread) {
+    while (!os(c, kIsThreadTerminated, thread)) os(c, kSleepThread, thread + 0x2E8);
+    return rt::peek32(thread + 0x2D8);
+}
+
 void expect(const char* test, const std::vector<std::string>& want) {
     if (g_log == want) {
         std::printf("ok   %s\n", test);
@@ -81,7 +96,9 @@ void expect(const char* test, const std::vector<std::string>& want) {
 // ---- the guest functions, at made-up addresses in the function table.
 constexpr uint32_t kFnHigh = 0x80004000u, kFnLowSender = 0x80004010u, kFnMutexTaker = 0x80004020u,
                    kFnCounter = 0x80004030u, kFnExiter = 0x80004040u, kFnAlarm = 0x80004050u,
-                   kFnSelf = 0x80004060u, kFnHolder = 0x80004070u, kFnWanter = 0x80004080u, kFnMiddle = 0x80004090u, kFnCancelled = 0x800040A0u, kFnOldSleep = 0x800040B0u, kFnNewSleep = 0x800040C0u, kFnChain = 0x800040D0u, kFnChainWaiter = 0x800040E0u;
+                   kFnSelf = 0x80004060u, kFnHolder = 0x80004070u, kFnWanter = 0x80004080u, kFnMiddle = 0x80004090u,
+                   kFnCancelled = 0x800040A0u, kFnWake = 0x800040B0u, kFnInterrupt = 0x800040C0u, kFnChain = 0x800040D0u,
+                   kFnChainWaiter = 0x800040E0u, kFnNothing = 0x800040F0u;
 
 void fn_high(Cpu& c) {  // runs as soon as it's resumed, and returns a value
     note("high " + std::to_string(c.r[3]));
@@ -93,11 +110,10 @@ void fn_low_sender(Cpu& c) {  // runs only when main blocks; main preempts it on
     note("low-done");
     c.r[3] = 0;
 }
-void fn_mutex_taker(Cpu& c) {  // blocks on main's mutex, then signals main's condition
+void fn_mutex_taker(Cpu& c) {  // blocks on main's mutex
     note("taker");
     os(c, kLockMutex, kMutex);
     note("taker-has-mutex");
-    os(c, kSignalCond, kCond);
     os(c, kUnlockMutex, kMutex);
     note("taker-done");
     c.r[3] = 0;
@@ -156,19 +172,14 @@ void fn_cancelled(Cpu& c) {
     os(c, kSuspendThread, os(c, kGetCurrentThread));
     note("FAIL cancelled thread resumed");
 }
-void fn_old_sleep(Cpu& c) {
-    const uint64_t ticks = mkdd::kTimerHz / 1000;
-    os(c, kSleepTicks, uint32_t(ticks >> 32), uint32_t(ticks));
-    note("FAIL old sleeper resumed");
+void fn_wake(Cpu& c) {  // an alarm handler that wakes the sleep queue's threads
+    note("alarm-wakes");
+    os(c, kWakeupThread, kSleepQueue);
 }
-
-void fn_new_sleep(Cpu& c) {
-    const uint64_t ticks = mkdd::kTimerHz / 50; // 20 ms, later than the cancelled sleeper
-    const auto start = std::chrono::steady_clock::now();
-    os(c, kSleepTicks, uint32_t(ticks >> 32), uint32_t(ticks));
-    const auto elapsed = std::chrono::steady_clock::now() - start;
-    note(elapsed >= std::chrono::milliseconds(10) ? "new-sleep-complete" : "FAIL new sleep woke at old deadline");
+void fn_interrupt(Cpu& c) {  // an interrupt handler: (interrupt, context)
+    note("interrupt " + std::to_string(c.r[3]) + (mkdd::interrupts_enabled() ? " on" : " off"));
 }
+void fn_nothing(Cpu&) {}
 
 void fn_chain(Cpu& c) {
     os(c, kLockMutex, kMutex + 0x40);
@@ -198,10 +209,23 @@ const rt::FunctionEntry kFunctions[] = {  // sorted by address
     {kFnHolder, fn_holder},
     {kFnWanter, fn_wanter},
     {kFnMiddle, fn_middle},
-    {kFnCancelled, fn_cancelled}, {kFnOldSleep, fn_old_sleep}, {kFnNewSleep, fn_new_sleep},
-    {kFnChain, fn_chain}, {kFnChainWaiter, fn_chain_waiter},
+    {kFnCancelled, fn_cancelled},
+    {kFnWake, fn_wake},
+    {kFnInterrupt, fn_interrupt},
+    {kFnChain, fn_chain},
+    {kFnChainWaiter, fn_chain_waiter},
+    {kFnNothing, fn_nothing},
+    {kDVDInit, fn_nothing},  // OSInit calls these four: other libraries', or lifted
+    {kInitAudioSystem, fn_nothing},
+    {kEXIInit, fn_nothing},
+    STUB(kOSInit),
     STUB(kCreateAlarm),
     STUB(kSetAlarm),
+    STUB(kDisableInterrupts),
+    STUB(kRestoreInterrupts),
+    STUB(kSetInterruptHandler),
+    STUB(kMaskInterrupts),
+    STUB(kUnmaskInterrupts),
     STUB(kInitMessageQueue),
     STUB(kSendMessage),
     STUB(kReceiveMessage),
@@ -209,22 +233,27 @@ const rt::FunctionEntry kFunctions[] = {  // sorted by address
     STUB(kInitMutex),
     STUB(kLockMutex),
     STUB(kUnlockMutex),
-    STUB(kInitCond),
-    STUB(kWaitCond),
-    STUB(kSignalCond),
-    STUB(kShutdownSystem),
-    STUB(kRestart),
+    STUB(kResetSystem),
+    STUB(kLockSram),
+    STUB(kUnlockSram),
+    STUB(kGetSoundMode),
+    STUB(kSetSoundMode),
     STUB(kGetCurrentThread),
+    STUB(kIsThreadTerminated),
+    STUB(kDisableScheduler),
+    STUB(kEnableScheduler),
     STUB(kYieldThread),
     STUB(kCreateThread),
     STUB(kExitThread),
     STUB(kCancelThread),
-    STUB(kJoinThread),
+    STUB(kDetachThread),
     STUB(kResumeThread),
     STUB(kSuspendThread),
-    STUB(kSleepTicks),
+    STUB(kSleepThread),
+    STUB(kWakeupThread),
     STUB(kGetTime),
     STUB(kTicksToCalendarTime),
+    {kSIInit, fn_nothing},
 };
 #undef STUB
 
@@ -234,8 +263,7 @@ void test_preemption(Cpu& c) {
     note("created");
     os(c, kResumeThread, kThreadA);  // outranks main: runs before this returns
     note("back");
-    os(c, kJoinThread, kThreadA, kOut);
-    note("joined " + std::to_string(rt::peek32(kOut)));
+    note("joined " + std::to_string(join(c, kThreadA)));
     expect("a higher priority thread runs as soon as it is resumed", {"created", "high 1", "back", "joined 42"});
 }
 
@@ -246,7 +274,7 @@ void test_message_queue(Cpu& c) {
     note("main");
     os(c, kReceiveMessage, kQueue, kOut, 1);  // blocks: the sender runs; its send readies main, which preempts it
     note("got " + std::to_string(rt::peek32(kOut)));
-    os(c, kJoinThread, kThreadA, 0);
+    join(c, kThreadA);
     note("joined");
     expect("a blocking receive runs a lower thread, and the send preempts it", {"main", "low", "got 7", "low-done", "joined"});
 
@@ -267,22 +295,19 @@ void test_message_queue(Cpu& c) {
            {"1", "1", "0", "r1", "1", "r9", "r2", "0"});
 }
 
-void test_mutex_and_condition(Cpu& c) {
+void test_mutex(Cpu& c) {
     os(c, kInitMutex, kMutex);
-    os(c, kInitCond, kCond);
     os(c, kLockMutex, kMutex);
     os(c, kLockMutex, kMutex);  // recursive
     create(c, kThreadA, kFnMutexTaker, 0, kStackA, 8);
     os(c, kResumeThread, kThreadA);  // runs, blocks on the mutex, main goes on
-    os(c, kUnlockMutex, kMutex);     // still held once: nothing happens, and the wait restores this count
-    note("main-waits");
-    os(c, kWaitCond, kCond, kMutex);  // releases it entirely; the taker runs to the end
-    note("main-woke owner=" + std::to_string(rt::peek32(kMutex + 8) == os(c, kGetCurrentThread)) +
-         " count=" + std::to_string(rt::peek32(kMutex + 0xC)));
-    os(c, kUnlockMutex, kMutex);
-    os(c, kJoinThread, kThreadA, 0);
-    expect("a mutex blocks its taker; waiting on a condition releases it, recursion included",
-           {"taker", "main-waits", "taker-has-mutex", "taker-done", "main-woke owner=1 count=1"});
+    os(c, kUnlockMutex, kMutex);     // still held once: nothing happens
+    note("main-holds count=" + std::to_string(rt::peek32(kMutex + 0xC)));
+    os(c, kUnlockMutex, kMutex);  // free: the taker outranks main and runs to the end
+    note("main-done owner=" + std::to_string(rt::peek32(kMutex + 8)));
+    join(c, kThreadA);
+    expect("a mutex blocks its taker until the owner's last unlock, recursion included",
+           {"taker", "main-holds count=1", "taker-has-mutex", "taker-done", "main-done owner=0"});
 }
 
 void test_priority_inheritance(Cpu& c) {
@@ -291,9 +316,9 @@ void test_priority_inheritance(Cpu& c) {
     create(c, kThreadB, kFnWanter, 0, kStackB, 8);
     create(c, kThreadC, kFnMiddle, 0, kStackC, 12);
     os(c, kResumeThread, kThreadA);  // below main: runs when main waits for it
-    os(c, kJoinThread, kThreadA, 0);
-    os(c, kJoinThread, kThreadB, 0);
-    os(c, kJoinThread, kThreadC, 0);
+    join(c, kThreadA);
+    join(c, kThreadB);
+    join(c, kThreadC);
     expect("a mutex's waiter lends its priority to the owner: no thread in between runs first",
            {"low-locks", "high-wants", "low-goes-on", "low-unlocks", "high-has-mutex", "middle", "low-done"});
 }
@@ -308,8 +333,8 @@ void test_yield_and_suspend(Cpu& c) {
         note("main " + std::to_string(i));
         os(c, kYieldThread);
     }
-    os(c, kJoinThread, kThreadA, 0);  // blocks: the counter finishes, then the low one runs
-    os(c, kJoinThread, kThreadB, 0);
+    join(c, kThreadA);  // blocks: the counter finishes, then the low one runs
+    join(c, kThreadB);
     expect("yield takes turns within a priority", {"main 0", "count 0", "main 1", "count 1", "count 2", "high 2"});
 
     // Suspend counts: a created thread starts at 1; two suspends need two more resumes.
@@ -317,13 +342,13 @@ void test_yield_and_suspend(Cpu& c) {
     note(std::to_string(os(c, kSuspendThread, kThreadA)));
     note(std::to_string(os(c, kResumeThread, kThreadA)));
     note(std::to_string(os(c, kResumeThread, kThreadA)));  // 1 -> 0: runs before the call returns
-    os(c, kJoinThread, kThreadA, 0);
+    join(c, kThreadA);
     // A thread suspending itself runs again only once resumed.
     create(c, kThreadA, kFnSelf, 0, kStackA, 8);
     os(c, kResumeThread, kThreadA);
     note("main");
     os(c, kResumeThread, kThreadA);
-    os(c, kJoinThread, kThreadA, 0);
+    join(c, kThreadA);
     expect("suspend counts", {"1", "2", "high 3", "1", "self-suspend", "main", "self-resumed"});
 }
 
@@ -332,13 +357,41 @@ void test_exit(Cpu& c) {
     create(c, kThreadA, kFnExiter, 0, kStackA, 8);
     os(c, kResumeThread, kThreadA);
     note("owner " + std::to_string(rt::peek32(kMutex + 8)));  // released by the exit
-    const uint32_t joined = os(c, kJoinThread, kThreadA, kOut);  // before reading what it wrote
-    note("join " + std::to_string(joined) + " " + std::to_string(rt::peek32(kOut)));
-    create(c, kThreadA, kFnHigh, 4, kStackA, 8, true);  // detached: can't be joined
+    note("state " + std::to_string(rt::peek16(kThreadA + 0x2C8)) + " value " + std::to_string(join(c, kThreadA)));
+    // The list of active threads (0x800000DC, linked at +0x2FC): a finished
+    // thread stays on it until it's detached, and then reads as state 0.
+    const auto active = [] {
+        std::string out;
+        for (uint32_t t = rt::peek32(0x800000DCu); t; t = rt::peek32(t + 0x2FC)) out += t == kThreadA ? "A" : t == kThreadB ? "B" : t == kThreadC ? "C" : "m";
+        return out;
+    };
+    note(active());  // main, then the earlier tests' finished threads in the order they were last created
+    os(c, kDetachThread, kThreadA);
+    note(active() + " state " + std::to_string(rt::peek16(kThreadA + 0x2C8)));
+    create(c, kThreadA, kFnHigh, 4, kStackA, 8, true);  // detached from the start: gone as it ends
+    create(c, kThreadB, kFnHigh, 5, kStackB, 20);
+    note(active());
     os(c, kResumeThread, kThreadA);
-    note("join " + std::to_string(os(c, kJoinThread, kThreadA, kOut)));
-    expect("OSExitThread ends a thread with its value and releases its mutexes",
-           {"exiter", "owner 0", "join 1 99", "high 4", "join 0"});
+    note(active() + " terminated " + std::to_string(os(c, kIsThreadTerminated, kThreadA)) + std::to_string(os(c, kIsThreadTerminated, kThreadB)));
+    os(c, kCancelThread, kThreadB);
+    os(c, kDetachThread, kThreadB);
+    expect("OSExitThread ends a thread with its value and releases its mutexes; detaching takes it off the active list",
+           {"exiter", "owner 0", "state 8 value 99", "mCBA", "mCB state 0", "mCAB", "high 4", "mCB terminated 10"});
+}
+
+// With the scheduler off, the running thread keeps the CPU whatever it readies.
+void test_scheduler_off(Cpu& c) {
+    create(c, kThreadA, kFnHigh, 6, kStackA, 8);
+    note(std::to_string(os(c, kDisableScheduler)));
+    os(c, kResumeThread, kThreadA);  // outranks main, but can't run yet
+    note("still-main");
+    note(std::to_string(os(c, kEnableScheduler)));
+    note("enabled");  // enabling doesn't switch by itself, as on the OS
+    os(c, kYieldThread);
+    note("after");
+    join(c, kThreadA);
+    expect("OSDisableScheduler holds back a higher thread until the scheduler is on again",
+           {"0", "still-main", "1", "enabled", "high 6", "after"});
 }
 
 void test_cancellation(Cpu& c) {
@@ -355,33 +408,12 @@ void test_cancellation(Cpu& c) {
         os(c, kUnlockMutex, kMutex);
         create(c, kThreadA, kFnHigh, 5, kStackA, 8);
         os(c, kResumeThread, kThreadA);
-        os(c, kJoinThread, kThreadA, 0);
+        join(c, kThreadA);
     }
     std::vector<std::string> expected;
     for (int i = 0; i < 64; ++i) { expected.push_back("cancel-owner"); expected.push_back("high 5"); }
     expect("cancelled owners release mutexes and thread addresses can be reused immediately", expected);
 
-    // Cancel a timed sleeper, reuse its address for a self-suspended thread,
-    // then let the old deadline pass. It must still need an explicit resume.
-    create(c, kThreadA, kFnOldSleep, 0, kStackA, 8);
-    os(c, kResumeThread, kThreadA);
-    os(c, kCancelThread, kThreadA);
-    create(c, kThreadA, kFnSelf, 0, kStackA, 8);
-    os(c, kResumeThread, kThreadA);
-    const uint64_t ticks = mkdd::kTimerHz / 200;
-    os(c, kSleepTicks, uint32_t(ticks >> 32), uint32_t(ticks));
-    note("main-resumes-new");
-    os(c, kResumeThread, kThreadA);
-    os(c, kJoinThread, kThreadA, 0);
-    expect("cancelled sleep deadline cannot resume a replacement thread",
-           {"self-suspend", "main-resumes-new", "self-resumed"});
-    create(c, kThreadA, kFnOldSleep, 0, kStackA, 8);
-    os(c, kResumeThread, kThreadA);
-    os(c, kCancelThread, kThreadA);
-    create(c, kThreadA, kFnNewSleep, 0, kStackA, 8);
-    os(c, kResumeThread, kThreadA);
-    os(c, kJoinThread, kThreadA, 0);
-    expect("a replacement sleeper keeps its own deadline", {"new-sleep-complete"});
 }
 
 void test_donation_withdrawal(Cpu& c) {
@@ -409,21 +441,58 @@ void test_donation_withdrawal(Cpu& c) {
 }
 
 void test_alarm_and_sleep(Cpu& c) {
-    // An alarm in 1 ms; main sleeps 5 ms with nothing else to run: the alarm's
-    // handler runs while every thread waits, then main wakes on time.
+    // An alarm in 5 ms wakes main, asleep on a thread queue with nothing else
+    // to run: its handler runs while every thread waits, as an interrupt.
     const uint64_t ms = mkdd::kTimerHz / 1000;
     const auto t0 = std::chrono::steady_clock::now();
     os(c, kCreateAlarm, kAlarm);
-    c.r[3] = kAlarm, c.r[4] = 0, c.r[5] = 0, c.r[6] = static_cast<uint32_t>(ms), c.r[7] = kFnAlarm;
+    c.r[3] = kAlarm, c.r[4] = 0, c.r[5] = 0, c.r[6] = static_cast<uint32_t>(5 * ms), c.r[7] = kFnWake;
     rt::call(c, kSetAlarm);
-    c.r[3] = 0, c.r[4] = static_cast<uint32_t>(5 * ms);
-    rt::call(c, kSleepTicks);
+    note(rt::peek32(kAlarm) == kFnWake ? "armed" : "not armed");
+    os(c, kSleepThread, kSleepQueue);
     const auto took = std::chrono::steady_clock::now() - t0;
     note("slept");
     note(took >= std::chrono::milliseconds(5) ? "on time" : "early");
     note(rt::peek32(kAlarm) == 0 ? "disarmed" : "armed");  // a one-shot alarm clears its handler
-    expect("an alarm fires while every thread waits, and OSSleepTicks wakes on time",
-           {"alarm", "slept", "on time", "disarmed"});
+    expect("an alarm fires while every thread waits, on time, and wakes the sleeper",
+           {"armed", "alarm-wakes", "slept", "on time", "disarmed"});
+}
+
+// Interrupts by the OS's numbers: a handler runs with interrupts off at the
+// next safe point; while the CPU has them off it waits; one the OS has masked
+// is held until it's unmasked, as the hardware's line stays up.
+void test_interrupts(Cpu& c) {
+    os(c, kSetInterruptHandler, 19, kFnInterrupt);
+    os(c, kSetInterruptHandler, 7, kFnInterrupt);
+    os(c, kUnmaskInterrupts, 0x80000000u >> 19);
+    const uint32_t was = os(c, kDisableInterrupts);
+    mkdd::raise_interrupt(19);
+    note("raised");
+    os(c, kRestoreInterrupts, was);  // arrives here
+    mkdd::raise_interrupt(7);        // masked since OSInit
+    os(c, kRestoreInterrupts, 1);
+    note("masked");
+    note(os(c, kUnmaskInterrupts, 0x80000000u >> 7) == (0xFFFFFFE0u & ~(0x80000000u >> 19)) ? "mask-was-right" : "mask-was-wrong");
+    os(c, kRestoreInterrupts, 1);
+    note(os(c, kMaskInterrupts, 0x80000000u >> 7) & (0x80000000u >> 7) ? "still-masked" : "unmasked");
+    expect("interrupts wait for the CPU's enable and the OS's mask", {"raised", "interrupt 19 off", "masked", "mask-was-right", "interrupt 7 off", "unmasked"});
+}
+
+// SRAM's settings, as the game reads and writes them.
+void test_sram(Cpu& c) {
+    note(std::to_string(os(c, kGetSoundMode)));  // stereo: set_console's
+    os(c, kSetSoundMode, 0);
+    note(std::to_string(os(c, kGetSoundMode)));
+    const uint32_t sram = os(c, kLockSram);
+    note(mkdd::interrupts_enabled() ? "on" : "off");  // off while it's locked
+    note(os(c, kLockSram) == 0 ? "locked" : "locked twice");
+    // The checksum pair is over the four words from +0xC: the flags changed, so did it.
+    uint16_t sum = 0, inverse = 0;
+    for (uint32_t a = sram + 0x0C; a < sram + 0x14; a += 2) sum = uint16_t(sum + rt::peek16(a)), inverse = uint16_t(inverse + uint16_t(~rt::peek16(a)));
+    note(sum == rt::peek16(sram) && inverse == rt::peek16(sram + 2) ? "checksum" : "bad checksum");
+    os(c, kUnlockSram, 0);
+    note(mkdd::interrupts_enabled() ? "on" : "off");
+    expect("SRAM: the sound mode, the lock, the checksum", {"1", "0", "off", "locked", "checksum", "on"});
 }
 
 // OSTicksToCalendarTime and OSGetTime: dates from the time base, which
@@ -461,8 +530,8 @@ void test_calendar(Cpu& c) {
 }
 
 // The memory map as lifted code reaches it (cpu.hpp's loads and stores): the
-// locked cache is plain memory of its own, the uncached mirrors are MEM1 and
-// MEM2 again, and all three take any access size.
+// locked cache is plain memory of its own, the uncached mirror is MEM1 again,
+// and both take any access size.
 void test_memory_map(Cpu& c) {
     using namespace qilin::rt;
     char line[96];
@@ -476,12 +545,7 @@ void test_memory_map(Cpu& c) {
     write32(c, 0xC0001004u, 0x01020304u);  // and written through it
     std::snprintf(line, sizeof line, "%08X %08X %04X", read32(c, 0xC0001000u), read32(c, 0x80001004u), read16(c, 0xC0001006u));
     note(line);
-    write32(c, 0x90002000u, 0xA1B2C3D4u);  // MEM2 and its mirror
-    write8(c, 0xD0002003u, 0xEEu);
-    std::snprintf(line, sizeof line, "%08X %08X", read32(c, 0xD0002000u), read32(c, 0x90002000u));
-    note(line);
-    expect("the locked cache and the uncached mirrors are plain memory",
-           {"11223344 BEEF 5A 22", "CAFEF00D 01020304 0304", "A1B2C3EE A1B2C3EE"});
+    expect("the locked cache and the uncached mirror are plain memory", {"11223344 BEEF 5A 22", "CAFEF00D 01020304 0304"});
 }
 
 }  // namespace
@@ -493,41 +557,49 @@ int main(int argc, char** argv) {
     for (auto list : {mkdd::thread_replacements(), mkdd::os_replacements()})
         for (const auto& p : list) replaced.push_back({p.address, "test", false});
     std::ranges::sort(replaced, {}, &rt::ReplacedEntry::address);
-    rt::init({kFunctions, replaced});
+    static std::vector<rt::FunctionEntry> functions(std::begin(kFunctions), std::end(kFunctions));
+    std::ranges::sort(functions, {}, &rt::FunctionEntry::address);
+    rt::init({functions, replaced});
     rt::provide(mkdd::thread_replacements());
     rt::provide(mkdd::os_replacements());
 
     static Cpu main_cpu = rt::new_cpu();
     main_cpu.r[1] = 0x80180000u;
     mkdd::init_threads(main_cpu);
-    mkdd::set_interrupts_enabled(true);
-
+    // OSInit, with the little of low memory it reads: an empty BI2.
+    rt::poke32(0x800000F4u, kBi2);
+    mkdd::set_console(0, true, false);
     Cpu& c = main_cpu;
-    // The game's way out (OSShutdownSystem and the rest) closes the program;
-    // its reset starts it again with the same command line. Each is a ctest of
-    // its own (CMakeLists.txt): the first must exit cleanly, the second must
-    // come back and pass.
+    rt::call(c, kOSInit);
+
+    // The game's way out, OSResetSystem: a hot reset to the console's menu
+    // closes the program; a restart starts it again with the same command line.
+    // Each is a ctest of its own (CMakeLists.txt): the first must exit cleanly,
+    // the second must come back and pass.
     if (const char* mode = std::getenv("THREADS_TEST_LEAVE")) {
-        if (std::strcmp(mode, "shutdown") == 0) rt::call(c, kShutdownSystem);
+        if (std::strcmp(mode, "shutdown") == 0) os(c, kResetSystem, 1, 0, 1);
         if (std::strcmp(mode, "restart") == 0) {
 #if defined(_WIN32)
             _putenv("THREADS_TEST_LEAVE=restarted");
 #else
             setenv("THREADS_TEST_LEAVE", "restarted", 1);
 #endif
-            rt::call(c, kRestart);
+            os(c, kResetSystem, 0, 0, 0);
         }
-        if (std::strcmp(mode, "restarted") == 0) std::printf("ok   OSRestart started the program again\n");
+        if (std::strcmp(mode, "restarted") == 0) std::printf("ok   OSResetSystem started the program again\n");
     }
     test_preemption(c);
     test_message_queue(c);
-    test_mutex_and_condition(c);
+    test_mutex(c);
     test_priority_inheritance(c);
     test_yield_and_suspend(c);
     test_exit(c);
+    test_scheduler_off(c);
     test_cancellation(c);
     test_donation_withdrawal(c);
     test_alarm_and_sleep(c);
+    test_interrupts(c);
+    test_sram(c);
     test_calendar(c);
     test_memory_map(c);
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");
