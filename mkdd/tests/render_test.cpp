@@ -1157,6 +1157,29 @@ void widened(Target& t, Stream& st) {
     check(t.renderer.width_scale() == 1 && t.renderer.scale() == 1, "and back to one column a pixel");
 }
 
+// A palette load and a texture whose address registers have a bit set above the 21 that
+// hold an address: the console reads the address below it. (A Grand Prix's start loads its
+// character icons' palette so, BP 0x64 = 831280; taken whole it was an address outside
+// memory and stopped the game.)
+void address_bits(Target& t, Stream& st) {
+    constexpr uint32_t kIndices = 0x00980000u, kPalette = 0x00981000u;
+    std::memset(guest(kIndices), 5, 32);                              // C8, 8x4: every pixel entry 5
+    std::memset(guest(kPalette), 0, 512);
+    guest(kPalette)[10] = 0x07, guest(kPalette)[11] = 0xE0;           // entry 5: RGB565 green
+    stream_begin(st);
+    st.bp(0x64, (kPalette >> 5) | 0x800000u);
+    st.bp(0x65, 0x200u | (16u << 10));                                // 256 entries to TMEM
+    st.texture(kIndices, 8, 4, 9);
+    st.bp(0x94, (kIndices >> 5) | 0x800000u);
+    st.bp(0x98, 0x200u | (1u << 10));                                 // its palette: there, RGB565
+    st.bp(0xC0, 8u | (15u << 4) | (15u << 8) | (15u << 12) | (1u << 19));
+    stream_quad(st, 0, 0, 640, 528, -0.5f, 0xFFFFFFFFu, true);
+    st.end_frame();
+    st.send();
+    const auto px = t.shown();
+    check(near(at(px, 320, 264), 0, 255, 0), "address registers with a bit above the address set still reach the palette and the texture: " + rgb(at(px, 320, 264)));
+}
+
 // mkdd_render_test --bench [players] [frames] [vertices a strip] [pictures between]: what such a frame costs to decode and record,
 // and to draw (the renderer's own time on the CPU, and the GPU's where it has timestamps).
 int bench(host::Gpu& gpu, unsigned players, unsigned frames, unsigned strip, unsigned pictures) {
@@ -1288,6 +1311,7 @@ int main(int argc, char** argv) {
         indexed_matrices(t, st);
         lod_bias(t, st);
         z_before_alpha_test(t, st);
+        address_bits(t, st);
         between_frames(t, st);
         between_four_views(t, st);
         widened(t, st);

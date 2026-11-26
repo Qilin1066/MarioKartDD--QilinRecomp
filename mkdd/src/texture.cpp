@@ -193,10 +193,15 @@ uint64_t hash_texture(uint32_t address, const uint8_t* src, uint32_t bytes) {
     return h;
 }
 
-const uint8_t* guest(uint32_t phys, uint32_t size) {
-    const uint32_t a = phys & 0x1FFFFFFFu;
-    if (in_memory(a, size)) return rt::guest_ptr(0x80000000u | a);
-    rt::fatal(nullptr, "a texture of %u bytes at %08X is outside MEM1", size, phys);
+// `map`: the texture map it is for (0-7), for the report; 8: a palette load's source; 9: an EFB copy's destination.
+const uint8_t* guest(uint32_t phys, uint32_t size, unsigned map) {
+    const uint32_t a = phys & 0x03FFFFFFu;
+    if (in_memory(a, size)) [[likely]] return rt::guest_ptr(0x80000000u | a);
+    const uint32_t reg = map < 8 ? (map < 4 ? 0x94u : 0xB4u) + map % 4 : map == 8 ? 0x64u : 0x4Bu;
+    char from[96] = "unknown";
+    if (g_bp_source) g_bp_source(reg, from, sizeof from);
+    rt::fatal(static_cast<rt::Cpu*>(g_decoding_cpu), "%s %u: %u bytes at %08X are outside MEM1 (BP %02X, written from %s)",
+              map < 8 ? "texture map" : map == 8 ? "the palette load" : "the memory under an EFB copy", map < 8 ? map : 0u, size, phys, reg, from);
 }
 
 using Key = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t>;  // address, format, w, h, levels, palette
@@ -233,7 +238,7 @@ uint64_t g_frame = 0;
 
 uint64_t ram_hash(uint32_t address, uint32_t w, uint32_t h) {
     const uint32_t n = std::min<uint32_t>(texture_bytes(6, w, h), 4096);  // its first 4 KB says enough
-    return hash_bytes(guest(address, n), n);
+    return hash_bytes(guest(address, n, 9), n);
 }
 
 }  // namespace
@@ -243,7 +248,7 @@ static int32_t texture_lookup(const uint32_t* bp, unsigned map, Frame& frame, ui
 
 void load_tlut(uint32_t source, uint32_t tmem_address, uint32_t bytes) {
     if (tmem_address + bytes > sizeof g_tmem) rt::fatal(nullptr, "a palette load runs past TMEM (%u bytes at %X)", bytes, tmem_address);
-    std::memcpy(g_tmem + tmem_address, guest(source, bytes), bytes);
+    std::memcpy(g_tmem + tmem_address, guest(source, bytes, 8), bytes);
     forget_memo();
     if (g_dff_use) [[unlikely]] dff_use_memory(source, bytes);
 }
@@ -265,9 +270,9 @@ int32_t texture_for(const uint32_t* bp, unsigned map, Frame& frame, uint32_t& w,
     return id;
 }
 
-static int32_t texture_lookup(const uint32_t*, unsigned, Frame& frame, uint32_t& w, uint32_t& h, uint32_t mode0, uint32_t mode1,
+static int32_t texture_lookup(const uint32_t*, unsigned map, Frame& frame, uint32_t& w, uint32_t& h, uint32_t mode0, uint32_t mode1,
                        uint32_t image0, uint32_t image3, uint32_t tlut) {
-    const uint32_t address = (image3 & 0xFFFFFF) << 5;
+    const uint32_t address = bp_address(image3);
     w = (image0 & 0x3FF) + 1;
     h = ((image0 >> 10) & 0x3FF) + 1;
     const unsigned format = (image0 >> 20) & 15;
@@ -288,7 +293,7 @@ static int32_t texture_lookup(const uint32_t*, unsigned, Frame& frame, uint32_t&
     uint32_t bytes = 0;
     for (uint32_t l = 0, lw = w, lh = h; l < levels; ++l, lw = std::max(1u, lw / 2), lh = std::max(1u, lh / 2))
         bytes += texture_bytes(format, lw, lh);
-    const uint8_t* src = guest(address, bytes);
+    const uint8_t* src = guest(address, bytes, map);
     if (g_dff_use) [[unlikely]] dff_use_memory(address, bytes);
     const uint8_t* palette = nullptr;
     uint64_t palette_hash = 0;
@@ -336,7 +341,7 @@ static int32_t texture_lookup(const uint32_t*, unsigned, Frame& frame, uint32_t&
 
 int32_t texture_from_copy(uint32_t address, uint32_t w, uint32_t h, Frame& frame) {
     forget_memo();
-    auto& e = g_copies[address & 0x1FFFFFFFu];
+    auto& e = g_copies[address & 0x03FFFFFFu];
     if (e.id) frame.released.push_back(e.id);
     e = {g_next_id++, w, h, ram_hash(address, w, h), g_frame};
     return e.id;

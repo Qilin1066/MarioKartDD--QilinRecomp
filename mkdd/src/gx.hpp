@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <new>
@@ -26,6 +27,15 @@ constexpr uint32_t kMem1Size = 0x01800000u;
 constexpr bool in_memory(uint32_t physical, uint32_t bytes) { return physical <= kMem1Size && bytes <= kMem1Size - physical; }
 static_assert(in_memory(0, kMem1Size) && in_memory(kMem1Size - 32, 32) && !in_memory(kMem1Size - 31, 32) && !in_memory(0x10000000u, 4) &&
               !in_memory(0x100, 0xFFFFFF00u));
+
+// A BP register that holds an address (a texture's, a palette's source, a copy's
+// destination) holds it over 32 in its low 21 bits: the GameCube's 26-bit physical
+// address. GX stores (pointer & 0x3FFFFFFF) >> 5 in 24, and the GPU has no use for the
+// top three: this game loads a palette with one of them set (BP 0x64 = 831280 for the
+// palette at 80625000, from JUTTexture::load at a Grand Prix's start), which the console
+// reads as the address below it.
+constexpr uint32_t bp_address(uint32_t value) { return (value & 0x1FFFFFu) << 5; }
+static_assert(bp_address(0x831280u) == 0x00625000u && bp_address(0x0BFFFFu) == 0x017FFFE0u);
 
 // One vertex, every attribute GX can send, decoded to floats (the formats
 // and fixed-point scales are the vertex attribute table's). What the vertex
@@ -289,6 +299,12 @@ struct Frame {
         captured = false;
     }
 };
+// For a fatal error met while decoding (a texture, array or list outside memory): where the
+// BP register that led there was written (gpu.cpp: "the FIFO", or the display list's address
+// and the offset in it), and the guest whose commands are being decoded, for its call stack
+// (exact with MKDD_GPU_THREAD=0; else where the game's thread has got to since).
+extern const char* (*g_bp_source)(uint32_t reg, char* text, size_t room);
+extern void* g_decoding_cpu;  // a qilin::rt::Cpu, or null
 // MKDD_DFF: the frame the next XFB copy ends is the captured one.
 void mark_captured_frame();
 // The decoder's serial number of the primitive about to be recorded (tags the Draw).

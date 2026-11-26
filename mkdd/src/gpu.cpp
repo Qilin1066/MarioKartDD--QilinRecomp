@@ -73,6 +73,12 @@ bool g_dff_recording = false;  // MKDD_DFF is recording a frame
 std::atomic<uint32_t> g_gp_fifo_base{0}, g_gp_fifo_end{0};  // the CPU's FIFO while linked to the GPU (for MKDD_DFF)
 uint32_t g_primitive_serial = 0;  // every primitive decoded
 uint32_t g_dl_address = 0;        // the display list being decoded (physical), or 0
+uint32_t g_bp_from[256] = {};     // where each BP register was last written: a place in a display list (physical), or 0 for the FIFO
+const char* bp_source(uint32_t reg, char* text, size_t room) {
+    if (g_bp_from[reg & 255]) std::snprintf(text, room, "a display list, at %08X; the register holds %06X", 0x80000000u | g_bp_from[reg & 255], g_bp[reg & 255]);
+    else std::snprintf(text, room, "the FIFO; the register holds %06X", g_bp[reg & 255]);
+    return text;
+}
 size_t g_dl_call_at = 0;          // MKDD_DFF: where in the commands the call to it is
 
 std::vector<uint8_t> g_fifo;  // bytes written to the pipe, not yet a whole command
@@ -264,7 +270,7 @@ void call_display_list(Cpu& c, uint32_t address, uint32_t size) {
     // A physical address in MEM1, cached at +0x80000000. The GPU ignores the
     // top three bits, so a virtual address (GXCallDisplayList passes the
     // caller's pointer) reaches the same memory.
-    const uint32_t physical = address & 0x1FFFFFE0u;
+    const uint32_t physical = address & 0x03FFFFE0u;
     size &= ~31u;
     if (!gx::in_memory(physical, size)) rt::fatal(&c, "GX display list at %08X (%u bytes) is outside MEM1", address, size);
     ++g_stats.display_lists;
@@ -600,7 +606,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             // Matrices from CP arrays 12-15 into XF memory: index, then size - 1 and the address.
             const uint32_t v = be32(p + 1), index = v >> 16, words = ((v >> 12) & 15) + 1, addr = v & 0xFFF;
             const unsigned array = 12 + (op - 0x20) / 8;
-            const uint32_t src = (g_cpmem[0xA0 + array] + index * g_cpmem[0xB0 + array]) & 0x1FFFFFFFu;
+            const uint32_t src = (g_cpmem[0xA0 + array] + index * g_cpmem[0xB0 + array]) & 0x03FFFFFFu;
             if (!gx::in_memory(src, 4 * words)) rt::fatal(&c, "GX indexed load from %08X is outside MEM1", src);
             if (g_dff_recording) gx::dff_use_memory(src, 4 * words);
             const uint8_t* m = rt::guest_ptr(0x80000000u | src);
@@ -621,9 +627,9 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
                 char line[96];
                 g_dl_call_at = g_dff->bytes.size();
                 std::snprintf(line, sizeof line, "call fifo %llu %08X %u\n", static_cast<unsigned long long>(g_dff->bytes.size()),
-                              unsigned(be32(p + 1) & 0x1FFFFFE0u), unsigned(be32(p + 5) & ~31u));
+                              unsigned(be32(p + 1) & 0x03FFFFE0u), unsigned(be32(p + 5) & ~31u));
                 g_dff->prims += line;
-                gx::dff_use_memory(be32(p + 1) & 0x1FFFFFE0u, be32(p + 5) & ~31u);
+                gx::dff_use_memory(be32(p + 1) & 0x03FFFFE0u, be32(p + 5) & ~31u);
             }
             call_display_list(c, be32(p + 1), be32(p + 5));
             n = 9;
@@ -631,6 +637,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             n = 1;
         } else if (op == 0x61) {  // LOAD_BP_REG: register in the top byte, 24-bit value
             if (left < 5) return;
+            g_bp_from[p[1]] = in_display_list ? g_dl_address + uint32_t(used) : 0;
             on_bp(c, p[1], be32(p + 1) & 0xFFFFFFu);
             n = 5;
         } else if (op >= 0x80 && op <= 0xBF) {  // a primitive: count, then the vertices
@@ -796,6 +803,7 @@ void hand_over() {
 void consume(Cpu& c, const uint8_t* bytes, size_t n) {
     g_fifo.insert(g_fifo.end(), bytes, bytes + n);
     g_stats.fifo_bytes += n;
+    gx::g_bp_source = bp_source, gx::g_decoding_cpu = &c;
     {  // (timed here, a batch at a time, less any wait for the main thread inside)
         auto& st = gx::recorder_stats();
         const uint64_t t0 = gx::now_ns(), w0 = st.wait_ns.load(std::memory_order_relaxed);
@@ -912,7 +920,7 @@ namespace {
 void dff_note_memory(uint32_t physical, uint32_t size) {
     if (!g_dff || g_dff->state != 1 || size == 0) return;
     DffCapture& d = *g_dff;
-    uint32_t a = physical & 0x1FFFFFFFu;
+    uint32_t a = physical & 0x03FFFFFFu;
     if (a >= gx::kMem1Size) return;
     size = std::min(size, gx::kMem1Size - a);
     const uint8_t* now = rt::guest_ptr(0x80000000u | a);

@@ -98,7 +98,7 @@ void note_array(unsigned array, uint32_t offset, uint32_t bytes) {
 const uint8_t* array_data(const Registers& r, unsigned array, uint32_t index, uint32_t bytes) {
     const uint32_t base = r.cp[0xA0 + array], stride = r.cp[0xB0 + array];
     if (g_dff_use) [[unlikely]] note_array(array, index * stride, bytes);
-    const uint32_t a = (base + index * stride) & 0x1FFFFFFFu;
+    const uint32_t a = (base + index * stride) & 0x03FFFFFFu;
     if (in_memory(a, bytes)) return rt::guest_ptr(0x80000000u | a);
     rt::fatal(nullptr, "vertex array %u: element %u (%u bytes at %08X) is outside MEM1", array, index, bytes, base + index * stride);
 }
@@ -151,7 +151,7 @@ struct Format {
 // The array's elements of `bytes` each, as far as they stay inside MEM1.
 Array resolve_array(const Registers& r, unsigned array, uint32_t bytes) {
     Array a;
-    const uint32_t base = r.cp[0xA0 + array] & 0x1FFFFFFFu, stride = r.cp[0xB0 + array];
+    const uint32_t base = r.cp[0xA0 + array] & 0x03FFFFFFu, stride = r.cp[0xB0 + array];
     const uint32_t end = kMem1Size;
     if (!in_memory(base, bytes)) return a;
     a.host = rt::guest_ptr(0x80000000u | base);
@@ -1006,6 +1006,8 @@ static bool g_capture_next = false;
 void mark_captured_frame() { g_capture_next = true; }
 static uint32_t g_primitive_serial = 0;
 void set_primitive_serial(uint32_t n) { g_primitive_serial = n; }
+const char* (*g_bp_source)(uint32_t, char*, size_t) = nullptr;
+void* g_decoding_cpu = nullptr;
 bool g_dff_use = false;
 void (*g_dff_use_hook)(uint32_t, uint32_t) = nullptr;
 static void record_copy_timed(const Registers& r, uint32_t command);
@@ -1279,7 +1281,7 @@ void record_pixel_format(uint32_t from, uint32_t to) {
 }
 
 void record_tlut_load(const Registers& r, uint32_t command) {
-    const uint32_t source = (r.bp[0x64] & 0xFFFFFF) << 5;
+    const uint32_t source = bp_address(r.bp[0x64]);
     const uint32_t tmem = (command & 0x3FF) << 9, bytes = ((command >> 10) & 0x7FF) * 32;
     load_tlut(source, tmem, bytes);
     g_join.valid = false;  // the same registers, another palette
@@ -1374,7 +1376,7 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
     c.src[1] = int32_t((src >> 10) & 0x3FF);
     c.src[2] = int32_t((size & 0x3FF) + 1);
     c.src[3] = int32_t(((size >> 10) & 0x3FF) + 1);
-    c.dest = (r.bp[0x4B] & 0xFFFFFF) << 5;
+    c.dest = bp_address(r.bp[0x4B]);
     c.to_xfb = (command >> 14) & 1;
     c.half_scale = (command >> 9) & 1;
     c.clear = (command >> 11) & 1;
@@ -1426,7 +1428,7 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         // depth and reads them to see whether a player's mark or the sun is
         // hidden (ZCaptureNode, doldecomp's name). Larger copies stay on the
         // GPU: this game reads none of them (docs/graphics.md).
-        c.to_memory = c.dest_width <= 4 && c.dest_height <= 4 && (c.format & 0xFF) == 6 && in_memory(c.dest & 0x1FFFFFFFu, 64);
+        c.to_memory = c.dest_width <= 4 && c.dest_height <= 4 && (c.format & 0xFF) == 6 && in_memory(c.dest & 0x03FFFFFFu, 64);
     }
     f.packets.push_back({Packet::kCopy, uint32_t(f.copies.size())});
     f.copies.push_back(c);
