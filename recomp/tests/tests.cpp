@@ -876,6 +876,20 @@ void test_fp_single_mode() {
     CHECK(saved.code.contains("if (!(int(fp::to_f_exact(c.ps0[31], f31)))) [[unlikely]] { ") && saved.code.contains("fn_80003000_d(c, 1); return; }"));
     CHECK(saved.code.contains("c.ps0[31] = fp::from_bits(read64(c, ea));"));
     CHECK(saved.code.contains("c.ps0[1] = fp::to_d(f1); c.ps1[1] = fp::to_d(p1);  return;") && !saved.code.contains("written"));
+    // Doubles in the Cpu. lfs f1,0(r3); frsqrte f0,f1; fmuls f2,f0,f0; stfs f2,4(r3); blr (an inlined
+    // square root's estimate): the estimate goes to the Cpu's f0 and is read from there by the double
+    // helpers, the rest is floats, and the way out doesn't write f0 back over it.
+    const Lifted rsqrt = fn({0xC0230000u, 0xFC000834u, 0xEC400032u, 0xD0430004u, 0x4E800020u});
+    CHECK(rsqrt.ok && rsqrt.code.contains("float f1") && rsqrt.code.contains("c.ps0[0] = fp::estimate_rsqrt(fp::to_d(f1));"));
+    CHECK(rsqrt.code.contains("const float t = fp::to_f(fp::single(fp::mul(c.ps0[0], fp::round25(c.ps0[0])))); f2 = t; p2 = t;"));
+    CHECK(!rsqrt.code.contains("c.ps0[0] = fp::to_d(f0)") && !rsqrt.code.contains("_d(c)"));
+    // lfs f1,0(r3); lfd f0,8(r3); fmuls f1,f1,f0; stfs f1,0(r3); blr: a double constant, read from the Cpu.
+    const Lifted constant = fn({0xC0230000u, 0xC8030008u, 0xEC210032u, 0xD0230000u, 0x4E800020u});
+    CHECK(constant.ok && constant.code.contains("c.ps0[0] = fp::from_bits(read64(c, ea));"));
+    CHECK(constant.code.contains("fp::to_f(fp::single(fp::mul(fp::to_d(f1), fp::round25(c.ps0[0]))))"));
+    // cmpwi r3,0; beq +8; lfd f1,0(r4); fadds f2,f1,f1; blr: f1 a double on one path and the
+    // caller's (a float) on the other: no single mode.
+    CHECK(!fn({0x2C030000u, 0x41820008u, 0xC8240000u, 0xEC41082Au, 0x4E800020u}).code.contains("float"));
     // lfd f1,0(r3); fadds f1,f1,f1; blr, and bl; frsp f1,f1; blr: a double used as a single
     // (a conversion's constant, a double a call returned): no single mode, it would never stay in it.
     CHECK(!with_calls({0xC8230000u, 0xEC21082Au, 0x4E800020u}).code.contains("float"));
@@ -892,12 +906,12 @@ void test_fp_single_mode() {
             in.is_function = [](uint32_t) { return true; };
             return in;
         };
-        const LiftInput leaf = input(0x80003108, {0x38630001u, 0x4E800020u});
+        const LiftInput callee = input(0x80003108, {0x38630001u, 0x4E800020u});
         LiftInput caller = input(0x80003000, {0x9421FFF0u, 0x3BE40000u, 0x48000101u, 0x7C63FA14u, 0x38210010u, 0x4E800020u});
         const LiftInput through_pointer = input(0x80003200, {0x4E800421u, 0x4E800020u});  // bctrl; blr
-        std::map<uint32_t, CallSummary> summaries{{leaf.start, summarize(leaf)}, {caller.start, summarize(caller)}, {through_pointer.start, summarize(through_pointer)}};
-        CHECK(summaries.at(leaf.start).own.gpr == 8u && !summaries.at(leaf.start).own.all);
-        CHECK(summaries.at(caller.start).callees == (std::set<uint32_t>{leaf.start}) && summaries.at(through_pointer.start).own.all);
+        std::map<uint32_t, CallSummary> summaries{{callee.start, summarize(callee)}, {caller.start, summarize(caller)}, {through_pointer.start, summarize(through_pointer)}};
+        CHECK(summaries.at(callee.start).own.gpr == 8u && !summaries.at(callee.start).own.all);
+        CHECK(summaries.at(caller.start).callees == (std::set<uint32_t>{callee.start}) && summaries.at(through_pointer.start).own.all);
         const std::map<uint32_t, RegSet> sets = close_over_calls(summaries);
         CHECK(sets.at(caller.start).gpr == (1u << 1 | 1u << 3 | 1u << 4 | 1u << 31) && (sets.at(caller.start).other & 0x100u));
         caller.callee_regs = [&sets](uint32_t a) { return sets.contains(a) ? &sets.at(a) : nullptr; };

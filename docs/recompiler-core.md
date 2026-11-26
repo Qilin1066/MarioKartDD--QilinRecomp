@@ -173,7 +173,8 @@ It changes no result: the unit test runs three million random and edge-case oper
 The opening movie showed what the leaf rule above leaves out. THP's row decoder (`__THPDecompressiMCURowNxN`, `800F4E50`: the inverse DCT of every block, all paired singles) calls the Huffman decoders and saves `f27`–`f31` with `stfd`/`lfd`, so it ran in double mode: a 608x448 frame, 3.09 million guest instructions, took 12 ms, and the movie plays at 59.94 frames a second. Single mode now reaches such functions:
 - **A call** gets the halves the function has written written back, as a way out does; after it every half is the `Cpu`'s again. The halves read as singles later are fetched again there, and if one of them isn't a single-precision value the function's double version takes over from that very point: it takes a second argument, the resume point, and switches on it to a label after the call (all the state is in the `Cpu` then). Conditional calls keep a function out of single mode; compilers don't emit them.
 - **`stfd`** stores the register as it stands: the float written back as a double if this run wrote it, else the `Cpu`'s own double, single or not (a prologue saving the caller's register). **`lfd`** loads straight into the `Cpu`, and the half is the `Cpu`'s from there (an epilogue's restore).
-- **Left in double mode on purpose:** a function that loads a double and then uses it as a single (the constants of an integer conversion, 2^52 and the like), or that rounds with `frsp` a value it didn't make (a double argument, or what a call returned): it would leave single mode every time it ran.
+- **Doubles in the `Cpu`** (round 4, below): a value that isn't a single (what `lfd` loads, `frsqrte`'s estimate, `fctiw`'s integer, double arithmetic, a move of one) stays in the `Cpu`'s register and is read from there with the double helpers; the rest of the function stays in floats.
+- **Left in double mode on purpose:** a function that rounds with `frsp` a value it didn't make (a double argument, or what a call returned): it would leave single mode every time it ran. Also one where a register holds a float on one path and a double in the `Cpu` on another, where both meet; and one where a paired-single instruction reads such a double.
 - The halves written on some paths only are one bit mask (`written`), not a flag each.
 
 Single-mode functions in this game: 522 as leaves, **2,073** now (453 with resume points).
@@ -263,13 +264,14 @@ about 3-5%; the dispatcher for indirect calls 1.8%; replaced-function lookup 0.6
 
 | Change | Title | Demo race | 4-view race |
 |---|---|---|---|
-| Registers around a direct call cut down to the callee's (before: `--full-sync`) | 10.63 -> 10.33 ms | 9.78 -> 9.41 | 6.77 -> 6.70 |
+| Registers around a direct call cut down to the callee's (before: `--full-sync`) | 10.63 -> 10.33 ms | 8.08 -> 7.13 | 6.77 -> 6.70 |
 | Cheaper floating-point helpers (below) | 9.71 -> 7.27 ms | 6.69 -> 5.39 | 6.50 -> 5.70 |
-
 | Tried and left out: lifted code reading the dispatcher's cache itself, a cache for replaced-function lookups | 7.31 -> 7.42 | 5.37 -> 5.14 | 5.86 -> 5.83 |
+| Doubles in the `Cpu` in single mode (below; after merging main, two pairs) | 7.71 -> 7.68, 7.61 -> 7.58 | 5.52 -> 5.42, 5.51 -> 5.18 | 5.92 -> 5.96 |
 
-(The pairs ran at different times, so a row's "after" needn't equal the next row's "before". The last row is within
-the noise either way, so the code stayed as it was.) The movie decoder (`qilin_game_difftest --thp`, above) went from
+(The pairs ran at different times, so a row's "after" needn't equal the next row's "before". The third row is within
+the noise either way, so the code stayed as it was. The demo race is the least steady figure: it isn't quite the
+same race every run.) The movie decoder (`qilin_game_difftest --thp`, above) went from
 6.63 to 4.73 ms a frame with MSVC and from 6.0 to 4.01 ms with Clang for MinGW (zig, `x86_64-windows-gnu -O2`, the
 player kit's compiler), 0 differences; that Clang build of the game difftest (10 trials a function, 68,375 runs
 compared) found 0 differences too.
@@ -296,19 +298,49 @@ and nothing else running, and run the same two scenes headless (`mkdd --headless
 title's windows 2100-3600 and the race's from 5700, work less the GPU wait. Three runs at least, as the figures move;
 `MKDD_PROFILE=<file>` (Linux's SIGPROF sampler, `profile.cpp`) gives the split by function there.
 
-**What is left** (the demo race after this round): `PSMTXConcat` is still the hottest function (6.8% of busy
-time), then the pipe's handling (about 5%, `gpu.cpp`), `J3DJoint::recursiveCalc`, and functions single mode
-can't take: the game's own vector code uses `frsqrte` (an inlined square root: `checkPosition`, `MakeSusMatrix`,
-`DoTireAction`, `NeckCtrl::update`, `PSVECMag`) or loads double constants with `lfd` (`searchBase`,
-`J3DGetKeyFrameInterpolation`), about 8% between them, in double mode. In single-mode code the
+**Doubles in the `Cpu`.** About 8% of the race's busy time was the game's own vector code in double mode. It
+uses `frsqrte` (an inlined square root: `checkPosition`, `MakeSusMatrix`, `DoTireAction`, `NeckCtrl::update`,
+`PSVECMag`), double constants loaded with `lfd` (`searchBase`, `J3DGetKeyFrameInterpolation`) or `fctiwz`
+(`DriverModel::update`, `getTransform`). Single mode now leaves such a value where double mode would have it: in
+the `Cpu`'s register. `analyse_single` follows, forwards to a fixed point, which ps0 halves hold such a double on
+every path and on some (`SingleInfo::cpu`). `lfd`, `frsqrte`, `fctiw(z)` and the double arithmetic make one, a move
+of one (`fmr`, the sign changes, `fsel` choosing between two) is one, a single result ends one, and a call leaves it
+where it is. An instruction that reads one, or makes one, is lifted with the double helpers exactly as double mode
+lifts it (`mixed_insn`): a float operand is read as its double, and a single result goes to a float (the double's
+float, exact). A double never needs fetching, checking or writing back. Every one of those functions is in single
+mode now: **3,100** single-mode functions (2,073 before; 672 with resume points). A function stays in double mode if
+a register is a float on one path and such a double on another where they meet, or if a paired-single instruction
+reads such a double. `PSVECMag` alone (`mbench`): MSVC 28.9 -> 26.9 ns, Clang for MinGW 46.4 -> 32.2 ns.
+Checked:
+- the unit tests: an estimate, a constant, and a register that is a float on one path and a double on the other;
+- the instruction difftest;
+- the game difftest: 40 trials, 272,741 runs compared, 0 differences; and 20 trials after the fix below, 0 differences;
+- every file of the lift compiled with zig's Clang and `-Wall -Wextra -Wpedantic -Wshadow -Werror`: no warning.
+
+That warning check caught a latent fault, now fixed. An `lfd` with nothing to fetch after it still noted the
+"written" flags of a fallback it didn't emit, which left a flag set and never read.
+
+**What is left** (the demo race): `PSMTXConcat` is still the hottest function (6.8% of busy time), then the pipe's
+handling (about 5%, `gpu.cpp`, the GPU role's) and `J3DJoint::recursiveCalc`. In single-mode code the
 ordinary-result checks are still half the time of a function like `PSMTXConcat` (with them removed, which would be
 wrong, it takes 46 ns instead of 77), and writing the FPR halves back on the way out is another 10-25%.
 
 ## Cheap wins noted, not taken
-- Single mode with a few halves kept as doubles: `frsqrte`'s estimate (not a single) and the double constants an
-  `lfd` loads would let the double-mode functions above run in single mode.
-- A function's FPR halves written back on the way out only if some caller can read them. That needs every
-  caller known, including the ones that reach it through pointers, or an assumption that the code follows the EABI
-  (f0-f13 dead after a call but for f1). The game difftest compares every register, so it would need to know the
-  rule too.
+- **A function's FPR halves written back on the way out only where a caller can read them: not taken, because it
+  can't be made provably safe here.** It would save 10-25% of a small single-mode leaf (`PSMTXCopy` 21 -> 16 ns,
+  `PSMTXMultVec` 37 -> 32 in `mbench`, with every write-back removed). Why not:
+  - *Callers aren't all known.* 5,676 functions are reached through pointers in data and 592 through addresses built
+    in code; any function the dispatcher can reach (every one is in its table) may be called through a pointer the
+    analysis can't see: one computed at run time, or held by native code (`mkdd/src/build.hpp`'s addresses, the
+    wrappers, callbacks the runtime calls). For those every half has to go back.
+  - *Liveness after a return is interprocedural and transitive.* A double-mode caller reloads, after a call, every
+    FPR of the callee's set that it uses and writes all of them back at its own exit, so a stale half would reach the
+    caller's caller as a register value. A half is dead only if it is dead in every caller, and in their callers
+    wherever it passes through unchanged. That needs a fixed point over the whole call graph with summaries of
+    what passes through each function, and any function with an unknown caller (above) stops it.
+  - *The EABI says f0-f13 are dead after a call (but f1 and the paired f1-f4 returns).* Taking that as given would
+    be an assumption about every routine in the game, the SDK's hand-written assembly included. A single routine
+    that breaks it would give wrong results with no fatal error, so the rule against unproven assumptions keeps it out.
+  - *The game difftest couldn't check it.* It compares every register after each function. With halves left out on
+    purpose it would have to skip them, so it couldn't catch an analysis that got one wrong.
 - `ps1` of an FPR is carried through functions that only use scalar singles; a per-function "ps1 never read" would drop half the FP write-backs there.

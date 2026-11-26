@@ -127,6 +127,31 @@ bool single_effect(const Insn& in, uint64_t& use, uint64_t& def) {
     }
 }
 
+// Instructions whose result isn't a single-precision value (an estimate, an
+// integer's bits, double arithmetic): in single mode their destination is one
+// of the function's doubles, both halves, as in double mode.
+bool makes_double(Op op) {
+    switch (op) {
+    case Op::frsqrte: case Op::fctiw: case Op::fctiwz: case Op::fadd: case Op::fsub: case Op::fmul: case Op::fdiv:
+    case Op::fmadd: case Op::fmsub: case Op::fnmadd: case Op::fnmsub:
+        return true;
+    default: return false;
+    }
+}
+// The FPRs an instruction names (bit n: FPR n), and those it reads (all but a non-store's fD).
+uint32_t fprs_named(const Insn& in, bool sources_only = false) {
+    uint32_t m = 0;
+    const bool store = (ppc::spec(in.op).flags & ppc::kStore) != 0;
+    for (ppc::Opnd o : ppc::spec(in.op).operands) {
+        if (o == ppc::Opnd::fD && (!sources_only || store)) m |= 1u << in.rd();
+        if (o == ppc::Opnd::fA) m |= 1u << in.ra();
+        if (o == ppc::Opnd::fB) m |= 1u << in.rb();
+        if (o == ppc::Opnd::fC) m |= 1u << in.rc_reg();
+    }
+    return m;
+}
+uint64_t both_halves(uint32_t regs) { return uint64_t{regs} << 32 | regs; }
+
 // What single mode needs to know of a function: whether it can be lifted so,
 // the halves it reads before writing them (they must hold single-precision
 // values on entry, or the double version runs instead), and before each
@@ -147,6 +172,13 @@ struct SingleInfo {
     std::vector<unsigned> resume;      // per instruction: where the double version takes over after it (0: nowhere)
     std::vector<bool> call;            // per instruction: a call
     unsigned resumes = 0;
+    // Doubles in the Cpu: a value that isn't a single (makes_double's results, what lfd loads,
+    // a move of either) stays in the Cpu's register, where double mode would have it, and is
+    // read from there as a double; nothing fetches or checks it. `cpu`: per instruction, the
+    // halves (ps0 only) that hold such a value on every path there. `mixed`: the instructions
+    // that read one, or make one (lifted with the double helpers).
+    std::vector<uint64_t> cpu;
+    std::vector<bool> mixed;
 };
 
 bool double_store(Op op) { return op == Op::stfd || op == Op::stfdx || op == Op::stfdu || op == Op::stfdux; }
@@ -161,9 +193,9 @@ SingleInfo analyse_single(const LiftInput& f) {
     std::map<uint32_t, const JumpTable*> tables;
     for (const JumpTable& t : f.jtabs) tables[t.at] = &t;
     std::vector<uint64_t> use(n), def(n), kill(n, 0);
+    std::vector<bool> is_fp(n, false), doubled(n, false);  // a floating-point instruction; one that makes a double
     info.call.assign(n, false);
     std::vector<std::vector<size_t>> succ(n), pred(n);
-    bool any = false;
     for (size_t k = 0; k < n; ++k) {
         const auto& [a, in] = f.insns[k];
         if (double_store(in.op)) {
@@ -173,8 +205,14 @@ SingleInfo analyse_single(const LiftInput& f) {
             if (f.single_leaf_only) return info;
             kill[k] = F0(in.rd());
         } else if (uses_fpr(in.op) || in.op == Op::ps_cmpu0 || in.op == Op::ps_cmpo0 || in.op == Op::ps_cmpu1 || in.op == Op::ps_cmpo1) {
-            if (!single_effect(in, use[k], def[k])) return info;
-            any = true;
+            is_fp[k] = true;
+            if (makes_double(in.op) || in.op == Op::stfiwx) {
+                if (f.single_leaf_only) return info;
+                use[k] = fprs_named(in, true);  // (ps0 of each source)
+                if (in.op != Op::stfiwx) kill[k] = F0(in.rd()), doubled[k] = true;
+            } else if (!single_effect(in, use[k], def[k])) {
+                return info;
+            }
         }
         const bool branch = in.op == Op::b || in.op == Op::bc || in.op == Op::bclr || in.op == Op::bcctr;
         // A call comes back with every register the callee's. (A conditional call would leave
@@ -197,9 +235,53 @@ SingleInfo analyse_single(const LiftInput& f) {
         }
         if (next && k + 1 < n && f.insns[k + 1].first == a + 4) succ[k].push_back(k + 1);
     }
-    if (!any) return info;
     for (size_t k = 0; k < n; ++k)
         for (size_t t : succ[k]) pred[t].push_back(k);
+    // The doubles in the Cpu, forwards to a fixed point: on every path (cpu) and on some (maybe).
+    // lfd and makes_double make one; a move of one (fmr and the sign changes, fsel picking from
+    // one) is one; a single result ends one; a call leaves it where it is.
+    const auto move_from = [](const Insn& in) -> uint64_t {
+        switch (in.op) {
+        case Op::fmr: case Op::fneg: case Op::fabs: case Op::fnabs: return F0(in.rb());
+        case Op::fsel: return F0(in.rb()) | F0(in.rc_reg());
+        default: return 0;
+        }
+    };
+    std::vector<uint64_t> cpu(n, ~uint64_t{0}), maybe(n, 0);
+    const auto after = [&](size_t k, uint64_t c) {
+        const Insn& in = f.insns[k].second;
+        if (double_load(in.op) || doubled[k] || (move_from(in) & c)) return c | F0(in.rd());
+        return c & ~def[k];
+    };
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (size_t k = 0; k < n; ++k) {
+            uint64_t must = k == 0 || pred[k].empty() ? 0 : ~uint64_t{0}, may = 0;
+            for (size_t p : pred[k]) must &= after(p, cpu[p]), may |= after(p, maybe[p]);
+            if (must != cpu[k] || may != maybe[k]) cpu[k] = must, maybe[k] = may, changed = true;
+        }
+    }
+    // Each instruction reads a half as a float, or (always the same way) a double in the Cpu.
+    info.mixed.assign(n, false);
+    bool any = false;
+    for (size_t k = 0; k < n; ++k) {
+        const Insn& in = f.insns[k].second;
+        if (!is_fp[k]) continue;
+        const uint64_t read = use[k] & cpu[k];
+        if ((use[k] | move_from(in)) & maybe[k] & ~cpu[k]) return info;  // a float on some paths, a double on others
+        if (read && (ppc::spec(in.op).flags & ppc::kPaired)) return info;  // (paired singles stay with floats)
+        if (doubled[k] || in.op == Op::stfiwx || read || (move_from(in) & cpu[k])) {
+            info.mixed[k] = true;
+            if (move_from(in) & cpu[k]) {
+                if (in.op == Op::fsel && (move_from(in) & ~cpu[k])) return info;  // (one choice a float, the other a double)
+                def[k] = 0, kill[k] = F0(in.rd()), doubled[k] = true;
+            }
+            use[k] &= ~read;
+        } else {
+            any = any || use[k] || def[k];
+        }
+    }
+    if (!any) return info;  // (nothing would be done in floats)
     // Read before written on some path from the entry: liveness, backwards to a fixed point.
     std::vector<uint64_t> live(n, 0);
     for (bool changed = true; changed;) {
@@ -235,17 +317,18 @@ SingleInfo analyse_single(const LiftInput& f) {
     for (size_t k = 0; k < n; ++k) {
         if (!kill[k]) continue;
         for (size_t t : succ[k]) info.need[k] |= live[t] & kill[k];
-        // A double loaded and then used as a single isn't one (the constants of an integer
-        // conversion, 2^52 and the like): the double version would take over every time.
-        if (info.need[k] && double_load(f.insns[k].second.op)) return info;
+        // A double in the Cpu read later as a float (on a path where it's read as one) would send
+        // the double version in every time: no single mode then.
+        if (info.need[k] && !info.call[k]) return info;
         if (info.need[k]) info.resume[k] = ++info.resumes;
     }
     // Likewise frsp of a value this function didn't make: the compiler put it there because the
     // value is a double (an argument, or what a call returned).
     for (size_t k = 0; k < n; ++k)
-        if (f.insns[k].second.op == Op::frsp && !(info.must[k] & F0(f.insns[k].second.rb()))) return info;
+        if (const Insn& in = f.insns[k].second; in.op == Op::frsp && !info.mixed[k] && !(info.must[k] & F0(in.rb()))) return info;
     info.def = std::move(def);
     info.kill = std::move(kill);
+    info.cpu = std::move(cpu);
     info.ok = true;
     return info;
 }
@@ -614,8 +697,10 @@ private:
             const uint64_t bit = F0(d);
             if (double_load(in.op)) {
                 // The register is the Cpu's from here; fetched again as a float if it's read as one.
+                // (sync_out only where there is a fetch: it notes the "written" flags it reads.)
+                const std::string again = single_->need[cur_] ? fetch(single_->need[cur_], sync_out(bit)) : std::string();
                 line(std::format("{{ const uint32_t ea = {}; c.ps0[{}] = fp::from_bits(read64(c, ea));{}{}{} }}", ea, d, update,
-                                 wrote(bit, false), fetch(single_->need[cur_], sync_out(bit))));
+                                 wrote(bit, false), again));
                 return true;
             }
             // Ours if we wrote it (a flag says, where only some paths did), else the Cpu's.
@@ -703,11 +788,79 @@ private:
         }
     }
 
+    // Single mode: an instruction that reads a double in the Cpu, or makes one (SingleInfo::cpu),
+    // lifted with the double helpers as double mode lifts it. A float operand is read as its
+    // double; a single result goes to a float (that double's float, which loses nothing); a
+    // double result goes to the Cpu's register.
+    bool mixed() const { return single_->mixed[cur_]; }
+    bool mixed_insn(const Insn& in, std::string& out) {
+        const unsigned d = in.rd(), a = in.ra(), b = in.rb(), cr = in.rc_reg();
+        const uint64_t cpu = single_->cpu[cur_];
+        auto line = [&](std::string s) { out = "    " + s + "\n"; return true; };
+        auto v = [&](unsigned n) { return (cpu & F0(n)) ? std::format("c.ps0[{}]", n) : std::format("fp::to_d({})", F(n)); };
+        auto vp = [&](unsigned n) { return std::format("fp::to_d({})", P(n)); };  // (only a ps0 is ever a double in the Cpu)
+        const bool x = in.op == Op::stfsx || in.op == Op::stfsux || in.op == Op::stfiwx;
+        const bool u = in.op == Op::stfsu || in.op == Op::stfsux;
+        auto mem = [&](const std::string& s) {
+            const std::string ea = u ? (x ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm()))
+                                     : x ? std::format("{} + {}", RA0(a), R(b))
+                                         : a ? R(a) + plus(in.simm()) : std::format("{}u", static_cast<uint32_t>(in.simm()));
+            return line(std::format("{{ const uint32_t ea = {}; {}{} }}", ea, s, u ? std::format(" {} = ea;", R(a)) : ""));
+        };
+        // A double result: ps0 in the Cpu.
+        auto dbl = [&](const std::string& value) { return line(std::format("c.ps0[{}] = {};{}", d, value, wrote(F0(d), false))); };
+        // A single-precision result, both halves: floats.
+        auto sgl = [&](const std::string& value) {
+            return line(std::format("{{ const float t = fp::to_f({}); {} = t; {} = t;{} }}", value, F(d), P(d), wrote(FP(d))));
+        };
+        auto madd = [&](bool single) {
+            const bool sub = in.op == Op::fmsub || in.op == Op::fnmsub || in.op == Op::fmsubs || in.op == Op::fnmsubs;
+            const bool neg = in.op == Op::fnmadd || in.op == Op::fnmsub || in.op == Op::fnmadds || in.op == Op::fnmsubs;
+            const std::string r = single ? std::format("fp::single(fp::madd_single({}, {}, {}, {}))", v(a), v(cr), v(b), sub)
+                                         : std::format("fp::flush(fp::madd({}, {}, {}, {}))", v(a), v(cr), v(b), sub);
+            return neg ? "fp::neg_unless_nan(" + r + ")" : r;
+        };
+        switch (in.op) {
+        case Op::fadd: return dbl(std::format("fp::flush(fp::add({}, {}))", v(a), v(b)));
+        case Op::fsub: return dbl(std::format("fp::flush(fp::sub({}, {}))", v(a), v(b)));
+        case Op::fmul: return dbl(std::format("fp::flush(fp::mul({}, {}))", v(a), v(cr)));
+        case Op::fdiv: return dbl(std::format("fp::flush(fp::div({}, {}))", v(a), v(b)));
+        case Op::fmadd: case Op::fmsub: case Op::fnmadd: case Op::fnmsub: return dbl(madd(false));
+        case Op::fadds: return sgl(std::format("fp::single(fp::add({}, {}))", v(a), v(b)));
+        case Op::fsubs: return sgl(std::format("fp::single(fp::sub({}, {}))", v(a), v(b)));
+        case Op::fmuls: return sgl(std::format("fp::single(fp::mul({}, fp::round25({})))", v(a), v(cr)));
+        case Op::fdivs: return sgl(std::format("fp::single(fp::div({}, {}))", v(a), v(b)));
+        case Op::fmadds: case Op::fmsubs: case Op::fnmadds: case Op::fnmsubs: return sgl(madd(true));
+        case Op::frsp: return sgl(std::format("fp::single({})", v(b)));
+        case Op::fres: return sgl(std::format("fp::estimate_reciprocal({})", v(b)));
+        case Op::frsqrte: return dbl(std::format("fp::estimate_rsqrt({})", v(b)));
+        case Op::fctiw: return dbl(std::format("fp::to_int({}, false)", v(b)));
+        case Op::fctiwz: return dbl(std::format("fp::to_int({}, true)", v(b)));
+        // A move of a double in the Cpu (the analysis made it one).
+        case Op::fmr: return d == b ? line("/* fmr to itself */") : dbl(v(b));
+        case Op::fneg: return dbl(std::format("fp::from_bits(fp::bits({}) ^ fp::kSign)", v(b)));
+        case Op::fabs: return dbl(std::format("fp::from_bits(fp::bits({}) & ~fp::kSign)", v(b)));
+        case Op::fnabs: return dbl(std::format("fp::from_bits(fp::bits({}) | fp::kSign)", v(b)));
+        case Op::fsel:  // (choosing between two doubles, or between two floats on a double)
+            if (cpu & (F0(b) | F0(cr))) return dbl(std::format("{} >= -0.0 ? {} : {}", v(a), v(cr), v(b)));
+            return line(std::format("{} = {} >= -0.0 ? {} : {};{}", F(d), v(a), F(cr), F(b), wrote(F0(d))));
+        case Op::fcmpu: case Op::fcmpo: case Op::ps_cmpu0: case Op::ps_cmpo0:
+            return line(std::format("{} = fp::compare({}, {});", CR(in.crfd()), v(a), v(b)));
+        case Op::ps_cmpu1: case Op::ps_cmpo1: return line(std::format("{} = fp::compare({}, {});", CR(in.crfd()), vp(a), vp(b)));
+        case Op::stfs: case Op::stfsx: case Op::stfsu: case Op::stfsux: return mem(std::format("write32(c, ea, fp::store_single({}));", v(d)));
+        case Op::stfiwx: return mem(std::format("write32(c, ea, static_cast<uint32_t>(fp::bits({})));", v(d)));
+        default:
+            error_ = std::format("single mode: {} with a double in the Cpu", ppc::spec(in.op).name);
+            return false;
+        }
+    }
+
     std::string trap(uint32_t pc, const char* why) {
         return std::format("{} c.hooks->trap(c, {}, \"{}\");", sync_out(), hex(pc), why);
     }
 
     bool insn(uint32_t pc, const Insn& in, std::string& out) {
+        if (single_ && mixed()) return mixed_insn(in, out);
         if (single_ && single_insn(in, out)) return true;
         const unsigned d = in.rd(), a = in.ra(), b = in.rb();
         const bool record_form = (ppc::spec(in.op).flags & ppc::kRc) && in.rc();
