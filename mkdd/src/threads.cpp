@@ -93,8 +93,10 @@ struct Thread {
     uint64_t ran_ns = 0;            // the time it has had the guest CPU, less idle waits (log_threads)
 };
 
-std::mutex g_lock;  // guards the hand-over (go flags, condition variables)
-std::map<uint32_t, std::shared_ptr<Thread>> g_threads;
+// Never destroyed: parked guest threads wait on their condition variables to the end, and
+// glibc's pthread_cond_destroy blocks on one with a waiter if anything runs static destructors.
+std::mutex& g_lock = *new std::mutex;  // guards the hand-over (go flags, condition variables)
+std::map<uint32_t, std::shared_ptr<Thread>>& g_threads = *new std::map<uint32_t, std::shared_ptr<Thread>>;
 Thread* g_current = nullptr;
 std::deque<Thread*> g_ready[32];
 std::map<uint32_t, std::deque<Thread*>> g_waiters;
