@@ -6,21 +6,40 @@ A static recompilation of **Mario Kart: Double Dash!!** (Nintendo, GameCube, 200
 
 ## Status
 
-**In development: the game does not run yet.** The project was started from the author's Punch-Out!! (Wii) recompilation and is being converted to the GameCube and to this game part by part. What is listed as done below is tested without the game (see [Building](#building)); nothing here is a claim about playing it.
+The game plays, as far as scripted runs have taken it: from the disc through the opening movie, the title and every menu into races, a whole cup, time trials with ghosts, split screen and battle, with sound and memory cards. **None of it has yet been seen in a real window, heard, or played with a real controller.** Every check so far is a run without a window (`--headless`) or drawing without one (`--offscreen`), with input played by a script (`docs/input.md`, "Runs without a player"), read from logs, frame dumps and sound dumps on the developer's Windows PC. Expect faults that only someone playing will find.
 
 | Part | State |
 |---|---|
 | Disc reader | ✅ `.iso`, `.gcm`, `.ciso` images and extracted folders, read in place (`docs/disc.md`) |
-| Recompiler (decoder, function discovery, lifter) | ✅ for this DOL: 13,472 functions found, 12,754 lifted to C++ with no stubs, the rest replaced or dropped by the plan (`docs/recompiler-core.md`, `docs/dol-analysis.md`) |
+| Recompiler (decoder, function discovery, lifter) | ✅ every one of the DOL's 13,472 functions accounted for: 12,755 lifted to C++, 511 replaced, 206 dropped, 0 stubs; differential tests against a reference interpreter: 0 differences (`docs/recompiler-core.md`) |
 | Names and the library plan (`data/GM4E01/plan.tsv`) | ✅ names ported from the disc's own map of its debug build; what is lifted, replaced or dropped, library by library (`docs/code-analysis.md`) |
-| DSP microcode | ✅ the game's own sound-processor program, recompiled to C++ from the player's DOL at build time (`qilin-dsp`, `docs/audio.md`) |
-| Controllers, memory cards, audio RAM | 🔨 written and tested against the SDK's interfaces, not against the running game (`docs/input.md`, `docs/saves.md`) |
-| Renderer (GX on Vulkan) | 🔨 adapted to the GameCube and to what this game draws, tested on recorded commands, not with the game (`docs/graphics.md`) |
-| Sound | 🔨 the DSP and its microcode tested apart from the game (`docs/audio.md`) |
-| Runtime: OS, disc, video, threads, start-up | 🔨 in development (`docs/runtime.md` still describes parts of the Wii project it came from) |
-| Window, settings menu, picture, sound output | 🔨 written; tested offscreen and by unit tests only (below) |
-| Wider pictures, higher frame rates | 🔨 written from an analysis of the game's code (`docs/enhancements.md`, `docs/graphics.md`), tested apart from the game; not seen with it |
-| The game, boot to credits | ❌ not yet |
+| Runtime: OS, threads, disc, video | ✅ boots and runs every scene tried; a 15-minute unattended run without a stop and without memory growth (`docs/runtime.md`) |
+| Memory cards | ✅ slots A and B as `.gci` files, with a history of previous saves; a card pulled out before or during a write behaves as on a GameCube (`docs/saves.md`) |
+| Controllers | 🔨 four ports, SDL3 controllers and the keyboard; only scripted input so far (`docs/input.md`) |
+| Renderer (GX on Vulkan) | 🔨 frame dumps from eight courses in one-, two- and four-view layouts reviewed, no confirmed fault; not yet compared with Dolphin or seen in a window (`docs/graphics.md`) |
+| Sound | 🔨 the game's own DSP microcode statically recompiled; checked by numbers (no clipping, agrees with reference decodes), not yet listened to (`docs/audio.md`) |
+| Wider pictures | 🔨 any aspect ratio, Hor+, with the HUD at the edges, in the middle or stretched; tested offscreen (`docs/enhancements.md`) |
+| Frame rates above 59.94 | 🔨 pictures drawn between the game's frames; tested offscreen (`docs/graphics.md`) |
+| Window, settings menu, sound output | 🔨 tested offscreen and by unit tests only |
+| The game, boot to credits | 🔨 not yet played to the end |
+
+**What the scripted runs did.** Booted from an image and from an extracted folder: the progressive-scan question, the opening movie, the title and every menu. A whole 50cc Mushroom Cup Grand Prix, with the award ceremony and the cup saved to the card. Time trials, with the record and the ghost saved; the saved ghost loaded and raced against, its replay matching the run that recorded it to a tenth of a unit for the whole race (the recompiled game is deterministic). Two players on a split screen, two in one kart, a four-player Versus race, a two-player Balloon Battle. Memory cards in slots A and B, the save history, and a card pulled out before and during a write.
+
+**Wider pictures and higher frame rates.** The picture can be any shape: the game's cameras are widened (Hor+), the frame gets whole extra columns at full resolution rather than being stretched, and in the race surveyed nothing is still culled against the old 4:3 edges. Menus and movies stay 4:3 between bars. The game has no time step: its physics, timers and animation all move one fixed step a frame, 59.94 frames a second, and ghosts are recordings of those steps, so it cannot simply be run faster. Frame rates above 59.94 are instead pictures drawn between two of its frames with the positions blended, which costs one frame (17 ms) of delay in those modes; the game itself is unchanged. In every mode the runtime ends each frame as soon as the game has drawn it and reads the input just before the retrace, which cuts the delay from a press to the picture by about 16 to 27 ms (measured offscreen; `docs/runtime.md`, "Response time").
+
+**Efficiency**, on a Ryzen 7 5800X: the game's threads work about 5.4 ms a frame in a one-view race; turning the game's GPU commands into Vulkan takes about 4.4 ms a frame in a four-player race. Nothing has been measured on a Raspberry Pi yet.
+
+**Not done yet:**
+
+- Looking at it, listening to it and playing it with a controller on a real display; comparing pictures and sound with Dolphin.
+- The rest of the game: the other cups and classes, the All-Cup Tour, what is unlocked, the staff roll.
+- LAN play (no Broadband Adapter is reported, so the game never starts its network code) and the steering wheel.
+- The console's reset button (nothing sets it yet); the disc drive's errors and its cover.
+- The pipeline cache starts empty, so a first run may pause while it builds its shaders.
+- Split screen and courses other than the one surveyed have not been checked for culling at wide shapes; matching pictures between frames to their neighbours in a played race (items, Lakitu, cannons) is checked only on the demo races.
+- Measuring on a Raspberry Pi 4.
+
+**Platforms.** Built and tested on Windows x64 with MSVC. Linux, macOS and ARM64 are compile-checked with Clang only: not built or run there. CI (`.github/workflows/ci.yml`) has not run yet.
 
 ## What it is meant to be
 
@@ -28,13 +47,13 @@ The same requirements and scope as the author's other recompilations (Grabbed by
 
 ## Playing
 
-None of this plays the game yet; it is how it will be started, and the launchers already do what they say up to the point where the game itself would run.
+The game's code is built on your own computer from your own disc, and never distributed. These are the ways to start it; of them, the source build on Windows (`Play Double Dash.bat`, or by hand) is the one that has been used. The Windows download and the Linux and macOS commands are written but not yet tried.
 
 Your disc can be an image as it is, `.iso`, `.gcm` or `.ciso` (GameCube discs aren't encrypted, so nothing has to be extracted first), or a folder extracted from one (the folder holding `sys` and `files`). Compressed formats aren't read: convert an `.rvz` or `.gcz` to ISO with Dolphin (right-click the game, Convert File); an NKit image has to be converted back to the original with NKit. The launcher says which it is and what to do.
 
 ### Windows download
 
-Each tagged release will have `MarioKartDD--QilinRecomp-<version>-windows-x64.zip` attached (`.github/workflows/player-kit.yml`). Unpack it and double-click **`Play Double Dash.bat`**: the first time, it asks for your disc and builds the game from it with the bundled compiler (LLVM-MinGW); after that it starts the game at once. `-ChooseDisc` picks another disc.
+Each tagged release is to have `MarioKartDD--QilinRecomp-<version>-windows-x64.zip` attached, built by `.github/workflows/player-kit.yml` (which has not run yet). Unpack it and double-click **`Play Double Dash.bat`**: the first time, it asks for your disc and builds the game from it with the bundled compiler (LLVM-MinGW); after that it starts the game at once. `-ChooseDisc` picks another disc.
 
 ### From the source on Windows
 
@@ -99,7 +118,7 @@ The menu has three pages, as in the author's other recompilations.
 - **Display:** full screen and on which display; the picture's size (whole multiples, fit, fill); render resolution (following the window, or 1x to 8x of 640x480); SMAA anti-aliasing; AMD FSR 1 upscaling with its sharpness; a plain or CRT look; vsync and low latency; presets; anisotropic filtering; true colour; the graphics device; frame times.
 - **Game:** volume, sound output (stereo, or 5.1 decoded from the game's Dolby Surround) and device; the console's own settings (sound, progressive scan); previous saves.
 
-Two groups of options change the game itself and have not been seen working with it yet: a picture wider than 4:3 (aspect ratio, HUD placement; `docs/enhancements.md`) and frame rates above the game's own 60, which are pictures drawn between its frames (`docs/graphics.md`, `docs/runtime.md`).
+Two groups of options go beyond the console: a picture wider than 4:3 (aspect ratio, HUD placement; `docs/enhancements.md`) and frame rates above the game's own 59.94, which are pictures drawn between its frames (`docs/graphics.md`, `docs/runtime.md`). Both work in offscreen runs and have not yet been seen on a real display.
 
 The settings (`mkdd.ini`, editable by hand), the saves, captures, the pipeline cache and the log live in `qilin/mkdd` in your per-user application data (Windows: `%LOCALAPPDATA%\qilin\mkdd`). Send a capture (F9), or `mkdd.log`, with any bug report.
 
@@ -158,7 +177,7 @@ build/qilin-dsp lift path/to/main.dol -o dsp_ucode.cpp     # the DSP microcode i
 
 ## Versions and changes
 
-Changes are recorded in [`CHANGELOG.md`](CHANGELOG.md). The version lives in one place, `project(... VERSION ...)` in `CMakeLists.txt`, and `qilin --version` prints it. 1.0.0 will be the first build that plays the whole game.
+Releases are tagged `vX.Y.Z`, and every release is recorded in [`CHANGELOG.md`](CHANGELOG.md). The version lives in one place, `project(... VERSION ...)` in `CMakeLists.txt`, and `qilin --version` prints it. 1.0.0 will be the first build that plays the whole game.
 
 ## Licence
 

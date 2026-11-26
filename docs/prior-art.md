@@ -4,7 +4,7 @@ What this project builds on or consults, and under which rule. Two rules hold th
 
 ## 1. Sibling projects (same author, GPL-3.0)
 
-- **PunchOutWii--QilinRecomp** (Punch-Out!!, Wii). This project was started from its v0.22.0: the recompiler (DOL loader, PowerPC decoder, function discovery, lifter with its differential test), the guest runtime, the GX renderer on Vulkan, the host layer and the settings menu. The Wii and the GameCube share the CPU family, GX and most of the SDK's shape, which is why; what differs (no IOS, no Wii Remote, memory cards for NAND, the DSP's microcode, the disc) is being replaced part by part.
+- **PunchOutWii--QilinRecomp** (Punch-Out!!, Wii). This project was started from its v0.22.0: the recompiler (DOL loader, PowerPC decoder, function discovery, lifter with its differential test), the guest runtime, the GX renderer on Vulkan, the host layer and the settings menu. The Wii and the GameCube share the CPU family, GX and most of the SDK's shape, which is why; what differs (no IOS, no Wii Remote, memory cards for NAND, the DSP's microcode, the disc) was replaced part by part for 0.1.0.
 - **GBTGhoulies--QilinRecomp** (Grabbed by the Ghoulies, Xbox). The reference for scope and for the settings menu's options. Its present-pass shader wrappers for SMAA and FSR 1 (`recomp/runtime/gfx/smaa`, `gfx/fsr`), their Vulkan passes and its menu's wording were reused here (`host/src/post.cpp`, `host/shaders/post/`, `mkdd/src/menu.cpp`).
 - **BeatTheBeat--QilinRecomp** (Wii): vblank steering in the main loop came from it by way of the Punch-Out project.
 

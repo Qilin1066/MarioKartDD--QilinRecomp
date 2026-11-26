@@ -2,7 +2,7 @@
 
 **Guiding principle: efficiency and reliability come first.** Every design choice is judged on whether it makes the game cheaper to run on low-end hardware and whether it fails loudly and predictably instead of silently misbehaving.
 
-The requirements and scope are the same as GBTGhoulies--QilinRecomp's (Grabbed by the Ghoulies), applied to the GameCube the way PunchOutWii--QilinRecomp applies them to the Wii, which this project was started from. Where a part is still the Wii project's, its own note says so; this document is the target.
+The requirements and scope are the same as GBTGhoulies--QilinRecomp's (Grabbed by the Ghoulies), applied to the GameCube the way PunchOutWii--QilinRecomp applies them to the Wii, which this project was started from. This document is the target; the README's Status section says where things stand.
 
 ## Targets
 
@@ -39,7 +39,7 @@ All enhancements live behind one settings file (`mkdd.ini`) with presets (origin
 
 ## Wider pictures and higher frame rates (open design)
 
-Both are settings and menu entries (`aspect`, `hud`, `frame_rate`) routed through `mkdd/src/enhance.hpp`. The wider picture's game side is written (`enhance.cpp`); the frame rate's is in: the renderer draws pictures between the game's frames (`graphics.md`) and the main loop presents them (`runtime.md`, "Frame rates"). Neither has been seen with the game on a real display. `enhancements.md` has the analysis of the game's code for both, with addresses, and the design that follows from it; where it and the outline below differ, it is the later and the better informed.
+Both are settings and menu entries (`aspect`, `hud`, `frame_rate`) routed through `mkdd/src/enhance.hpp`, and both are built: the wider picture widens the game's cameras and places its HUD (`enhance.cpp`, `hud.cpp`), and the renderer draws pictures between the game's frames (`graphics.md`) which the main loop presents (`runtime.md`, "Frame rates"). Both work with the game in offscreen runs; neither has been seen on a real display. `enhancements.md` has the analysis of the game's code for both, with addresses, and the design that follows from it; where it and the outline below differ, it is the later and the better informed.
 
 **The game as it is** (from that analysis). It draws a 4:3 picture and has no widescreen mode. Its main loop takes one fixed step of the logic per retrace in every mode, whatever the number of players: 59.94 a second. The only switch is a draw skip (a picture every second step) that LAN play turns on for its fullest games. Nothing in the game is driven by a time step.
 
@@ -68,16 +68,15 @@ What each kind of display then does, with the game's clock (the retraces) and th
 | 75, 100, 144, 165 Hz (not a multiple) | 59.94 Hz by the clock | frames land unevenly on the refreshes (full screen switches to a multiple where the display has one: `match_refresh`) | a picture every refresh, each at the share of the tick gone by when it is seen: even motion at the display's own rate | as above |
 | Variable refresh (the setting) | 59.94 Hz by the clock | the display follows the game: one refresh a frame | presents as fast as the display takes them (its top rate), phases as for its nominal refresh | as above |
 | No vsync | 59.94 Hz by the clock | each frame as it comes, tearing | a clock at the display's rate paces the pictures | as above |
- Until one is in, the game runs at its own rate and the display shows each frame once, twice or more (`host/include/qilin/host/pacing.hpp`).
 
 ## Roadmap
 
 The table in the README is the status. In order:
 
-1. **Analysis of this DOL:** the GameCube's Gekko in the decoder and lifter, function discovery, names from the disc's map, the library plan (`data/GM4E01/plan.tsv`).
-2. **Runtime:** OS, disc, video, threads, controllers, memory cards, audio RAM and the DSP for the GameCube's SDK; start-up to the first frame.
-3. **Renderer:** GX on Vulkan with this game's use of it; the first picture shown.
-4. **Playable at original spec:** one to four players, sound, saves; compared with Dolphin; tested on the low-end reference.
-5. **The host's enhancements with the game running:** render resolution, anisotropic filtering, SMAA, FSR 1, the CRT look, pacing on 120, 144 and variable-refresh displays: each is implemented and tested offscreen now, and wants looking at with the game.
-6. **Wider pictures**, then **higher frame rates**, as above.
+1. **Analysis of this DOL:** the GameCube's Gekko in the decoder and lifter, function discovery, names from the disc's map, the library plan (`data/GM4E01/plan.tsv`). Done.
+2. **Runtime:** OS, disc, video, threads, controllers, memory cards, audio RAM and the DSP for the GameCube's SDK. Done: the game boots and runs every scene tried in scripted runs.
+3. **Renderer:** GX on Vulkan with this game's use of it. Done as far as frame dumps show; not yet seen in a window.
+4. **Playable at original spec:** one to four players, sound, saves; compared with Dolphin; tested on the low-end reference. One to four players, sound and saves work in scripted runs (0.1.0); playing it with a controller, listening to it, the comparison with Dolphin and the Raspberry Pi 4 are still to do.
+5. **The host's enhancements with the game running:** render resolution, anisotropic filtering, SMAA, FSR 1, the CRT look, pacing on 120, 144 and variable-refresh displays: each is implemented and tested offscreen, and wants looking at on a real display.
+6. **Wider pictures** and **higher frame rates**, as above: built and tested offscreen with the game; to be seen on a real display.
 7. **Extras:** texture replacement packs and the like.
