@@ -156,7 +156,7 @@ enum Flag : uint32_t {
     // Operand constraints that are invalid forms when broken:
     kRaNonZero = 1u << 16,      // rA != 0 (stores, FP and paired loads with update)
     kRaNotZeroOrRd = 1u << 17,  // rA != 0 and rA != rD (integer loads with update)
-    kLmw = 1u << 18,            // rA outside the registers lmw loads
+    kLmw = 1u << 18,            // lmw: see lmw_loads_base
     kLswi = 1u << 19,           // rA outside the registers lswi loads
     kValidBo = 1u << 20,        // BO is one of the defined encodings
     kBoNoDecrement = 1u << 21,  // bcctr: BO must not decrement CTR
@@ -213,6 +213,12 @@ struct Insn {
     // Target of b / bc at address pc.
     uint32_t branch_target(uint32_t pc) const;
 };
+
+// lmw with its base among the registers it loads (`lmw r0, 0(r3)`): an invalid
+// form by the manual, but the 750 runs it and hand-written code relies on it
+// (MetroTRK restores a whole context that way), so it decodes. The lifter
+// leaves it out: what the base register ends up holding isn't verified.
+inline bool lmw_loads_base(const Insn& in) { return in.op == Op::lmw && in.ra() >= in.rd(); }
 
 // The spec of every op (index by Op), and all of them in table order.
 const Spec& spec(Op op);

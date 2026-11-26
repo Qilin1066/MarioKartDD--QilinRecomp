@@ -1,4 +1,4 @@
-// qilin: Mario Kart: Double Dash!! (Wii) static recompiler (work in progress).
+// qilin: Mario Kart: Double Dash!! (GameCube) static recompiler.
 //
 //   qilin info    <main.dol> [--json out.json]   SHA-256, supported build, entry point, sections, BSS
 //   qilin insns   <main.dol> [-o out.txt]        every word of the text sections, decoded
@@ -9,6 +9,7 @@
 //   qilin cfg     <main.dol> [--json out.json]   function discovery + control flow, summary
 //   qilin coverage <main.dol> [--list]           word accounting of the text: code / padding / unknown
 //   qilin suspects <main.dol>                    functions with problems, for review
+//   qilin polls   <main.dol>                     poll loops (idle.hpp): function, back edge, loop head
 //
 // Listings are one line per word: address, word, text ("8000310c 4e800020 bclr 20,lt,0").
 // Exit status is non-zero on any error; nothing fails silently.
@@ -56,6 +57,7 @@ int usage() {
                "  qilin cfg     <main.dol> [--json out.json]\n"
                "  qilin coverage <main.dol> [--list]\n"
                "  qilin suspects <main.dol>\n"
+               "  qilin polls   <main.dol>\n"
                "  qilin lift    <main.dol> -o <dir> [--plan plan.tsv] [--files n]\n"
                "  qilin --version\n");
     return 2;
@@ -209,13 +211,14 @@ int cmd_coverage(const Args& a) {
     cfg.run();
     uint64_t unknown = 0;
     for (const Coverage& c : cfg.coverage()) {
-        const uint64_t words = c.code + c.padding + c.dead + c.unknown;
-        std::println("{} {:08X}-{:08X}: {} words: code {} ({}), padding {}, dead {}, unknown {} ({}) in {} spans", c.section,
-                     c.lo, c.hi, words, c.code, percent(c.code, words, 3), c.padding, c.dead, c.unknown,
+        const uint64_t words = c.code + c.padding + c.dead + c.data + c.unknown;
+        std::println("{} {:08X}-{:08X}: {} words: code {} ({}), padding {}, dead {}, data {}, unknown {} ({}) in {} spans", c.section,
+                     c.lo, c.hi, words, c.code, percent(c.code, words, 3), c.padding, c.dead, c.data, c.unknown,
                      percent(c.unknown, words, 3), c.unknown_spans.size());
         if (a.list) {
             for (const auto& [lo, hi] : c.unknown_spans) std::println("  {:08X}-{:08X} ({} words)", lo, hi, (hi - lo) / 4);
             for (const auto& [lo, hi] : c.dead_spans) std::println("  dead {:08X}-{:08X} ({} words)", lo, hi, (hi - lo) / 4);
+            for (const auto& [lo, hi] : c.data_spans) std::println("  data {:08X}-{:08X} ({} words)", lo, hi, (hi - lo) / 4);
         }
         unknown += c.unknown;
     }
@@ -230,6 +233,31 @@ int cmd_suspects(const Args& a) {
     std::string rejected;
     for (uint32_t r : cfg.rejected()) rejected += std::format(" {:08X}", r);
     std::println("{} suspects; rejected starts: {}{}", cfg.suspects().size(), cfg.rejected().size(), rejected);
+    return 0;
+}
+
+// The loops whose back edge the lifter gives to hooks->idle (idle.hpp), one
+// per line: the function, the branch back and the loop's head.
+int cmd_polls(const Args& a) {
+    const Dol dol = load_dol(a.input);
+    Cfg cfg(dol);
+    cfg.run();
+    size_t loops = 0, functions = 0;
+    for (const auto& [start, f] : cfg.functions()) {
+        const LiftInput in = lift_input(cfg, f);
+        if (!lift(in).ok) continue;  // a stub has no loops to give away
+        bool any = false;
+        for (const auto& [pc, i] : in.insns) {
+            if ((i.op != ppc::Op::b && i.op != ppc::Op::bc) || i.lk()) continue;
+            const uint32_t target = i.branch_target(pc);
+            if (target > pc || target < start || !poll_loop(in.insns, target, pc, in.pure_call)) continue;
+            std::println("{:08X} {:08X} {:08X}", start, pc, target);
+            ++loops;
+            any = true;
+        }
+        functions += any;
+    }
+    std::println("{} poll loops in {} functions", loops, functions);
     return 0;
 }
 
@@ -357,7 +385,7 @@ int cmd_lift(const Args& a) {
         }
         if (++n % kChunk == 0) flush();
     }
-    flush();
+    if (!chunk.empty()) flush();  // (not when the last chunk came out full: that would be a file too many)
     while (a.files && files < a.files) flush();
     if (a.files && files != a.files) throw Failure{std::format("{} functions don't fit {} files", n, a.files)};
     header += "}  // namespace qilin::gen\n";
@@ -404,6 +432,7 @@ int main(int argc, char** argv) {
         if (a.command == "cfg") return cmd_cfg(a);
         if (a.command == "coverage") return cmd_coverage(a);
         if (a.command == "suspects") return cmd_suspects(a);
+        if (a.command == "polls") return cmd_polls(a);
         if (a.command == "lift") return cmd_lift(a);
         return usage();
     } catch (const Failure& f) {

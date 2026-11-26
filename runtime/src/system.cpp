@@ -51,10 +51,9 @@ void flush_all() {
 }
 
 constexpr uint32_t kMem1 = 0x80000000u, kMem1Size = 24u << 20;
-constexpr uint32_t kMem2 = 0x90000000u, kMem2Size = 64u << 20;
 constexpr uint32_t kLockedCache = 0xE0000000u, kLockedCacheSize = 16u << 10;
-static_assert(kMem1Size == 0x01800000u && kMem2Size == 0x04000000u && kLockedCache == 0xE0000000u && kLockedCacheSize == 0x4000u,
-              "cpu.hpp's plain_memory has the RAM sizes too, and its fast path takes the locked cache as plain memory");
+static_assert(kMem1Size == 0x01800000u && kLockedCache == 0xE0000000u && kLockedCacheSize == 0x4000u,
+              "cpu.hpp's plain_memory has the RAM size too, and its fast path takes the locked cache as plain memory");
 
 struct Registered {
     uint32_t address;
@@ -74,16 +73,17 @@ State* g = nullptr;
 
 void vreport(Cpu* c, const char* format, va_list args);
 
-// The uncached mirrors of MEM1 and MEM2 are the same memory, and the locked
-// cache is 16 KB of memory of its own; hardware registers go to the MMIO
-// handlers; anything else stops the runtime.
+// The uncached mirror of MEM1 is the same memory, and the locked cache is
+// 16 KB of memory of its own; hardware registers (the GameCube's, at
+// 0xCC000000-0xCC008FFF) go to the MMIO handlers; anything else stops the
+// runtime.
 uint8_t* slow_ptr(Cpu& c, uint32_t a, unsigned size) {
-    if ((a >= 0xC0000000u && a + size <= 0xC0000000u + kMem1Size) || (a >= 0xD0000000u && a + size <= 0xD0000000u + kMem2Size))
+    if (a >= 0xC0000000u && a + size <= 0xC0000000u + kMem1Size)
         return c.mem + (a - 0x40000000u);
     if (a >= kLockedCache && a + size <= kLockedCache + kLockedCacheSize) return c.mem + a;
     return nullptr;
 }
-bool is_hardware(uint32_t a) { return a >= 0xCC000000u && a < 0xCD010000u; }
+bool is_hardware(uint32_t a) { return a >= 0xCC000000u && a < 0xCC009000u; }
 uint32_t on_read(Cpu& c, uint32_t a, unsigned size) {
     if (const uint8_t* p = slow_ptr(c, a, size))
         return size == 1 ? p[0] : size == 2 ? uint32_t{p[0]} << 8 | p[1] : uint32_t{p[0]} << 24 | uint32_t{p[1]} << 16 | uint32_t{p[2]} << 8 | p[3];
@@ -125,7 +125,7 @@ void on_idle(Cpu& c) {
 const CpuHooks kHooks{on_read, on_write, on_call, on_trap, on_replaced, on_idle};
 
 bool in_ram(uint32_t a, uint32_t n) {
-    return (a >= kMem1 && a - kMem1 + n <= kMem1Size) || (a >= kMem2 && a - kMem2 + n <= kMem2Size);
+    return a >= kMem1 && a - kMem1 + n <= kMem1Size;
 }
 
 // The guest's call stack from its back chain: each frame's first word points
@@ -161,9 +161,8 @@ void init(const Program& program) {
     const char* t = std::getenv("MKDD_TRACE");
     g->trace = t && *t && *t != '0';
     if (!g->memory.reserve()) fatal(nullptr, "cannot reserve 4 GB of address space for the guest");
-    if (!g->memory.commit(kMem1, kMem1Size) || !g->memory.commit(kMem2, kMem2Size) ||
-        !g->memory.commit(kLockedCache, kLockedCacheSize))
-        fatal(nullptr, "cannot commit the guest's MEM1, MEM2 and locked cache");
+    if (!g->memory.commit(kMem1, kMem1Size) || !g->memory.commit(kLockedCache, kLockedCacheSize))
+        fatal(nullptr, "cannot commit the guest's MEM1 and locked cache");
     for (size_t i = 1; i < program.functions.size(); ++i)
         if (program.functions[i - 1].address >= program.functions[i].address) fatal(nullptr, "function table isn't sorted");
 }

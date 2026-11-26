@@ -79,7 +79,8 @@ int main(int argc, char** argv) {
         Insn bare;  // the op with every field zero: in the slice unless the op itself isn't
         bare.op = s.op;
         bare.word = s.match;
-        if (!in_slice(bare, nullptr) && s.op != Op::mfspr && s.op != Op::mtspr) continue;  // SPRs are picked below
+        // (SPRs are picked below; lmw's all-zero word has its base among the loaded registers, which the slice leaves out.)
+        if (!in_slice(bare, nullptr) && s.op != Op::mfspr && s.op != Op::mtspr && s.op != Op::lmw) continue;
         int made = 0;
         for (int tries = 0; made < per && tries < per * 400; ++tries) {
             uint32_t w = s.match;

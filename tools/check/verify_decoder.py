@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Cross-check qilin's Broadway decoder against GNU objdump, word by word.
+"""Cross-check qilin's Gekko decoder against GNU objdump, word by word.
+(The GameCube's Gekko has the Wii's Broadway instruction set, paired singles
+included, so objdump's `broadway` set is the reference for both.)
 
 Two inputs:
   --dol main.dol   every word of the game's text sections (needs your own copy)
@@ -47,6 +49,11 @@ def known_difference(word, ours, theirs):
         # lists it and the SDK's OSGetTime reads the time base with it.
         if p == 31 and xo10 == 371:
             return "mftb: in the 750CL; missing from binutils' broadway set"
+        # An invalid form by the manual, so binutils rejects it; the 750 runs it
+        # and MetroTRK's context restore (`lmw r0,0(r3)`) is in the game's text.
+        # qilin decodes it and the lifter refuses it (decoder.hpp, lmw_loads_base).
+        if p == 46 and ra >= rd:
+            return "lmw with rA among the registers it loads (an invalid form the 750 runs; MetroTRK uses it)"
         return None
     if ours_valid and theirs_valid:
         if p == 31 and xo10 == 19 and theirs == ours + ",-1":

@@ -118,7 +118,7 @@ void test_dol() {
     CHECK(dol->file_size == 0x400);
     CHECK(dol->sha256 == sha256_hex(s.bytes));
     CHECK(known_build(dol->sha256) == nullptr);
-    CHECK(known_build("6ae3388ff644758f030bb28de28f898885dc7c2da76bff082faae9eb60e66137") != nullptr);
+    CHECK(known_build("e96b8578451b9157e2b68fe5e918ebb572940c3ea54d6c8c7d45c24382bf12ae") != nullptr);
     bool threw = false;
     try {
         (void)dol->u32(0x80007000);
@@ -273,7 +273,6 @@ constexpr Bad kInvalid[] = {
     {0x7C83202F, "lwzx with the record bit set"},
     {0x7C632416, "mulhwu with bit 21 (OE) set"},
     {0x7C6304AA, "lswi r3,r3,32: rA among the registers it loads"},
-    {0xBB9E0000, "lmw r28,0(r30): base among the loaded registers"},
     {0x44000003, "sc with bit 31 set"},
     {0x7C000265, "tlbie with the record bit set"},
     {0x7C4004AC, "sync with bit 9 set"},
@@ -329,6 +328,12 @@ void test_decoder() {
         ++checked;
     }
     CHECK(checked == 222);  // the 750CL's instructions, paired singles included
+
+    // lmw with its base among the loaded registers decodes (hand-written code uses it), flagged.
+    CHECK(ppc::decode(0xBB9E0000).op == ppc::Op::lmw && ppc::lmw_loads_base(ppc::decode(0xBB9E0000)));
+    CHECK(ppc::decode(0xB8030000).op == ppc::Op::lmw && ppc::lmw_loads_base(ppc::decode(0xB8030000)));
+    CHECK(!ppc::lmw_loads_base(ppc::decode(0xBBC1FFF8)));
+    CHECK(!in_slice(ppc::decode(0xB8030000)) && in_slice(ppc::decode(0xBBC1FFF8)));
 
     // Fields and suffixes.
     CHECK(ppc::decode(0x3863FFFC).simm() == -4);
@@ -808,7 +813,7 @@ void test_fp_single_mode() {
     // fadds f1,f1,f2; blr: f1 and f2 are read first, so the double version stays behind a check.
     const Lifted args = fn({0xEC21102Au, 0x4E800020u});
     CHECK(args.ok && args.code.contains("static void fn_80003000_d(Cpu& c)") && args.code.contains("fp::single(fp::add(f1, f2))"));
-    CHECK(args.code.contains("if (!(fp::to_f_exact(c.ps0[1], f1) & fp::to_f_exact(c.ps0[2], f2))) [[unlikely]] { fn_80003000_d(c); return; }"));
+    CHECK(args.code.contains("if (!(int(fp::to_f_exact(c.ps0[1], f1)) & int(fp::to_f_exact(c.ps0[2], f2)))) [[unlikely]] { fn_80003000_d(c); return; }"));
     CHECK(args.code.contains("fp::add_s(f1, f2)") && !args.code.contains("c.ps0[2] = fp::to_d(f2)"));  // f2 is only read: left alone
     // cmpwi r3,0; beqlr; lfs f1,0(r4); blr: the early way out writes nothing back, the other f1.
     const Lifted early = fn({0x2C030000u, 0x4D820020u, 0xC0240000u, 0x4E800020u});
@@ -820,6 +825,13 @@ void test_fp_single_mode() {
     // fadd f1,f1,f2 (double arithmetic); blr: no single mode.
     const Lifted dbl = fn({0xFC21102Au, 0x4E800020u});
     CHECK(dbl.ok && dbl.code.contains("double f1 = c.ps0[1];") && !dbl.code.contains("float"));
+    // The output compiles without a warning: a lone blr leaves its parameter unnamed, and a
+    // "written" flag exists only where some way out reads it.
+    CHECK(fn({0x4E800020u}).code.contains("void fn_80003000(Cpu&) {"));
+    CHECK(!fn({0xFC200890u, 0x4E800020u}).code.contains("f1 = f1"));  // fmr f1,f1: no self-assignment
+    // cmpwi r3,0; beq +8; lfs f1,0(r4); lfs f1,4(r4); blr: f1 is written on every path to the one way out.
+    const Lifted every = fn({0x2C030000u, 0x41820008u, 0xC0240000u, 0xC0240004u, 0x4E800020u});
+    CHECK(every.ok && every.code.contains("float f1") && !every.code.contains("bool w"));
     // lfs f1,0(r3); bl elsewhere; blr: a call, no single mode.
     LiftInput call;
     call.start = 0x80003000;
@@ -934,6 +946,98 @@ void test_cfg_switches() {
         const auto f = run_switch(c);
         CHECK(f && f->jtabs.empty());
     }
+    // The GameCube SDK's shape (GXSetVtxDescv): the table's whole address in a
+    // register set before a loop that is entered by a jump to its condition
+    // at the foot, so nothing on the straight line above the switch defines it.
+    const std::vector<std::pair<uint32_t, uint32_t>> loop_foot = {
+        {0x80003260, 0x3C808000},                           // lis r4,0x8000 (the region's head)
+        {0x80003264, 0x38845040},                           // addi r4,r4,0x5040
+        {0x80003268, P::b(0x80003268, 0x8000328C)},         // b foot
+        {0x8000326C, 0x80A30000},                           // lwz r5,0(r3) (loop top)
+        {0x80003270, 0x28050001},                           // cmplwi r5,1
+        {0x80003274, P::bc(0x80003274, 12, 1, 0x80003288)}, // bgt next
+        {0x80003278, 0x54A5103A},                           // slwi r5,r5,2
+        {0x8000327C, 0x7CA4282E},                           // lwzx r5,r4,r5
+        {0x80003280, 0x7CA903A6},                           // mtctr r5
+        {0x80003284, bctr},
+        {0x80003288, 0x38630008},                           // addi r3,r3,8 (case 0, and next)
+        {0x8000328C, 0x80030000},                           // lwz r0,0(r3) (foot)
+        {0x80003290, 0x2C0000FF},                           // cmpwi r0,255
+        {0x80003294, P::bc(0x80003294, 4, 2, 0x8000326C)},  // bne loop top
+        {0x80003298, blr},
+        {0x8000329C, P::li(6, 1)},                          // case 1
+        {0x800032A0, P::b(0x800032A0, 0x80003288)}};
+    CHECK(proven_two(run_switch({loop_foot, {0x80003288, 0x8000329C}}), 0x80003288, 0x8000329C));
+    {
+        SwitchCase c{loop_foot, {0x80003288, 0x8000329C}};
+        c.code.push_back({0x8000329C, P::li(4, 0)});  // case 1 rewrites r4 inside the loop
+        const auto f = run_switch(c);
+        CHECK(f && f->jtabs.empty());
+    }
+    {
+        SwitchCase c{loop_foot, {0x80003288, 0x8000329C}};
+        c.code.push_back({0x8000329C, P::b(0x8000329C, 0x800031C0, true)});  // a call in the loop: r4 is volatile
+        const auto f = run_switch(c);
+        CHECK(f && f->jtabs.empty());
+    }
+    {
+        // ... which a callee-saved register survives; its low half added to
+        // another register's `lis` (DHCPProcessOptions: lis r3; addi r31,r3,lo).
+        SwitchCase c{loop_foot, {0x80003288, 0x8000329C}};
+        c.code.push_back({0x80003260, 0x3CC08000});                          // lis r6,0x8000
+        c.code.push_back({0x80003264, 0x3BE65040});                          // addi r31,r6,0x5040
+        c.code.push_back({0x8000327C, 0x7CBF282E});                          // lwzx r5,r31,r5
+        c.code.push_back({0x8000329C, P::b(0x8000329C, 0x800031C0, true)});  // bl
+        CHECK(proven_two(run_switch(c), 0x80003288, 0x8000329C));
+        c.code.push_back({0x80003268, P::li(31, 0)});  // no jump to the foot: falls into the loop with r31 rewritten
+        const auto f = run_switch(c);
+        CHECK(f && f->jtabs.empty());
+    }
+}
+
+// Data in a text section that reached code addresses (the linker's section
+// tables in .init, a string), and a `bla` into low memory.
+void test_cfg_data() {
+    Program p;
+    p.word(0x80003260, 0x3C608000);  // lis r3,0x8000
+    p.word(0x80003264, 0x38833280);  // addi r4,r3,0x3280: a table whose first word decodes
+    p.word(0x80003268, 0x38633270);  // addi r3,r3,0x3270: a string
+    p.word(0x8000326C, 0x4E800020);
+    p.word(0x80003270, 0x4D657472);  // "Metr": not an instruction
+    p.word(0x80003274, 0x6F776572);  // "ower"
+    p.word(0x80003280, 0x80003100);  // an address (decodes as lwz r0,12544(0))
+    p.word(0x80003284, 0x000024F4);  // a size: not an instruction
+    p.word(0x800032A0, 0x48000063);  // bla 0x60: the exception-vector code, in low memory
+    p.word(0x800032A4, 0x4E800020);
+    p.word(0x80005020, 0x80003260);
+    p.word(0x80005024, 0x800032A0);
+    auto dol = Dol::parse(p.bytes);
+    CHECK(dol.has_value());
+    if (!dol) return;
+    Cfg cfg(*dol);
+    cfg.run();
+    CHECK(cfg.functions().contains(0x80003260) && cfg.functions().contains(0x800032A0));
+    CHECK(!cfg.functions().contains(0x80003280));
+    CHECK(cfg.rejected() == (std::vector<uint32_t>{0x80003280}));  // tried as code (it starts with a valid word)
+    CHECK(cfg.suspects().empty());
+    if (cfg.functions().contains(0x800032A0)) {
+        const Function& f = cfg.functions().at(0x800032A0);
+        CHECK(f.absolute == (std::vector<uint32_t>{0x800032A0}) && f.calls.empty() && f.escapes.empty());
+        const Lifted l = lift(lift_input(cfg, f));
+        CHECK(l.ok && l.code.contains("lr = 0x800032A4u;") && l.code.contains("c.hooks->call(c, 0x00000060u);"));
+    }
+    const auto cov = cfg.coverage();
+    CHECK(cov.size() == 1 && cov[0].data == 4 && cov[0].unknown == 0);
+    if (cov.size() == 1) CHECK(cov[0].data_spans == (std::vector<std::pair<uint32_t, uint32_t>>{{0x80003270, 0x80003278}, {0x80003280, 0x80003288}}));
+    // Without the code that addresses them, the same words are unknown.
+    p.word(0x80003264, 0x60000000);
+    p.word(0x80003268, 0x60000000);
+    auto dol2 = Dol::parse(p.bytes);
+    CHECK(dol2.has_value());
+    if (!dol2) return;
+    Cfg cfg2(*dol2);
+    cfg2.run();
+    CHECK(cfg2.coverage()[0].data == 0 && cfg2.coverage()[0].unknown == 4);
 }
 
 }  // namespace
@@ -973,6 +1077,7 @@ int main() {
     test_decoder();
     test_cfg();
     test_cfg_switches();
+    test_cfg_data();
     test_lift();
     test_fp();
     test_fp_single_mode();
