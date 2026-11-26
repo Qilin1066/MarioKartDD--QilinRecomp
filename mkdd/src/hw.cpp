@@ -1,3 +1,4 @@
+// The hardware registers: who answers which range (hw.hpp).
 #include "hw.hpp"
 
 #include <algorithm>
@@ -37,7 +38,20 @@ void map_mmio(const MmioRange& range) {
     std::sort(g_ranges.begin(), g_ranges.end(), [](const MmioRange& x, const MmioRange& y) { return x.begin < y.begin; });
 }
 
+// The memory interface (0xCC004000). Its protection is the OS's (replaced);
+// what lifted code reads are two 16-bit counters at +0x4E and +0x50, which
+// GX's abort and shutdown sample until they stop moving (__GXAbort): the GPU
+// here has always finished what it was sent, so they stand still.
+static uint32_t mi_read(Cpu& c, uint32_t a, unsigned size) {
+    if (size == 2 && (a == 0xCC00404Eu || a == 0xCC004050u)) return 0;
+    rt::fatal(&c, "load of %u bytes from the memory interface's register %08X", size, a);
+}
+static void mi_write(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
+    rt::fatal(&c, "store of %u bytes (%08X) to the memory interface's register %08X", size, v, a);
+}
+
 void init_hardware() {
+    map_mmio({0xCC004000u, 0xCC004080u, "the memory interface", mi_read, mi_write});
     init_gpu();
     init_audio();
     rt::set_mmio(read, write);

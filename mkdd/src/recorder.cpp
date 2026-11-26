@@ -26,6 +26,7 @@
 #include <unordered_map>
 
 #include "gx.hpp"
+#include "hud.hpp"
 #include "qilin/rt/system.hpp"
 #include "texture.hpp"
 
@@ -1345,6 +1346,7 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         f.captured = g_capture_next;
         g_capture_next = false;
         textures_end_frame(f);
+        hud::place(f);  // (a widened picture: the flat parts back in proportion)
         g_stats.frames.fetch_add(1, std::memory_order_relaxed);
         submit(std::move(g_frame));
         g_frame = spare_frame();

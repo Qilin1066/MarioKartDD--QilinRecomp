@@ -77,7 +77,7 @@ jobs:
       # The analysis scripts need the game to run; check they at least compile.
       - name: Analysis scripts compile
         if: matrix.sweep
-        run: python3 -m py_compile tools/analysis/identify_libraries.py tools/analysis/hardware_access.py tools/check/verify_decoder.py
+        run: python3 -m py_compile tools/analysis/*.py tools/check/*.py tools/build_shaders.py tools/tests/*.py
       # The game's shaders are committed as SPIR-V; check that it matches the sources and that they compile.
       - name: Shaders up to date
         if: matrix.sweep

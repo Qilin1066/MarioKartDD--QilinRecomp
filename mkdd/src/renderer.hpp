@@ -36,6 +36,13 @@ public:
     const gx::Frame* held() const;
     const interp::Blender::Counts& pairing() const;
     double between_gpu_ms() const;
+    // The EFB's scale from the next frame drawn (1 to 8): it is made again at
+    // the new size between two frames, with the picture it held (its depth
+    // starts at the far plane, as the game's own clear leaves it). Copies made
+    // before keep their size until the game makes them again. scale(): the
+    // one in use.
+    void request_scale(unsigned scale);
+    unsigned scale() const;
     // The latest external frame buffer copied to `address` (in
     // TRANSFER_SRC_OPTIMAL layout, sampled usage), or null if there's none.
     const qilin::host::Image* xfb(uint32_t address) const;

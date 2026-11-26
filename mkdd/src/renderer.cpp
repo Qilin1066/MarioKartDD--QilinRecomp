@@ -352,6 +352,7 @@ struct Renderer::Impl {
     }
 
     explicit Impl(host::Gpu& g, unsigned s) : gpu(g), scale(s) {}
+    unsigned wanted_scale = 0;  // Renderer::request_scale: applied by the next render (0: none)
 
     void set_anisotropy(unsigned level) {
         const float a = std::clamp(float(level), 1.0f, gpu.max_anisotropy);
@@ -1439,7 +1440,44 @@ struct Renderer::Impl {
         }
     }
 
+    // Renderer::request_scale, at a frame's start: nothing of ours is on the GPU once it is idle,
+    // so the EFB (and its twin, made again when next needed) can be replaced. The colour is
+    // carried over, filtered; the depth is cleared to the far plane.
+    void apply_scale() {
+        const unsigned to = wanted_scale;
+        wanted_scale = 0;
+        if (to == 0 || to == scale) return;
+        vkDeviceWaitIdle(gpu.device);
+        poll_readbacks();  // (made at the old scale: finished with it)
+        // The EFB for pictures between frames is made again at the new size when next needed; the
+        // frame held was drawn at the old one, so it has no more pictures between.
+        if (efb_between.image) efb_between.destroy(gpu), efb_depth_between.destroy(gpu);
+        can_blend = false;
+        Image old = efb, old_depth = efb_depth;
+        scale = to;
+        efb = Image::create(gpu, kEfbWidth * scale, kEfbHeight * scale, kColor, kEfbUsage);
+        efb_depth = Image::create(gpu, kEfbWidth * scale, kEfbHeight * scale, depth_format,
+                                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        one_time([&](VkCommandBuffer cmd) {
+            host::transition(cmd, efb.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+            host::transition(cmd, efb_depth.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            VkImageBlit whole{};
+            whole.srcSubresource = whole.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            whole.srcOffsets[1] = {int32_t(old.width), int32_t(old.height), 1};
+            whole.dstOffsets[1] = {int32_t(efb.width), int32_t(efb.height), 1};
+            vkCmdBlitImage(cmd, old.image, VK_IMAGE_LAYOUT_GENERAL, efb.image, VK_IMAGE_LAYOUT_GENERAL, 1, &whole, VK_FILTER_LINEAR);
+            const VkClearDepthStencilValue far{1.0f, 0};
+            const VkImageSubresourceRange d{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            vkCmdClearDepthStencilImage(cmd, efb_depth.image, VK_IMAGE_LAYOUT_GENERAL, &far, 1, &d);
+        });
+        vkDeviceWaitIdle(gpu.device);  // the old images were read by that
+        old.destroy(gpu);
+        old_depth.destroy(gpu);
+        if (efb_other.image) efb_other.destroy(gpu);
+    }
+
     void render(gx::Frame& f) {
+        apply_scale();
         collect_specialized();
         poll_readbacks();  // the last frame's, if the GPU is done with it
         // Pictures between frames read the slots' buffers, sets and images: none may be left drawing.
@@ -1939,6 +1977,8 @@ Renderer::Renderer(host::Gpu& gpu, unsigned scale, unsigned anisotropy) : impl_(
     impl_->set_anisotropy(anisotropy);
 }
 void Renderer::set_anisotropy(unsigned level) { impl_->set_anisotropy(level); }
+void Renderer::request_scale(unsigned scale) { impl_->wanted_scale = std::clamp(scale, 1u, 8u); }
+unsigned Renderer::scale() const { return impl_->scale; }
 void Renderer::set_true_color(bool on) { impl_->true_color = on; }
 void Renderer::save_now() {
     std::vector<uint8_t> keys;

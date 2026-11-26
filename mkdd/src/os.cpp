@@ -1,6 +1,7 @@
-// The OS library's replacements (revolution/os, base, db): start-up, arenas,
-// interrupts, caches, time. Arguments arrive in r3..., results go in r3 (and
-// r4 for 64-bit values), as the EABI passes them.
+// The OS library's replacements (dolphin/os, base, db, and the debug UART of
+// exi): start-up, arenas, interrupts, caches, time, SRAM, reset. Arguments
+// arrive in r3..., results go in r3 (and r4 for 64-bit values), as the EABI
+// passes them.
 #include "os.hpp"
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -36,26 +38,151 @@ using rt::Cpu;
 
 namespace {
 
+// ---- low memory the OS keeps, found in the code named.
+constexpr uint32_t kCurrentContextPhysical = 0x800000C0u, kCurrentContext = 0x800000D4u;  // OSSetCurrentContext, 800E7930
+constexpr uint32_t kFpuContext = 0x800000D8u;                                             // OSClearContext, 800E7AF8
+constexpr uint32_t kUserMask = 0x800000C4u, kOsMask = 0x800000C8u;                        // __OSMaskInterrupts, 800E8B44
+constexpr uint32_t kInterruptTable = 0x80003040u;                                         // __OSInterruptInit, 800E87F8: 32 handlers
+constexpr uint32_t kSystemTimeOffset = 0x800030D8u;                                       // __OSGetSystemTime, 800EC35C: 64 bits
+
+void nothing(Cpu&) {}
+void returns_zero(Cpu& c) { c.r[3] = 0; }
+void returns_one(Cpu& c) { c.r[3] = 1; }
+
+// ---- SRAM (OSRtc.c): the console's settings, kept where the SDK keeps its
+// copy (build::kSramControl), so a lock hands out the pointer it always did.
+// The copy is filled from the port's settings instead of the clock chip's SRAM
+// over EXI. Layout (the code at 800EA764 and the accessors after it): checksum
+// +0, its inverse +2, counter bias +0xC, language +0x12, flags +0x13 (bits 0-1
+// video mode, bit 2 stereo, bit 7 progressive), then the extended part at
+// +0x14 (wireless pad IDs +0x30, Game Boy Player mode +0x3C).
+unsigned g_language = 0;
+bool g_stereo = true, g_progressive = false;
+constexpr uint32_t kSram = build::kSramControl, kSramFlags = kSram + 0x13;
+constexpr uint32_t kSramEnabled = kSram + 0x44, kSramLocked = kSram + 0x48, kSramSync = kSram + 0x4C;
+
+void sram_checksum() {  // over the four 16-bit words from +0xC, as UnlockSram does
+    uint16_t sum = 0, inverse = 0;
+    for (uint32_t a = kSram + 0x0C; a < kSram + 0x14; a += 2) {
+        sum = static_cast<uint16_t>(sum + rt::peek16(a));
+        inverse = static_cast<uint16_t>(inverse + static_cast<uint16_t>(~rt::peek16(a)));
+    }
+    rt::poke16(kSram, sum);
+    rt::poke16(kSram + 2, inverse);
+}
+void init_sram() {  // __OSInitSram
+    std::memset(rt::guest_ptr(kSram), 0, 0x50);
+    rt::poke8(kSram + 0x12, static_cast<uint8_t>(g_language));
+    rt::poke8(kSramFlags, static_cast<uint8_t>((g_stereo ? 0x04 : 0) | (g_progressive ? 0x80 : 0)));
+    sram_checksum();
+    rt::poke32(kSram + 0x40, 64);  // offset: nothing waits to be written
+    rt::poke32(kSramSync, 1);
+}
+void lock_sram(Cpu& c, uint32_t part) {  // -> the SRAM, or NULL while it's locked; interrupts stay off until the unlock
+    if (rt::peek32(kSramLocked)) {
+        c.r[3] = 0;
+        return;
+    }
+    rt::poke32(kSramEnabled, interrupts_enabled());
+    set_interrupts_enabled(false);
+    rt::poke32(kSramLocked, 1);
+    c.r[3] = kSram + part;
+}
+void unlock_sram(Cpu& c, bool commit, uint32_t part) {  // -> written (always: there's no chip to wait for)
+    if (commit) {
+        if (part == 0) {
+            const uint8_t flags = *rt::guest_ptr(kSramFlags);
+            if ((flags & 3) > 2) rt::poke8(kSramFlags, flags & 0xFCu);
+            sram_checksum();
+        }
+        static bool said = false;
+        if (!said) rt::log("the game changed the console's SRAM settings: kept until the program ends"), said = true;
+    }
+    rt::poke32(kSramLocked, 0);
+    set_interrupts_enabled(rt::peek32(kSramEnabled) != 0);
+    deliver_interrupts(c);
+    c.r[3] = 1;
+}
+void __OSLockSram(Cpu& c) { lock_sram(c, 0); }
+void __OSLockSramEx(Cpu& c) { lock_sram(c, 0x14); }
+void __OSUnlockSram(Cpu& c) { unlock_sram(c, c.r[3] != 0, 0); }
+void __OSUnlockSramEx(Cpu& c) { unlock_sram(c, c.r[3] != 0, 0x14); }
+void __OSSyncSram(Cpu& c) { c.r[3] = 1; }
+uint8_t sram_flags() { return *rt::guest_ptr(kSramFlags); }
+void set_sram_flag(uint8_t bit, bool on) {
+    const uint8_t flags = static_cast<uint8_t>((sram_flags() & ~bit) | (on ? bit : 0));
+    if (flags == sram_flags()) return;
+    rt::poke8(kSramFlags, flags);
+    sram_checksum();
+}
+void OSGetSoundMode(Cpu& c) { c.r[3] = (sram_flags() & 0x04) ? 1 : 0; }  // 0 mono, 1 stereo
+void OSSetSoundMode(Cpu& c) { set_sram_flag(0x04, c.r[3] & 1); }
+void OSGetProgressiveMode(Cpu& c) { c.r[3] = sram_flags() >> 7; }
+void OSSetProgressiveMode(Cpu& c) { set_sram_flag(0x80, c.r[3] & 1); }
+void OSGetWirelessID(Cpu& c) { c.r[3] = rt::peek16(kSram + 0x30 + 2 * (c.r[3] & 3)); }  // (channel)
+void OSSetWirelessID(Cpu& c) { rt::poke16(kSram + 0x30 + 2 * (c.r[3] & 3), static_cast<uint16_t>(c.r[4])); }
+void OSGetGbsMode(Cpu& c) { c.r[3] = rt::peek16(kSram + 0x3C); }
+void OSSetGbsMode(Cpu& c) { rt::poke16(kSram + 0x3C, static_cast<uint16_t>(c.r[3])); }
+
 // ---- start-up
 void DBInit(Cpu&) {}  // no debugger
 
-void OSInit(Cpu&) {  // once: the game's constructors call it again
+bool g_enabled = false;         // interrupts: one flag, as MSR[EE] is (os.hpp)
+uint32_t g_mask = 0xFFFFFFFFu;  // the OS's interrupt mask (the two words in low memory, ORed): all masked until OSInit
+void set_mask(uint32_t user) {
+    rt::poke32(kUserMask, user);
+    g_mask = user | rt::peek32(kOsMask);
+    dsp_interrupt_enables(g_mask);
+}
+
+// OSInit (800E5B8C), in its order, less what only the hardware needs: the
+// performance counters, exception vectors, caches and memory protection.
+void OSInit(Cpu& c) {  // once: the game calls it again
     static bool done = false;
     if (done) return;
     done = true;
     namespace b = build;
-    rt::poke32(b::kArenaLoMem1, b::kArenaLoMem1Value);
-    rt::poke32(b::kArenaHiMem1, rt::peek32(0x80003110u));  // MEM1 arena end, from IOS
-    rt::poke32(b::kArenaLoMem2, rt::peek32(0x80003124u));
-    rt::poke32(b::kArenaHiMem2, rt::peek32(0x80003128u));
-    rt::log("OSInit: MEM1 arena %08X-%08X, MEM2 arena %08X-%08X", rt::peek32(b::kArenaLoMem1), rt::peek32(b::kArenaHiMem1),
-            rt::peek32(b::kArenaLoMem2), rt::peek32(b::kArenaHiMem2));
-    set_interrupts_enabled(true);  // as OSInit ends (801FF504: OSEnableInterrupts)
+    const uint64_t start = time_base();  // __OSStartTime (system time: the offset is 0)
+    rt::poke32(b::kStartTime, static_cast<uint32_t>(start >> 32));
+    rt::poke32(b::kStartTime + 4, static_cast<uint32_t>(start));
+    set_interrupts_enabled(false);
+    rt::poke32(b::kBootInfo, 0x80000000u);
+    // BI2, where the apploader left it: the debug flag and the pad specification.
+    const uint32_t bi2 = rt::peek32(0x800000F4u);
+    if (!bi2) rt::fatal(&c, "OSInit: no BI2 in low memory (boot.cpp places it)");
+    rt::poke32(b::kBi2DebugFlag, bi2 + 0x0C);
+    rt::poke32(b::kPadSpec, rt::peek32(bi2 + 0x24));
+    rt::poke8(0x800030E8u, static_cast<uint8_t>(rt::peek32(bi2 + 0x0C)));
+    rt::poke8(0x800030E9u, static_cast<uint8_t>(rt::peek32(bi2 + 0x24)));
+    // The arena: from low memory, or the linker's bounds where it gives none.
+    const uint32_t lo = rt::peek32(0x80000030u), hi = rt::peek32(0x80000034u);
+    rt::poke32(b::kArenaLo, lo ? lo : b::kArenaLoValue);
+    rt::poke32(b::kArenaHi, hi ? hi : 0x81700000u);
+    // __OSInterruptInit: no handlers, everything masked.
+    std::memset(rt::guest_ptr(kInterruptTable), 0, 32 * 4);
+    rt::poke32(kUserMask, 0);
+    rt::poke32(kOsMask, 0);
+    set_mask(0xFFFFFFE0u);
+    rt::call(c, b::kEXIInit);
+    rt::call(c, b::kSIInit);
+    init_sram();
+    // __OSThreadInit is init_threads (threads.cpp), done before the game starts.
+    rt::call(c, b::kInitAudioSystem);  // lifted: it runs a stub program on the DSP (dsp.cpp) and resets it
+    rt::log("OSInit: Dolphin OS, console type %08X, %u MB, arena %08X-%08X", rt::peek32(0x8000002Cu), rt::peek32(0x80000028u) >> 20,
+            rt::peek32(b::kArenaLo), rt::peek32(b::kArenaHi));
+    // ClearArena: after a cold boot, the arena is zeroed.
+    std::memset(rt::guest_ptr(rt::peek32(b::kArenaLo)), 0, rt::peek32(b::kArenaHi) - rt::peek32(b::kArenaLo));
+    set_interrupts_enabled(true);  // as OSInit does before DVDInit (800E5EF4)
+    rt::call(c, b::kDVDInit);
+    // DVDInquiryAsync's callback stores the drive's device code (the inquiry's
+    // word at +2) in low memory, with the top bit: a retail drive answers 0.
+    rt::poke16(0x800030E6u, 0x8000);
 }
 
-void returns_zero(Cpu& c) { c.r[3] = 0; }
-void returns_one(Cpu& c) { c.r[3] = 1; }  // what MetroTRK returns with no debugger attached: failure
-void OSGetConsoleType(Cpu& c) { c.r[3] = rt::peek32(0x8000002Cu); }  // retail Wii
+void OSGetConsoleType(Cpu& c) {  // 800E5A00
+    const uint32_t type = rt::peek32(0x8000002Cu);
+    c.r[3] = type ? type : 0x10000002u;
+}
 
 // The debug serial port (EXI's UART), where the C library's console output
 // (OSReport, printf) goes. A retail console has none and the output is lost;
@@ -64,8 +191,11 @@ std::string g_console;
 void InitializeUART(Cpu& c) { c.r[3] = 0; }  // (baud) -> 0: ready
 void WriteUARTN(Cpu& c) {                    // (buffer, count) -> 0
     g_console.append(reinterpret_cast<const char*>(rt::guest_ptr(c.r[3])), c.r[4]);
-    for (size_t nl; (nl = g_console.find('\n')) != std::string::npos; g_console.erase(0, nl + 1))
-        rt::log("game: %s", g_console.substr(0, nl).c_str());
+    for (size_t nl; (nl = g_console.find('\n')) != std::string::npos; g_console.erase(0, nl + 1)) {
+        std::string line = g_console.substr(0, nl);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        rt::log("game: %s", line.c_str());
+    }
     c.r[3] = 0;
 }
 
@@ -76,37 +206,36 @@ void OSPanic(Cpu& c) {  // OSPanic(file, line, format, ...): the format isn't ex
               reinterpret_cast<const char*>(rt::guest_ptr(c.r[5])));
 }
 
-// ---- the reset and power buttons: the window's close button will be POWER.
-uint32_t g_reset_cb = 0, g_power_cb = 0;
-void OSSetResetCallback(Cpu& c) {
-    const uint32_t was = g_reset_cb;
-    g_reset_cb = c.r[3];
-    c.r[3] = was;
-}
-void OSSetPowerCallback(Cpu& c) {
-    const uint32_t was = g_power_cb;
-    g_power_cb = c.r[3];
-    c.r[3] = was;
-}
+void OSGetPhysicalMemSize(Cpu& c) { c.r[3] = rt::peek32(0x80000028u); }
+// Memory protection (the MI's four ranges) traps nothing here: a stray access
+// isn't caught by it, on the console or in this port.
+void OSProtectRange(Cpu&) {}
+void OSGetFontEncode(Cpu& c) { c.r[3] = 0; }  // OS_FONT_ENCODE_ANSI: an NTSC console that isn't Japanese (800E8724)
 
-// ---- memory sizes, as IOS left them in low memory
-void OSGetPhysicalMem2Size(Cpu& c) { c.r[3] = rt::peek32(0x80003118u); }
-void OSGetConsoleSimulatedMem1Size(Cpu& c) { c.r[3] = rt::peek32(0x80003104u); }
-void OSGetConsoleSimulatedMem2Size(Cpu& c) { c.r[3] = rt::peek32(0x8000311Cu); }
-
-// ---- error handlers (crash screens for CPU exceptions): kept, never called;
-// a fault in the guest stops the runtime with its own report.
-uint32_t g_error_handlers[17] = {};
+// ---- error handlers (crash screens for CPU exceptions): kept in the OS's
+// own table, never called; a fault in the guest stops the runtime with its
+// own report. A handler for floating-point exceptions (16) makes the OS turn
+// them on in every thread's context: lifted code raises none, so that's only said.
 void OSSetErrorHandler(Cpu& c) {  // (error, handler) -> the previous handler
-    const uint32_t e = c.r[3];
+    const uint32_t e = c.r[3] & 0xFFFFu;
     if (e >= 17) rt::fatal(&c, "OSSetErrorHandler for error %u", e);
-    const uint32_t was = g_error_handlers[e];
-    g_error_handlers[e] = c.r[4];
+    const uint32_t was = rt::peek32(build::kErrorTable + 4 * e);
+    rt::poke32(build::kErrorTable + 4 * e, c.r[4]);
+    if (e == 16 && c.r[4] && !was)
+        rt::log("the game installs a handler for floating-point exceptions (enable bits %02X): none are raised here",
+                rt::peek32(build::kFpscrEnableBits) & 0xF8u);
     c.r[3] = was;
 }
 
 // ---- CPU registers (base)
 uint32_t g_hid2 = 0xA0000000u;  // load/store quantised and paired singles on (__OSPSInit)
+uint32_t g_msr = 0x00002032u;   // FP available, the rest as the OS runs; EE is g_enabled
+void PPCMfmsr(Cpu& c) { c.r[3] = g_msr | (g_enabled ? 0x8000u : 0); }
+void PPCMtmsr(Cpu& c) {
+    g_msr = c.r[3] & ~0x8000u;
+    g_enabled = (c.r[3] & 0x8000u) != 0;
+    deliver_interrupts(c);
+}
 void PPCSync(Cpu&) {}
 void PPCHalt(Cpu&) {  // where exit() ends
     rt::log("the game exited");
@@ -117,8 +246,7 @@ void PPCHalt(Cpu&) {  // where exit() ends
 void PPCMfhid2(Cpu& c) { c.r[3] = g_hid2; }
 void PPCMthid2(Cpu& c) { g_hid2 = c.r[3]; }
 
-// ---- interrupts: one flag, as MSR[EE] is (os.hpp).
-bool g_enabled = false;
+// ---- interrupts
 std::deque<std::function<void(Cpu&)>> g_pending;
 struct Timer {
     std::function<void()> poll;
@@ -143,31 +271,34 @@ void OSRestoreInterrupts(Cpu& c) {
     c.r[3] = was;
 }
 
-// ---- interrupt handlers, by the OS's numbering; a mask bit per interrupt,
-// bit 31 for interrupt 0 (as __OSMaskInterrupts takes it). Masked at boot.
-uint32_t g_handlers[32] = {};
-uint32_t g_mask = 0xFFFFFFFFu;
+// ---- interrupt handlers, by the OS's numbering (__OSDispatchInterrupt,
+// 800E8C54): 0-4 memory protection, 5 audio DMA, 6 ARAM, 7 DSP, 8 audio
+// streaming, 9-16 EXI (three for each of channels 0 and 1, two for channel
+// 2), 17 CP, 18 PE token, 19 PE finish, 20 SI, 21 DVD, 22 the reset switch, 23
+// PI error, 24 VI, 25 debugger, 26 high-speed port. The table is the OS's own,
+// in low memory; a mask bit per interrupt, bit 31 for interrupt 0.
 void __OSSetInterruptHandler(Cpu& c) {  // (interrupt, handler) -> the previous handler
-    const uint32_t n = c.r[3];
+    const uint32_t n = c.r[3] & 0xFFFFu;
     if (n >= 32) rt::fatal(&c, "__OSSetInterruptHandler(%u)", n);
-    const uint32_t was = g_handlers[n];
-    g_handlers[n] = c.r[4];
+    const uint32_t was = rt::peek32(kInterruptTable + 4 * n);
+    rt::poke32(kInterruptTable + 4 * n, c.r[4]);
     c.r[3] = was;
 }
-void __OSGetInterruptHandler(Cpu& c) { c.r[3] = c.r[3] < 32 ? g_handlers[c.r[3]] : 0; }
+void __OSGetInterruptHandler(Cpu& c) {
+    const uint32_t n = c.r[3] & 0xFFFFu;
+    c.r[3] = n < 32 ? rt::peek32(kInterruptTable + 4 * n) : 0;
+}
 // The OS keeps the devices' own enables in step with its mask: for the DSP
-// group (5 AI DMA, 6 ARAM, 7 DSP) those are bits of the DSP control register.
+// group (5 audio DMA, 6 ARAM, 7 DSP) those are bits of the DSP control register.
 void __OSMaskInterrupts(Cpu& c) {  // (mask) -> the mask before
-    const uint32_t was = g_mask;
-    g_mask |= c.r[3];
-    dsp_interrupt_enables(g_mask);
+    const uint32_t was = rt::peek32(kUserMask);
+    set_mask(was | c.r[3]);
     c.r[3] = was;
 }
 uint32_t g_held = 0;  // raised while masked: the hardware's line stays up, so they arrive when unmasked
 void __OSUnmaskInterrupts(Cpu& c) {
-    const uint32_t was = g_mask;
-    g_mask &= ~c.r[3];
-    dsp_interrupt_enables(g_mask);
+    const uint32_t was = rt::peek32(kUserMask);
+    set_mask(was & ~c.r[3]);
     for (uint32_t due = g_held & ~g_mask, n = 0; due; ++n)
         if (due & (0x80000000u >> n)) {
             due &= ~(0x80000000u >> n), g_held &= ~(0x80000000u >> n);
@@ -175,24 +306,40 @@ void __OSUnmaskInterrupts(Cpu& c) {
         }
     c.r[3] = was;
 }
-// Contexts: the guest's thread switching is native, so only bookkeeping is left.
-void OSSetCurrentContext(Cpu& c) { rt::poke32(0x800000D4u, c.r[3]); rt::poke32(0x800000C0u, c.r[3] & 0x3FFFFFFFu); }
-void OSClearContext(Cpu&) {}
-void OSRegisterShutdownFunction(Cpu&) {}
 
-// The write-gather pipe's address register: bursts are sent as they fill, so
-// its "data not yet sent" bit (0) always reads clear. Writing it resets the
-// pipe, as on the hardware (Dolphin: GPFifo::ResetGatherPipe).
-uint32_t g_wpar = 0;
+// ---- contexts: the guest's thread switching is native, so only the words in
+// low memory are left, which lifted interrupt handlers set around their callbacks.
+void OSSetCurrentContext(Cpu& c) {
+    rt::poke32(kCurrentContext, c.r[3]);
+    rt::poke32(kCurrentContextPhysical, c.r[3] & 0x3FFFFFFFu);
+}
+void OSGetCurrentContext(Cpu& c) { c.r[3] = rt::peek32(kCurrentContext); }
+void OSClearContext(Cpu& c) {  // mode and state (+0x1A0, +0x1A2); it no longer owns the FPU
+    rt::poke16(c.r[3] + 0x1A0, 0);
+    rt::poke16(c.r[3] + 0x1A2, 0);
+    if (rt::peek32(kFpuContext) == c.r[3]) rt::poke32(kFpuContext, 0);
+}
+void OSGetStackPointer(Cpu& c) { c.r[3] = c.r[1]; }
+// The running thread's floating-point registers into a context: FPRs +0x90,
+// FPSCR +0x194, the paired singles' second halves +0x1C8 (the crash screen's use).
+void OSFillFPUContext(Cpu& c) {
+    const uint32_t context = c.r[3];
+    for (uint32_t i = 0; i < 32; ++i) {
+        const uint64_t a = std::bit_cast<uint64_t>(c.ps0[i]), b = std::bit_cast<uint64_t>(c.ps1[i]);
+        rt::poke32(context + 0x90 + 8 * i, static_cast<uint32_t>(a >> 32)), rt::poke32(context + 0x94 + 8 * i, static_cast<uint32_t>(a));
+        rt::poke32(context + 0x1C8 + 8 * i, static_cast<uint32_t>(b >> 32)), rt::poke32(context + 0x1CC + 8 * i, static_cast<uint32_t>(b));
+    }
+    rt::poke32(context + 0x194, c.fpscr);
+}
+
+// The write-gather pipe's address register: writing it resets the pipe, as on
+// the hardware (Dolphin: GPFifo::ResetGatherPipe).
 void (*g_wpar_reset)() = nullptr;
-void PPCMfwpar(Cpu& c) { c.r[3] = g_wpar & ~1u; }
-void PPCMtwpar(Cpu& c) {
-    g_wpar = c.r[3];
+void PPCMtwpar(Cpu&) {
     if (g_wpar_reset) g_wpar_reset();
 }
 
 // ---- caches: the host's are coherent, so only dcbz's zeroing is left to do.
-void nothing(Cpu&) {}
 void DCZeroRange(Cpu& c) {
     const uint32_t start = c.r[3] & ~31u, end = (c.r[3] + c.r[4] + 31) & ~31u;
     if (c.r[4]) std::memset(rt::guest_ptr(start), 0, end - start);
@@ -201,9 +348,8 @@ void DCZeroRange(Cpu& c) {
 // ---- the locked cache: 16 KB at 0xE0000000 (the runtime backs it). Its DMA
 // is a copy, done at once, so there's never a queue to wait for.
 uint32_t blocks(uint32_t n) { return n == 0 ? 128 : n; }  // 0 means 128 blocks of 32 bytes
-void LCLoadBlocks(Cpu& c) { std::memmove(rt::guest_ptr(c.r[3]), rt::guest_ptr(c.r[4] | 0x80000000u), 32 * blocks(c.r[5])); }
 void LCStoreBlocks(Cpu& c) { std::memmove(rt::guest_ptr(c.r[3] | 0x80000000u), rt::guest_ptr(c.r[4]), 32 * blocks(c.r[5])); }
-void LCStore(Cpu& c) {  // (dest, srcLC, bytes) -> DMA transactions issued
+void LCStoreData(Cpu& c) {  // (dest, srcLC, bytes) -> DMA transactions issued
     const uint32_t n = (c.r[5] + 31) / 32;
     std::memmove(rt::guest_ptr(c.r[3] | 0x80000000u), rt::guest_ptr(c.r[4]), 32 * n);
     c.r[3] = (n + 127) / 128;
@@ -216,6 +362,11 @@ void OSGetTime(Cpu& c) {
     c.r[4] = static_cast<uint32_t>(t);
 }
 void OSGetTick(Cpu& c) { c.r[3] = static_cast<uint32_t>(time_base()); }
+void __OSGetSystemTime(Cpu& c) {  // the time base plus the offset in low memory (0 since boot)
+    const uint64_t t = time_base() + (uint64_t{rt::peek32(kSystemTimeOffset)} << 32 | rt::peek32(kSystemTimeOffset + 4));
+    c.r[3] = static_cast<uint32_t>(t >> 32);
+    c.r[4] = static_cast<uint32_t>(t);
+}
 
 // OSTicksToCalendarTime(ticks (r3:r4), OSCalendarTime* (r5)): the time base
 // (from 1 January 2000) as a date. OSCalendarTime is ten words: sec, min,
@@ -245,91 +396,143 @@ void OSTicksToCalendarTime(Cpu& c) {
     put(9, sub * 1000000 / kPerSecond % 1000);
 }
 
-// ---- leaving the game. The game's exit code (800E249C, after the HOME Button
-// Menu or the power and reset buttons) blanks the screen and calls one of these,
-// then spins: on the console they never return. Here the Wii Menu, data
-// management and power off close the program; reset starts it again.
+// ---- reset. The game registers functions to run before a reset
+// (OSRegisterResetFunction: an OSResetFunctionInfo is the function at +0 and
+// its priority at +4); OSResetSystem (800E9D64) calls each with FALSE until
+// all return TRUE, then each with TRUE, and resets. Here a hot reset or a
+// restart starts the program again; a reset to the console's menu closes it.
+std::vector<uint32_t> g_reset_functions;  // guest OSResetFunctionInfo, by priority
+void OSRegisterResetFunction(Cpu& c) {
+    const uint32_t info = c.r[3], priority = rt::peek32(info + 4);
+    auto at = g_reset_functions.begin();
+    while (at != g_reset_functions.end() && rt::peek32(*at + 4) <= priority) ++at;
+    g_reset_functions.insert(at, info);
+}
+bool call_reset_functions(Cpu& c, bool final) {
+    bool all = true;
+    for (const uint32_t info : std::vector(g_reset_functions)) {
+        c.r[3] = final;
+        rt::call(c, rt::peek32(info));
+        if (!c.r[3]) all = false;
+    }
+    return all;
+}
 [[noreturn]] void leave(const char* why) {
     rt::log("the game chose %s: closing", why);
     before_exit();
     std::fflush(nullptr);
     std::_Exit(0);  // guest threads are parked on host threads: no static destructors
 }
-void OSReturnToMenu(Cpu&) { leave("the Wii Menu"); }
-void OSReturnToDataManager(Cpu&) { leave("Data Management"); }
-void OSShutdownSystem(Cpu&) { leave("to power off"); }
-void OSRestart(Cpu&) {  // (reset code): the game starts again
-    rt::log("the game chose to reset: starting again");
+void OSResetSystem(Cpu& c) {  // (reset: 0 restart, 1 hot reset, 2 shutdown; resetCode; forceMenu)
+    const uint32_t reset = c.r[3], code = c.r[4], menu = c.r[5];
+    if (reset > 1) rt::fatal(&c, "OSResetSystem(%u, %08X, %u): only a restart (0) and a hot reset (1) are modelled", reset, code, menu);
+    const Cpu saved = c;
+    for (unsigned tries = 0; !call_reset_functions(c, false); ++tries) {
+        if (tries == 10000) rt::fatal(&c, "OSResetSystem: a reset function never says it's ready");
+        poll_loop(c);  // what it waits for arrives as an interrupt
+    }
+    set_interrupts_enabled(false);
+    call_reset_functions(c, true);
+    c = saved;
+    if (reset == 1 && menu) leave("the console's menu");
+    rt::log("the game chose to reset (code %08X): starting again", code);
     std::fflush(nullptr);
     restart_program();
 }
+void OSGetResetCode(Cpu& c) { c.r[3] = 0; }  // a cold boot
+// The reset switch: the host says when it's held (os.hpp's g_reset_button).
+void OSGetResetButtonState(Cpu& c) { c.r[3] = g_reset_button.load(std::memory_order_relaxed) ? 1 : 0; }
 
 const rt::Provided kReplacements[] = {
-    {0x801E17F8u, "DBInit", DBInit},
-    {0x801FF230u, "OSInit", OSInit},
-    {0x801FFBD8u, "OSRegisterVersion", OSRegisterVersion},
-    {0x801FE904u, "OSGetConsoleType", OSGetConsoleType},
-    {0x801EB3E0u, "InitializeUART", InitializeUART},
-    {0x801EB428u, "WriteUARTN", WriteUARTN},
-    {0x801C93D8u, "__TRK_write_console (no debugger)", returns_zero},
-    {0x801C9070u, "MetroTRK's host-file open behind fopen (no debugger: fails)", returns_one},
-    // MSL's FILE procedures on the debugger's host: an I/O error (1) with no debugger, as
-    // each returns on a retail console. exit's __close_all calls __close_console.
-    {0x801C8F10u, "MetroTRK host file: position (no debugger: I/O error)", returns_one},
-    {0x801C8FECu, "MetroTRK host file: close (no debugger: I/O error)", returns_one},
-    {0x801C91ECu, "MetroTRK host file: write (no debugger: I/O error)", returns_one},
-    {0x801C92A0u, "MetroTRK host file: read (no debugger: I/O error)", returns_one},
-    {0x801C9354u, "__close_console (no debugger: I/O error)", returns_one},
-    {0x801C9494u, "__read_console (no debugger: I/O error)", returns_one},
-    {0x80201CDCu, "OSPanic", OSPanic},
-    {0x80201E08u, "OSSetErrorHandler", OSSetErrorHandler},
-    {0x801E16C0u, "PPCSync", PPCSync},
-    {0x801E16C8u, "PPCHalt", PPCHalt},
-    {0x801E1754u, "PPCMfhid2", PPCMfhid2},
-    {0x801E175Cu, "PPCMthid2", PPCMthid2},
-    {0x802052FCu, "OSDisableInterrupts", OSDisableInterrupts},
-    {0x80205310u, "OSEnableInterrupts", OSEnableInterrupts},
-    {0x80205324u, "OSRestoreInterrupts", OSRestoreInterrupts},
-    {0x80200DA4u, "DCEnable", nothing},
-    {0x80200DB8u, "DCInvalidateRange", nothing},
-    {0x80200DE4u, "DCFlushRange", nothing},
-    {0x80200E14u, "DCStoreRange", nothing},
-    {0x80200E44u, "DCFlushRange without a sync (a dcbf loop)", nothing},
-    {0x80200E70u, "DCFlushRangeNoSync", nothing},
-    {0x80200E9Cu, "DCZeroRange", DCZeroRange},
-    {0x80200EC8u, "ICInvalidateRange", nothing},
-    {0x80200EFCu, "ICFlashInvalidate", nothing},
-    {0x80200F0Cu, "ICEnable", nothing},
-    {0x80205D6Cu, "OSGetPhysicalMem2Size", OSGetPhysicalMem2Size},
-    {0x80205D78u, "OSGetConsoleSimulatedMem1Size", OSGetConsoleSimulatedMem1Size},
-    {0x80205D84u, "OSGetConsoleSimulatedMem2Size", OSGetConsoleSimulatedMem2Size},
-    {0x802099E4u, "OSSetResetCallback", OSSetResetCallback},
-    {0x80209AD0u, "OSSetPowerCallback", OSSetPowerCallback},
-    {0x80200FECu, "LCEnable", nothing},
-    {0x80201024u, "LCDisable", nothing},
-    {0x8020104Cu, "LCLoadBlocks", LCLoadBlocks},
-    {0x80201070u, "LCStoreBlocks", LCStoreBlocks},
-    {0x80201094u, "LCStore", LCStore},
-    {0x80201134u, "LCQueueWait", nothing},
-    {0x80205348u, "__OSSetInterruptHandler", __OSSetInterruptHandler},
-    {0x8020535Cu, "__OSGetInterruptHandler", __OSGetInterruptHandler},
-    {0x8020568Cu, "__OSMaskInterrupts", __OSMaskInterrupts},
-    {0x8020570Cu, "__OSUnmaskInterrupts", __OSUnmaskInterrupts},
-    {0x8020161Cu, "OSSetCurrentContext", OSSetCurrentContext},
-    {0x80201844u, "OSClearContext", OSClearContext},
-    {0x80206850u, "OSRegisterShutdownFunction", OSRegisterShutdownFunction},
-    {0x801E1764u, "PPCMfwpar", PPCMfwpar},
-    {0x801E1770u, "PPCMtwpar", PPCMtwpar},
-    {0x80209370u, "OSGetTime", OSGetTime},
-    {0x802095BCu, "OSTicksToCalendarTime", OSTicksToCalendarTime},
-    {0x80206FFCu, "OSReturnToMenu", OSReturnToMenu},
-    {0x8020703Cu, "OSReturnToDataManager", OSReturnToDataManager},
-    {0x80206B84u, "OSShutdownSystem", OSShutdownSystem},
-    {0x80206CA0u, "OSRestart", OSRestart},
-    {0x80209388u, "OSGetTick", OSGetTick},
+    // db.c
+    {build::kDBInit, "DBInit", DBInit},
+    {0x800F07B0u, "DBPrintf", nothing},
+    // OS.c
+    {build::kOSInit, "OSInit", OSInit},
+    {0x800E5A00u, "OSGetConsoleType", OSGetConsoleType},
+    {0x800E6398u, "OSRegisterVersion", OSRegisterVersion},
+    // EXIUart.c and the debugger's console behind MSL's __write_console
+    {0x800C56F4u, "InitializeUART", InitializeUART},
+    {0x800C5764u, "WriteUARTN", WriteUARTN},
+    {0x801116DCu, "__TRK_write_console (no debugger)", returns_zero},
+    {0x80111798u, "__read_console (no debugger: an I/O error)", returns_one},  // stdin's read procedure, in MSL's FILE tables
+    // OSError.c, OSFont.c, OSMemory.c
+    {0x800E80F8u, "OSPanic", OSPanic},
+    {0x800E8224u, "OSSetErrorHandler", OSSetErrorHandler},
+    {0x800E8724u, "OSGetFontEncode", OSGetFontEncode},
+    {0x800E92D8u, "OSGetPhysicalMemSize", OSGetPhysicalMemSize},
+    {0x800E938Cu, "OSProtectRange", OSProtectRange},
+    // PPCArch.c
+    {0x800A9600u, "PPCMfmsr", PPCMfmsr},
+    {0x800A9608u, "PPCMtmsr", PPCMtmsr},
+    {0x800A9638u, "PPCSync", PPCSync},
+    {0x800A9640u, "PPCHalt", PPCHalt},
+    {0x800A96CCu, "PPCMfhid2", PPCMfhid2},
+    {0x800A96D4u, "PPCMthid2", PPCMthid2},
+    {0x800A96DCu, "PPCMtwpar", PPCMtwpar},
+    // OSInterrupt.c
+    {0x800E877Cu, "OSDisableInterrupts", OSDisableInterrupts},
+    {0x800E8790u, "OSEnableInterrupts", OSEnableInterrupts},
+    {0x800E87A4u, "OSRestoreInterrupts", OSRestoreInterrupts},
+    {0x800E87C8u, "__OSSetInterruptHandler", __OSSetInterruptHandler},
+    {0x800E87E4u, "__OSGetInterruptHandler", __OSGetInterruptHandler},
+    {0x800E8B44u, "__OSMaskInterrupts", __OSMaskInterrupts},
+    {0x800E8BCCu, "__OSUnmaskInterrupts", __OSUnmaskInterrupts},
+    // OSCache.c
+    {0x800E7064u, "DCEnable", nothing},
+    {0x800E7078u, "DCInvalidateRange", nothing},
+    {0x800E70A4u, "DCFlushRange", nothing},
+    {0x800E70D4u, "DCStoreRange", nothing},
+    {0x800E7104u, "DCFlushRangeNoSync", nothing},
+    {0x800E7130u, "DCStoreRangeNoSync", nothing},
+    {0x800E715Cu, "DCZeroRange", DCZeroRange},
+    {0x800E7188u, "ICInvalidateRange", nothing},
+    {0x800E71BCu, "ICFlashInvalidate", nothing},
+    {0x800E71CCu, "ICEnable", nothing},
+    {0x800E72ACu, "LCEnable", nothing},
+    {0x800E72E4u, "LCDisable", nothing},
+    {0x800E730Cu, "LCStoreBlocks", LCStoreBlocks},
+    {0x800E7330u, "LCStoreData", LCStoreData},
+    {0x800E73DCu, "LCQueueWait", nothing},
+    // OSContext.c
+    {0x800E7930u, "OSSetCurrentContext", OSSetCurrentContext},
+    {0x800E798Cu, "OSGetCurrentContext", OSGetCurrentContext},
+    {0x800E7AF0u, "OSGetStackPointer", OSGetStackPointer},
+    {0x800E7AF8u, "OSClearContext", OSClearContext},
+    {0x800E7F4Cu, "OSFillFPUContext", OSFillFPUContext},
+    // OSReset.c, OSResetSW.c
+    {0x800E9C28u, "OSRegisterResetFunction", OSRegisterResetFunction},
+    {0x800E9D64u, "OSResetSystem", OSResetSystem},
+    {0x800EA01Cu, "OSGetResetCode", OSGetResetCode},
+    {0x800EA140u, "OSGetResetButtonState", OSGetResetButtonState},
+    {0x800EA3D8u, "OSGetResetSwitchState", OSGetResetButtonState},
+    // OSRtc.c
+    {0x800EA6ACu, "__OSLockSram", __OSLockSram},
+    {0x800EA708u, "__OSLockSramEx", __OSLockSramEx},
+    {0x800EAAA0u, "__OSUnlockSram", __OSUnlockSram},
+    {0x800EAAC4u, "__OSUnlockSramEx", __OSUnlockSramEx},
+    {0x800EAAE8u, "__OSSyncSram", __OSSyncSram},
+    {0x800EAAF8u, "OSGetSoundMode", OSGetSoundMode},
+    {0x800EAB78u, "OSSetSoundMode", OSSetSoundMode},
+    {0x800EAC1Cu, "OSGetProgressiveMode", OSGetProgressiveMode},
+    {0x800EAC8Cu, "OSSetProgressiveMode", OSSetProgressiveMode},
+    {0x800EAD30u, "OSGetWirelessID", OSGetWirelessID},
+    {0x800EADB4u, "OSSetWirelessID", OSSetWirelessID},
+    {0x800EAE60u, "OSGetGbsMode", OSGetGbsMode},
+    {0x800EAED0u, "OSSetGbsMode", OSSetGbsMode},
+    // OSTime.c
+    {0x800EC33Cu, "OSGetTime", OSGetTime},
+    {0x800EC354u, "OSGetTick", OSGetTick},
+    {0x800EC35Cu, "__OSGetSystemTime", __OSGetSystemTime},
+    {0x800EC5B4u, "OSTicksToCalendarTime", OSTicksToCalendarTime},
 };
 
 }  // namespace
+
+void set_console(unsigned language, bool stereo, bool progressive) {
+    g_language = language, g_stereo = stereo, g_progressive = progressive;
+}
+bool component_cable() { return g_progressive; }
 
 std::span<const rt::Provided> os_replacements() { return kReplacements; }
 
@@ -337,9 +540,9 @@ void post_interrupt(std::function<void(Cpu&)> work) { g_pending.push_back(std::m
 
 bool call_interrupt_handler(Cpu& c, uint32_t n) {
     if (g_mask & (0x80000000u >> n)) return false;
-    const uint32_t h = g_handlers[n];
+    const uint32_t h = rt::peek32(kInterruptTable + 4 * n);
     if (!h) rt::fatal(&c, "interrupt %u has no handler", n);
-    guest_callback(c, h, n, rt::peek32(0x800000D4u));
+    guest_callback(c, h, n, rt::peek32(kCurrentContext));
     return true;
 }
 void raise_interrupt(uint32_t n) {
@@ -352,8 +555,9 @@ uint32_t interrupt_mask() { return g_mask; }
 
 namespace {
 const auto g_boot = std::chrono::steady_clock::now();
-// On the Wii the time base counts from 1 January 2000, 00:00 local time (the
-// OS sets it from the console's clock at boot), so OSGetTime is the date.
+// On the console the time base counts from 1 January 2000, 00:00 local time
+// (the boot ROM sets it from the clock chip and SRAM's counter bias), so
+// OSGetTime is the date.
 // Here: the PC's local time at start-up, then a steady clock.
 const uint64_t g_epoch = [] {
     const std::time_t now = std::time(nullptr);
@@ -398,7 +602,7 @@ bool g_parked = false;  // under g_pause_lock
 uint64_t time_base() {
     const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - g_boot).count() -
                     g_paused_ns.load(std::memory_order_relaxed);
-    return g_epoch + static_cast<uint64_t>(ns) * 243u / 4000u;  // 60.75 MHz
+    return g_epoch + static_cast<uint64_t>(ns) * 81u / 2000u;  // 40.5 MHz
 }
 
 void request_pause(bool on) {
@@ -574,7 +778,7 @@ void poll_loop(Cpu& c) {
     // Nothing came: wait for the next timed event, a millisecond at most, rather than spin.
     // Only a timer's own deadline needs meeting on time; the millisecond is a bound.
     const uint64_t now = time_base(), timer = next_timer_deadline(), next = std::min(timer, now + kTimerHz / 1000);
-    if (next > now) idle_sleep((next - now) * 4000 / 243, next == timer);
+    if (next > now) idle_sleep((next - now) * 2000 / 81, next == timer);
 }
 
 bool deliver_interrupts_idle(Cpu& c) {
@@ -596,11 +800,5 @@ void guest_callback(Cpu& c, uint32_t fn, uint32_t a0, uint32_t a1) {
     rt::call(c, fn);
     c = saved;
 }
-
-namespace {
-std::filesystem::path g_folder;
-}
-const std::filesystem::path& game_folder() { return g_folder; }
-void set_game_folder(std::filesystem::path folder) { g_folder = std::move(folder); }
 
 }  // namespace mkdd
