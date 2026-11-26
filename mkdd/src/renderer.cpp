@@ -477,7 +477,7 @@ struct Renderer::Impl {
         both = VK_NULL_HANDLE;
         im.destroy(gpu);
     }
-    VkImageAspectFlags depth_aspects() const { return VK_IMAGE_ASPECT_DEPTH_BIT | (stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u); }
+    VkImageAspectFlags depth_aspects() const { return VK_IMAGE_ASPECT_DEPTH_BIT | (stencil ? VkImageAspectFlags{VK_IMAGE_ASPECT_STENCIL_BIT} : VkImageAspectFlags{0}); }
 
     void create() {
         dual = gpu.dual_src_blend && !std::getenv("MKDD_NO_DUAL_SOURCE");
