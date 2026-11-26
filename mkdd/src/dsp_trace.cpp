@@ -89,6 +89,10 @@ void report() {
     const double dsp_ms = double(a.dsp_ns - g_w.dsp_ns0) / 1e6;
     rt::log("  the microcode: %.1f ms in %llu runs, %.2f%% of the sound's time", dsp_ms, static_cast<unsigned long long>(a.dsp_runs - g_w.runs0),
             seconds > 0 ? dsp_ms / 10.0 / seconds : 0.0);
+    const Lateness late = take_lateness();
+    rt::log("  lateness at worst: timers unpolled for %.2f ms, a DMA buffer noticed %.2f ms late, the next frame asked for %.2f ms after its interrupt%s",
+            late.poll_gap_us / 1000.0, late.dma_late_us / 1000.0, late.request_us / 1000.0,
+            g_w.frames_done >= g_w.dma ? "" : late.poll_gap_us > 5000 ? " (frames missed: the host stalled)" : " (FRAMES MISSED WITH THE TIMERS POLLED: look here)");
     if (a.wakes || a.settle_ns)
         rt::log("  the DSP's thread: woken from sleep %llu times; the game's thread waited %.1f ms for it, %.2f ms at worst",
                 static_cast<unsigned long long>(a.wakes - g_w.wakes0), double(a.settle_ns - g_w.settle0) / 1e6, double(a.settle_worst_ns) / 1e6);

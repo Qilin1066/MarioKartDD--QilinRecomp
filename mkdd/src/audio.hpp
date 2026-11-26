@@ -54,6 +54,12 @@ void dma(unsigned control, unsigned at, unsigned words, const uint8_t* main);
 void mail_from_dsp(uint32_t mail);
 void mail_to_dsp(uint32_t mail, bool lifted);
 void interrupt_dsp(uint32_t waiting_mail);
+// The worst, in microseconds, since last asked (dsp.cpp): the timers not polled; a finished DMA
+// buffer noticed late; from the AI DMA interrupt to JAudio's request for the next frame.
+struct Lateness {
+    uint32_t poll_gap_us, dma_late_us, request_us;
+};
+Lateness take_lateness();
 }  // namespace trace
 }  // namespace dsp
 

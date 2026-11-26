@@ -109,6 +109,12 @@ uint32_t g_dma_rate = 32000;
 uint32_t g_ai_control = 0, g_ai_volume = 0, g_ai_counter = 0, g_ai_timing = 0;
 uint64_t g_ai_counter_t0 = 0;
 
+// Lateness, to tell a busy host from a fault of ours (time-base ticks; the worst since last asked):
+// the longest stretch without the timers being polled at all (the game's thread not running, or
+// running with no safe point), how late a finished DMA buffer was noticed, and how long JAudio
+// took from the AI DMA interrupt to asking the DSP for the next frame.
+uint64_t g_last_poll = 0, g_poll_gap_worst = 0, g_dma_late_worst = 0, g_aid_raised = 0, g_request_worst = 0;
+
 uint64_t dma_end() { return g_dma_t0 + uint64_t(g_dma_blocks) * 8 * kTimerHz / g_dma_rate; }
 unsigned ai_stream_rate() { return (g_ai_control & 2) ? 48000 : 32000; }
 
@@ -387,6 +393,10 @@ uint16_t microcode_control_write(uint16_t v) {
             g_core.ext_int = true;
             ++g_stats.command_lists;
             if (g_trace) dsp::trace::interrupt_dsp(g_core.cpu_mail);
+            if (g_aid_raised && (g_core.cpu_mail.load() & 0xFFFF)) {  // a command: the next frame's request
+                g_request_worst = std::max(g_request_worst, time_base() - g_aid_raised);
+                g_aid_raised = 0;
+            }
         } else {
             g_dsp_bits &= ~kAssert;
         }
@@ -459,12 +469,19 @@ void poll() {
     }
     if (!dma_on()) return;
     const uint64_t now = time_base();
+    const uint64_t gap = g_last_poll ? now - g_last_poll : 0;
+    g_last_poll = now;
+    g_poll_gap_worst = std::max(g_poll_gap_worst, gap);
     if (now >= dma_end() + kTimerHz / 10) {  // more than 100 ms behind (a stall): start again from now
-        rt::log("audio: %llu ms behind, skipping ahead", static_cast<unsigned long long>((now - dma_end()) * 1000 / kTimerHz));
+        rt::log("audio: %llu ms behind, skipping ahead (the timers were last polled %llu ms before this: %s)",
+                static_cast<unsigned long long>((now - dma_end()) * 1000 / kTimerHz), static_cast<unsigned long long>(gap * 1000 / kTimerHz),
+                gap >= kTimerHz / 20 ? "the game's thread did not run, or ran without a safe point" : "the DMA fell behind while the timers were polled");
         g_dma_t0 = now;
         return;
     }
     if (now < dma_end()) return;
+    g_dma_late_worst = std::max(g_dma_late_worst, now - dma_end());
+    g_aid_raised = now;
     play(nullptr, g_dma_current, g_dma_blocks);
     g_dma_t0 = dma_end();
     g_dma_current = g_dma_source;
@@ -625,6 +642,13 @@ uint8_t* physical(Cpu* c, uint32_t address, uint32_t size) {
     rt::fatal(c, "the DSP reached %u bytes at %08X: outside main memory", size, address);
 }
 }  // namespace dsp
+
+namespace dsp::trace {
+Lateness take_lateness() {
+    const auto us = [](uint64_t ticks) { return static_cast<uint32_t>(ticks * 1000000 / kTimerHz); };
+    return {us(std::exchange(g_poll_gap_worst, 0)), us(std::exchange(g_dma_late_worst, 0)), us(std::exchange(g_request_worst, 0))};
+}
+}  // namespace dsp::trace
 
 uint8_t* aram_base() {
     if (!g_aram) g_aram = std::make_unique<uint8_t[]>(kAramSize);  // zeroed
