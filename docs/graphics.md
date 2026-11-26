@@ -180,6 +180,22 @@ Offscreen, `frame_rate = display` with `MKDD_PRESENT_HZ` 120 and 240, through th
 9. Latency: one tick more than without, by design; the early frame end at `JFWDisplay::endRender` (`docs/enhancements.md`) would give a tick back in every mode and isn't done.
 10. The tag ring (16,384 loads between the guest and the decoder): a load beyond it goes untagged; count them in a busy 4-player race.
 
+## A picture wider than drawn for
+
+The aspect path (enhance.cpp, hud.cpp) widens the game's cameras and stretches the 608x448 frame across the screen. Two things here serve it:
+
+- **Columns** (`Renderer::request_widening`, called from `main.cpp` with `enhance::widening()`): the EFB gets enough whole columns for each of the console's that the stretch isn't a blur: scale x widening, rounded up (16:9 and 21:9: 2 columns at 1x; 3 and 4 at 2x; 32:9: 3 at 1x). Viewports, scissors, clears, copies and the Z read-back place the console's pixels in them; the dither's grid and the fog's range adjustment go by the column scale (a second scale in the push constants); lines' widths and points' sizes stay the line scale's. The `widened` test draws 16:9 and 21:9 frames at 1x and 2x and checks each of those.
+- **A survey** (`MKDD_SURVEY=<file>`): every 600 frames, where the perspective draws' vertices fall across the half width in eighths from the middle, and how many draws lie wholly beyond each eighth; and every 20th frame each view's eye and direction. Over the single-view demo race (frames 3,000-5,400, 2026-11-26), the same game frames at four shapes:
+
+| | vertices in each eighth, middle to edge, % | draws wholly in the outer quarter | draws wholly beyond the old 4:3 edge |
+|---|---|---|---|
+| 4:3 | 33 15 11 11 8 8 8 6 | 7.7% | - |
+| 16:9 | 39 18 12 9 6 6 5 5 | 6.7% | 6.7% (beyond 3/4) |
+| 21:9 | 33 13 13 12 8 7 7 6 | 9.2% | 14.7% (beyond 5/8; the edge is at 0.57) |
+| 32:9 | 37 18 13 8 7 6 5 5 | 7.4% | 24.4% (beyond 3/8) |
+
+  The bands beside the old picture are as full as a 4:3 picture's own edges, at every shape: nothing in this race is still culled against 4:3. (One ten-second stretch alone, the race's start, read thinner at 21:9; over the race it doesn't.) Split screen and the other courses weren't surveyed.
+
 ## Tools
 
 - A GLSL compiler isn't on the build machine and CI installs `glslang-tools`. For the shader change here, glslang 15.1.0 was built from source in scratch (`work\gpu\bin\glslangValidator.exe`), and `tools/build_shaders.py` used as it is. Every shader's SPIR-V bytes changed with the compiler's version; only `copy.frag` changed in source.
