@@ -39,7 +39,7 @@ The game plays, as far as scripted runs have taken it: from the disc through the
 - Split screen and courses other than the one surveyed have not been checked for culling at wide shapes; matching pictures between frames to their neighbours in a played race (items, Lakitu, cannons) is checked only on the demo races.
 - Measuring on a Raspberry Pi 4.
 
-**Platforms.** Built and tested on Windows x64 with MSVC. Linux, macOS and ARM64 are compile-checked with Clang only: not built or run there. CI (`.github/workflows/ci.yml`) has not run yet.
+**Platforms.** The game itself has been built and run only on Windows x64 with MSVC. CI (`.github/workflows/ci.yml`) builds everything except the game's own code (which needs the disc) and runs the tests on Linux x64 (GCC 14 and Clang 19), Linux ARM64 (GCC 14), macOS ARM64 and x64, and Windows x64, with warnings as errors; the Windows download is cross-built and packaged by `.github/workflows/player-kit.yml`. The game has not been run on Linux, macOS or ARM64.
 
 ## What it is meant to be
 
