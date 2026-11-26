@@ -87,6 +87,13 @@ void ARStartDMA(Cpu& c) {
     if (to_main) std::memcpy(m, a, length);
     else std::memcpy(a, m, length);
     g_in_flight = true;
+    if (devices_log()) {
+        static uint64_t count = 0, bytes = 0;
+        ++count, bytes += length;
+        if ((count & (count - 1)) == 0 || count % 1024 == 0)  // 1, 2, 4 ... then every 1024th
+            rt::log("ar: transfer %llu (%s ARAM %08X, main %08X, %u bytes); %llu KiB so far", static_cast<unsigned long long>(count),
+                    to_main ? "from" : "to", aram, main, length, static_cast<unsigned long long>(bytes >> 10));
+    }
     run_after(uint64_t{length / 32} * 246 * kTimerHz / 486000000u, [](Cpu& cc) {
         g_in_flight = false;
         if (g_callback) guest_callback(cc, g_callback, 0, 0);

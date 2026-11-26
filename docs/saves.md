@@ -51,7 +51,23 @@ The game's files (USA disc, read from its card code and messages):
 
 - `MarioKart Double Dash!!`: 3 blocks (0x6000 bytes), created at the first
   save. The game asks for "1 file and 3 empty blocks".
-- ghosts: 5 blocks each (0xA000 bytes), one file per ghost.
+- ghosts: 5 blocks each (0xA000 bytes), one file per ghost. A ghost's name is its 20-byte record (course,
+  time, characters, kart, initials) in a uuencode-like form: `5`, then 28 characters from `!` to `` ` ``, then
+  `aa`: for example ``5"QA!*%&"11!!!O)TG#`+'5>*2)M!aa``, on the host
+  ``GM4E01-5%22QA!%2A%25&%2211!!!O)TG#`+'5%3E%2A2)M!aa.gci`` (41,024 bytes).
+
+What the game does with the card, as seen in scripted runs:
+
+- At every start it mounts the card, checks it, asks the free blocks and looks for its file; nothing is shown.
+- At the title, Start does the same. Without the file it asks "Would you like to create data for MARIO KART:
+  DOUBLE DASH!! on the Memory Card in Slot A?" (YES selected); A creates and writes it ("Data has been created.").
+  With the file it reads it and goes on.
+- After a time trial with a new record it writes the file ("Saving game data."); the save history takes the copy
+  from before.
+- Time Trials lists the ghosts by asking the status of all 127 entries. SAVE GHOST after a run creates the
+  ghost's file (new files have no earlier copy to keep).
+- A probe (`CARDProbeEx`) comes every frame from the game's card thread; a card busy with anything but mounting
+  still answers it, as the SDK's does.
 
 Other games' files in the folder count against the free blocks and are
 visible as the SDK shows them: readable by number if they are public, never

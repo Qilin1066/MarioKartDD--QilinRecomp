@@ -88,4 +88,5 @@ void wait_on(qilin::rt::Cpu& c, uint32_t) {
     }
 }
 void wake_all(qilin::rt::Cpu&, uint32_t) { harness::woken = true; }
+uint32_t frame_count() { return 0; }  // (video.hpp: for the devices' development log)
 }  // namespace mkdd
