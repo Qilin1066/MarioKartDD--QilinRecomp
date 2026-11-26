@@ -154,7 +154,7 @@ No other constant encodes the shape: `enhance_scan.py floats "608/448" "608/223"
 
 Let *w* be how many times wider the picture is shown than the game drew it for (16:9 on a frame shown at 4:3: 4/3; 21:9: 1.75; 32:9: 2.67).
 
-- **Do**: return `scAspect × w` and `scAspectDiv2 × w` from the three getters (native replacements, `enhance.cpp`); for a change during a race, multiply each live camera's `+0x168` by the change (`KartCtrl` `[803CC588]`, cameras at `+0x200 + 4i`, count from `[[RaceMgr 803CB7E8]+0x38]+0x20`). Projection, clipper, course and object culling, LOD selection, 2D that follows karts and the flare then agree, because they all read the camera. The vertical field of view is untouched: Hor+.
+- **Do**: return `scAspect × w` and `scAspectDiv2 × w` from the three getters (native replacements, `enhance.cpp`: built, see "The widened picture as built"); for a change during a race, multiply each live camera's `+0x168` by the change (`KartCtrl` `[803CC588]`, cameras at `+0x200 + 4i`, count from `[[RaceMgr 803CB7E8]+0x38]+0x20`). Projection, clipper, course and object culling, LOD selection, 2D that follows karts and the flare then agree, because they all read the camera. The vertical field of view is untouched: Hor+.
 - **Don't change the frame.** The EFB stays 608×448 and the game's viewports, scissors, EFB copies and half-size effect textures (`BlurScreen`, `ShimmerScreen`, `GhostScreen`, `MaskScreen`, `ShadowScreen`, `ZCaptureScreen`, all sized from `JUTVideo`'s 608×448) stay as they are; the display stretches the finished frame by *w*, as a widescreen TV does, and the renderer's horizontal resolution multiple grows by *w* so pixels stay square. This is what makes the change small: nothing that works in frame coordinates has to know.
 - **Split screen** needs nothing more. Halves are 608×223 (2.73:1 already; ×4/3 = 3.63:1), quarters 303×223. A side-by-side two-player layout would be possible by rewriting the tables at `80352A28`/`80352A48` (they're in `.data`, filled at start-up), but the two-player HUD is laid out for stacked halves, so it isn't proposed.
 - **Outside races** (logo, menus, movies, LAN screens): *w* = 1, the frame shown at its own shape between black bars. The switch falls on the black frames between apps (`AppMgr::setNextApp` stalls drawing for a frame, and scenes fade out and in). "In a race" is `RaceMgr`'s manager pointer `[803CB7E8]` being set, which also covers the award ceremony and the staff roll, both of which draw through the race's cameras.
@@ -186,30 +186,52 @@ Test plan: at *w* = 1 the frames are bit-identical with and without the replacem
 
 **Load times.** `JKRDvdRipper::loadToMainRAM` calls `VIWaitForRetrace` between chunks (four sites) and `JKRDvdAramRipper` likewise, so loads are paced by the display, and `AppMgr` stalls a frame per app change while ARAM loads finish. With instant disc reads the retrace waits are most of what remains; shortening them while a load is in flight (never during a race or a LAN session) would cut loading screens. To measure first.
 
-## The interface this needs
+## The widened picture as built
 
-Proposed text for `mkdd/src/enhance.hpp` (the host's file), beyond its `aspect_supported()` and `frame_rate_supported()`, both true:
+Built 2026-11-26 and tested without the game (`mkdd_enhance_test`). Nothing of it has been seen in a race; the list below says what a first race must confirm.
 
-```cpp
-namespace mkdd::enhance {
-// The picture is shown `times` as wide as the game drew it for (1 to 3): the game's cameras
-// widen to match. `running`: the game has started (then from its thread, between passes).
-void set_widening(float times, bool running);
-float widening();
-// Undo LAN play's draw-on-every-second-pass; once a pass, before JFWDisplay::beginRender.
-void draw_every_tick();
-// A race (or the award scene, or the staff roll) is on: the widened picture applies.
-bool in_race();  // [803CB7E8] != 0; not in enhance.cpp yet
-// System::getPerspAspect, getPerspAspectDiv2, getPerspAspectDiv4.
-std::span<const qilin::rt::Provided> replacements();
-}
-```
+**The game's side** (`mkdd/src/enhance.cpp`, `enhance.hpp`). `set_aspect(aspect, hud)` comes from the main thread at start and on every pass of its loop (the settings as they are, the window's shape for "auto"); it only records the widening wanted: aspect over 4/3, held to 1…3. The three getters (`801D0F50`, `801D0F58`, `801D0F60`, replaced in the plan) return the game's own float times the widening in force. The game's thread moves the widening in force to the one wanted at the end of a frame (`end_frame`, which the recorder reaches through `hud::place` just before it hands the frame over) and, if a race is on then (`[803CB7E8]` set), multiplies each live camera's `+0x168` by the change. The pointers it follows are checked (in RAM, an aspect between 0.5 and 16) and anything else stops the program with what it found. `KartCtrl`'s pointer `[803CC588]` is never cleared when a race ends (its one store is `makeKartCtrl`, `8029F64C`), so it is only followed while `RaceMgr`'s is set; `RaceMgr`'s constructor sets its own pointer first (`801879E4`) and makes `KartCtrl` and the cameras before it returns (`801880A0`, `801880AC`).
 
-Requests to other roles:
+**The picture's shape per frame.** `end_frame` also notes how the frame just finished was drawn: widened if a race was on, else not. `shown_aspect()` gives the main thread that shape and `main.cpp` presents with it. So menus, movies, the logo and LAN screens are 4:3 between bars, and races (with the award scene and the staff roll) fill the chosen shape. The display code needed no change: `present_image` already took the shape per call. The EFB stays 608×448 at one resolution multiple both ways, so a widened picture has fewer columns per degree than rows; a multiple of its own across is the renderer's to add (a higher render resolution covers it meanwhile).
 
-- **core** (`data/<id>/plan.tsv`): mark `801D0F50`, `801D0F58`, `801D0F60` replaced (then add `mkdd/src/enhance.cpp` to `mkdd_runtime_sources` and `rt::provide(enhance::replacements())` in `main.cpp`); later `80067A64` and `800C20D8` for the tags. A way to run native code before and after a *lifted* function (a wrap entry in the plan: the body lifted under another name, the address dispatched to the native wrapper) would serve the early frame end at `JFWDisplay::endRender` and any future tag, without rewriting guest functions natively.
-- **host/devices** (`gpu.cpp`, `recorder.cpp`, `renderer.cpp`, `gx.hpp`): a tag and a view matrix per position-matrix load carried into `gx::State`; the flat-draw squeeze; two-frame rendering with alpha; the frame's end movable to `endRender`.
-- **os/devices**: `VIGetDTVStatus` returning 0 (no prompt).
+**The flat squeeze** (`mkdd/src/hud.cpp`, `hud.hpp`; one call, `hud::place(frame)`, where `recorder.cpp` ends a frame). On a widened frame every draw with an orthographic projection is measured (its vertices through its position matrix and projection, in EFB pixels) against its *view*: its viewport cut by its scissor box. Then:
+
+- a draw covering nine tenths or more of its view's width is left alone (fades, wipes, effect quads, bars, backgrounds);
+- so is a draw whose area a later colour texture copy in the same frame reads back (an effect's work area; depth copies don't count: the game makes 2×2 ones under its marks);
+- draws on one line in one view (half or more of the lower one's height shared, no more than 3% of the view's width apart) are one part;
+- a part is squeezed by 1/widening about an anchor: **edges**, the view's left or right edge if the part's centre is in that third of the view, else the part's own centre; **middle**, the view's centre; **stretched**, nothing is done;
+- a draw that follows something in the scene (`hud::set_follows_world`'s answer) is squeezed about its own centre under either setting.
+
+The squeeze is a copy of the draw's `gx::State` with the projection's first row scaled and offset (one copy per state and anchor), so vertex data, shaders and renderer are untouched, and an interpolated frame built from the recorded one inherits it.
+
+**For the merge with the interpolation work.** `hud::set_follows_world(bool (*)(const gx::Frame&, const gx::Draw&))` is the one thing wanted from the matrix tags: true for draws whose position matrix was loaded by `GXLoadPosMtxImm` called from `Race2D::drawPlayerMark` (`8014573C`, 0x48C bytes), `Race2D::drawAlarm` (`80146CF0`, 0x3B4 bytes), `Race2D`'s bomb and particle marks, or `TFlareLine::draw`. Until it is set, such marks in the outer thirds of a view slide towards its edge under "edges" (and all of them to the middle under "middle"): the known defect of this round. `hud::place` appends states to the frame and repoints flat draws at them; it reads nothing the tags add.
+
+**Tests** (`mkdd/tests/enhance_test.cpp`, `ctest -R mkdd_enhance_test`). The game's side over guest memory laid out as the game's: the getters at 4:3, 16:9, 21:9 and 32:9; a change taken up only at a frame's end; cameras rescaled for four and for two cameras, slots past the count untouched, values restored on the way back to 4:3; no camera read outside a race, with a stale `KartCtrl` pointer; the limits; the frame's shape in and out of a race; LAN's draw interval. The squeeze on scenes recorded through the real recorder from GX register writes, each twice (unwidened and widened) at 16:9, 21:9 and 32:9, every placed draw's new span compared with its old one squeezed about the expected anchor: one view (left, right, middle, a fade, a 95% bar, a two-piece line, a two-quad draw, a 3D draw), two stacked views by scissor, four views by scissor and four by viewport, under edges, middle and stretched; a draw a copy reads back; a tagged mark.
+
+### To check live
+
+1. The getters are reached: `KartCam::DoPort` at a race's start, and the first race at 16:9 shows more at the sides with round wheels.
+2. `[803CB7E8]` is the right "in a race" test: set through races, the award scene and the staff roll, clear in menus and movies; and the change of shape falls on black frames. If a frame of the wrong shape shows at a race's start or end, the shape must travel with the frame (a field of `gx::Frame`) instead of being read at presentation.
+3. No frame ends while `RaceMgr`'s constructor runs; else a change of shape in that window follows a stale `KartCtrl` pointer (the checks would stop the program rather than write).
+4. A change of aspect during a race: cameras at once, clippers one tick later; nothing pops at the sides.
+5. Culling follows: nothing appears inside the picture's edge at 32:9, in one, two and four views.
+6. Logic is untouched by the widening: the per-tick position log, and a ghost's replay, identical at 4:3 and 32:9.
+7. Which flat draws the HUD is made of, and that no rule misfires: the nine-tenths rule on wide HUD pieces (a lap banner, the item roulette's frame), the copy rule (the pause screen, `BlurScreen`, `MaskScreen`), one draw holding quads from both sides of the screen (it would be squeezed as one wide part).
+8. How `Race2D` bounds each player's HUD in split screen (scissor, viewport, or neither): with neither, a quarter's HUD is placed against the whole screen.
+9. Kart-following marks, the lens flare and the iris wipe (`TWipeCircle`): placed right once the tags answer `set_follows_world`; the wipe's circle is an ellipse until it's given the same treatment.
+10. The unwidened frame is presented at 4:3 (the console shows the 608×448 frame 1.35:1 inside a border); the widening is relative to that.
+11. `SceneMenu`'s character models and `SecretScene` keep their own aspect (they don't use the getters), as intended for 4:3 menus.
+12. The award scene's letterbox scissor (34…414) on a widened picture.
+
+## The interface
+
+`mkdd/src/enhance.hpp`: for the main thread `aspect_supported`, `set_aspect`, `shown_aspect`, `frame_rate_supported`, `set_frame_rate`; for the game's thread `in_race`, `widening`, `end_frame`, `draw_every_tick`; `replacements` for `rt::provide`. `mkdd/src/hud.hpp`: `set_place`, `set_widening_source`, `set_follows_world`, `place`, `anchor_of`.
+
+Still wanted from other roles:
+
+- **core**: a way to run native code before and after a *lifted* function, for the early frame end at `JFWDisplay::endRender` and a once-a-pass call of `draw_every_tick` (nothing calls it yet).
+- **gpu**: an answer for `hud::set_follows_world` from the tags; a horizontal resolution multiple that follows the widening.
+- **os/devices**: `VIGetDTVStatus` returning 0 (no progressive-scan prompt).
 
 ## Reproducing the analysis
 

@@ -333,6 +333,7 @@ int main(int argc, char** argv) {
     rt::provide(mkdd::card_replacements());
     rt::provide(mkdd::exi_replacements());
     rt::provide(mkdd::ar_replacements());
+    rt::provide(mkdd::enhance::replacements());
     mkdd::init_hardware();
     if (bench_dff) {  // then out at once: the GPU thread is waiting, and exit's destructors would wait for it
         const int code = mkdd::bench_recording(bench_dff, bench_times);
@@ -394,7 +395,7 @@ int main(int argc, char** argv) {
     mkdd::Settings settings = mkdd::load_settings(data);
     // SRAM's language, sound mode and progressive flag; the progressive setting also stands for the component cable.
     mkdd::set_console(settings.language, settings.sound != 0, settings.progressive);
-    // The picture's shape: the game's own 4:3, until its cameras can be widened (enhance.hpp).
+    // The picture's shape in races (enhance.hpp); everything else is shown 4:3.
     float aspect = 4.0f / 3.0f;
     std::unique_ptr<qilin::host::Display> display;
     std::unique_ptr<mkdd::Renderer> renderer;
@@ -540,6 +541,12 @@ int main(int argc, char** argv) {
         }
         if (renderer) renderer->set_anisotropy(settings.anisotropy);  // the menu's, once it's closed (unchanged: nothing to do)
         if (renderer) renderer->set_true_color(settings.true_color);
+        if (display && mkdd::enhance::aspect_supported()) {  // the picture's shape and the HUD's place, as they are now
+            int ww = 0, wh = 0;
+            if (auto* w = static_cast<SDL_Window*>(display->sdl_window())) SDL_GetWindowSizeInPixels(w, &ww, &wh);
+            aspect = mkdd::aspect_ratio(settings, wh > 0 ? float(ww) / float(wh) : 4.0f / 3.0f);
+            mkdd::enhance::set_aspect(aspect, settings.hud);
+        }
         {  // (without a display, --headless: the scripts alone)
             // The four controller ports (input.hpp), each from its player's bindings: the controller
             // at its place (display.hpp: by name, or in the order the controllers joined), and the
@@ -589,7 +596,7 @@ int main(int argc, char** argv) {
                 if (f->captured && display) {  // MKDD_DFF: our picture of the captured frame, beside it
                     for (const auto& c : f->copies)
                         if (const qilin::host::Image* x = c.to_xfb ? renderer->xfb(c.dest) : nullptr) {
-                            display->present_image(x->image, x->view, x->width, x->height, aspect, x->height / renderer_scale);
+                            display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), x->height / renderer_scale);
                             const std::vector<uint8_t> px = display->read_back();
                             std::string name = std::getenv("MKDD_DFF");
                             name = name.substr(0, name.rfind('@')) + ".ppm";
@@ -631,13 +638,13 @@ int main(int argc, char** argv) {
         uint32_t xfb, w, h;
         if (!mkdd::take_xfb(&sequence, 0, xfb, w, h)) continue;
         if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {
-            display->present_image(x->image, x->view, x->width, x->height, aspect, h);
+            display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), h);
             steer_to_vblank();
             if (menu) menu->frame_shown();  // (F9: a capture takes it)
         } else {
             uint64_t s2 = sequence - 1;
             if (mkdd::take_frame(&s2, 0, rgba, w, h)) {
-                display->present(w, h, rgba.data(), aspect, h);
+                display->present(w, h, rgba.data(), mkdd::enhance::shown_aspect(), h);
                 if (menu) menu->frame_shown();
             }
         }
