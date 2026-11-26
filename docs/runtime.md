@@ -118,6 +118,18 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 
 Each device maps its own ranges of `0xCC000000`–`0xCC008FFF`: the GPU's CP (`CC000000`), PE (`CC001000`), PI (`CC003000`) and write-gather pipe (`CC008000`) in `gpu.cpp`; the DSP (`CC005000`) and AI (`CC006C00`) in `dsp.cpp`; the memory interface (`CC004000`) in `hw.cpp`, where only the two counters GX's abort samples (+0x4E, +0x50) read, as 0. An access outside every range, or to another MI register, is fatal and names the address. VI's, SI's, EXI's and the DVD interface's registers have no device: their libraries are replaced above them.
 
+## Sound (`dsp.cpp`, `dsp_core.hpp`, `recomp/src/dsp`; all of it in `audio.md`)
+
+JAudio, the SDK's `ai` and `dsp` libraries and `__OSInitAudioSystem` are lifted; under them:
+
+- **The DSP's registers** (`CC005000`): mailboxes, control (reset, halt, the external interrupt, the AI DMA / ARAM / DSP interrupt flags with their enables), the ARAM DMA registers, the audio DMA. **ARAM** is 16 MB here (`aram_base()`); the AR library's replacement copies into it directly.
+- **The DSP itself** runs JAudio's own microcode, statically recompiled from the DOL at build time by `qilin-dsp` into `generated/dsp_ucode.cpp`: no interpreter, and no DSP ROM (the ROM's task loader is native; nothing else of the ROM is used). It runs inside the register access that gives it work, on the game's thread, until it can only wait for the CPU; `MKDD_DSP_THREAD=1` tries it on a thread of its own.
+- **The audio DMA** is the sound's clock at the AI's rate (32 kHz here): each finished buffer goes to the sink (`set_audio_sink`, to the host's queue) and raises the AI DMA interrupt, which JAudio answers with the next buffer and the next frame for the DSP.
+- **AI registers** (`CC006C00`): control, volume, the sample counter from the time base (enough for `AIInit`'s rate measurement).
+- For development: `MKDD_AUDIO_DUMP=<file.wav>` writes what the DMA plays, `MKDD_AUDIO_TRACE=1` logs what the DSP is asked to do and what comes out (`dsp_trace.cpp`); both work headless.
+
+Checked headless on 2026-11-26 over 230 s with scripted input: one frame per DMA buffer throughout, ADPCM, PCM8 and streamed PCM16 voices, reverb lines on, no clipping to speak of. Nobody has listened to it yet.
+
 ## Poll loops
 
 Code that waits for an interrupt by spinning would never see it, because interrupts arrive at safe points. The lifter finds such loops (`recompiler-core.md`) and their back edges call the runtime's idle hook (`poll_loop`), which delivers what's due or sleeps until the next timed event, a millisecond at most.
