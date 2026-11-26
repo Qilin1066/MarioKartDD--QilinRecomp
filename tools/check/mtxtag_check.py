@@ -15,6 +15,7 @@ test program for the bytes the replacements write for the same inputs
 where the game is built, not in CI.
 """
 import argparse
+import os
 import struct
 import subprocess
 import sys
@@ -119,7 +120,7 @@ def main():
         for k, slot in enumerate(SLOTS):
             want += run(dol, entry, MATRIX_AT + 64 * k, slot)
     got = None
-    for line in subprocess.run([args.test, "--mtxtag"], capture_output=True, text=True).stdout.splitlines():
+    for line in subprocess.run([os.path.abspath(args.test), "--mtxtag"], capture_output=True, text=True).stdout.splitlines():
         if line.startswith("mtxtag: "):
             got = bytes.fromhex(line.split()[1])
     if got is None:
