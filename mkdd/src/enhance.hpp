@@ -1,12 +1,14 @@
 // Enhancements that need the game itself changed (enhance.cpp;
 // docs/enhancements.md has the game's side of each): a picture wider than
-// 4:3, done; frame rates above the game's own, not yet (the renderer's frame
-// interpolation is what will provide them). The settings menu shows an option
-// disabled, with why, while its *_supported() is false.
+// 4:3; frame rates above the game's own, which are the renderer's pictures
+// between frames (interp.hpp) and need only the two tagged matrix loaders in
+// the build. The settings menu shows an option disabled, with why, while its
+// *_supported() is false.
 #pragma once
 
 #include <span>
 
+#include "interp.hpp"
 #include "qilin/rt/system.hpp"
 #include "settings.hpp"
 
@@ -25,10 +27,12 @@ void set_aspect(float aspect, Hud hud);
 float shown_aspect();
 
 // Frames a second above the game's own: `rate`, with the display's refresh
-// in Hz for FrameRate::display (0: unknown). While this is false the game
-// runs at its own rate (FrameRate::original) and set_frame_rate is not called.
-inline bool frame_rate_supported() { return false; }
-inline void set_frame_rate(FrameRate /*rate*/, double /*display_hz*/) {}
+// in Hz for FrameRate::display (0: unknown). The game itself always runs at
+// its own 59.94; display and unlimited show pictures between its frames
+// (interp.hpp, which this forwards to; main.cpp's loop presents them).
+// Supported once mtxtag::replacements() has been given to the runtime.
+inline bool frame_rate_supported() { return interp::supported(); }
+inline void set_frame_rate(FrameRate rate, double display_hz) { interp::set_frame_rate(rate, display_hz); }
 
 // The game's side, on its own thread.
 // A race is on (or the award scene, or the staff roll, which use its cameras).

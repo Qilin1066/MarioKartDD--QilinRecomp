@@ -50,4 +50,14 @@ inline bool even_refresh(double hz) {
     return false;
 }
 
+// When a picture drawn at `now_ns` reaches the screen with vsync: the first
+// vblank after it, from the time of any one vblank and the refresh period (the
+// display's own clock; main.cpp gives the pictures between two frames their
+// phase by it). A period of 0 (not known): now.
+inline uint64_t next_vblank(uint64_t now_ns, uint64_t vblank_ns, uint64_t period_ns) {
+    if (period_ns == 0) return now_ns;
+    if (now_ns < vblank_ns) return vblank_ns - (vblank_ns - now_ns) / period_ns * period_ns;
+    return vblank_ns + ((now_ns - vblank_ns) / period_ns + 1) * period_ns;
+}
+
 }  // namespace qilin::host

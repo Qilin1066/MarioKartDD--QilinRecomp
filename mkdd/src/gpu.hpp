@@ -4,6 +4,8 @@
 #include <functional>
 #include <cstdint>
 
+#include "qilin/rt/system.hpp"
+
 namespace mkdd {
 
 namespace gx {
@@ -22,6 +24,15 @@ Stats gpu_stats();
 // How long the guest has waited for room in the GPU thread's queue, in all.
 uint64_t fifo_wait_ns();
 
+// A position matrix load as J3DFifoLoadPosMtxImm and GXLoadPosMtxImm write it (mtxtag.cpp, the
+// guest's thread): command 0x10, eleven more words than one, the XF address, and the twelve words
+// at guest address `matrix`, to the pipe; and for the recorder, who loads it (gx.hpp's Load::tag)
+// and the view matrix now at guest address `view` (twelve floats).
+// `id`: gx.hpp's Load::id (0: nothing to tell one of the caller's loads from another).
+void load_position_matrix(qilin::rt::Cpu& c, uint32_t matrix, uint32_t xf_address, uint32_t tag, uint32_t view, uint32_t id = 0);
+// The same tag for the tests, which write their own bytes: for the XF load that starts
+// `stream_offset` bytes into everything given to decode_commands so far.
+void tag_matrix_at(uint64_t stream_offset, uint32_t tag, const float view[12], uint32_t id = 0);
 // Commands given straight to the decoder on the calling thread, as the GPU
 // thread gives it the pipe's bursts (the tests and their bench: no registers
 // mapped, no GPU thread; a command may be split between calls).

@@ -95,8 +95,6 @@ void unlock_sram(Cpu& c, bool commit, uint32_t part) {  // -> written (always: t
             if ((flags & 3) > 2) rt::poke8(kSramFlags, flags & 0xFCu);
             sram_checksum();
         }
-        static bool said = false;
-        if (!said) rt::log("the game changed the console's SRAM settings: kept until the program ends"), said = true;
     }
     rt::poke32(kSramLocked, 0);
     set_interrupts_enabled(rt::peek32(kSramEnabled) != 0);
@@ -116,9 +114,15 @@ void set_sram_flag(uint8_t bit, bool on) {
     sram_checksum();
 }
 void OSGetSoundMode(Cpu& c) { c.r[3] = (sram_flags() & 0x04) ? 1 : 0; }  // 0 mono, 1 stereo
-void OSSetSoundMode(Cpu& c) { set_sram_flag(0x04, c.r[3] & 1); }
+void OSSetSoundMode(Cpu& c) {
+    set_sram_flag(0x04, c.r[3] & 1);
+    g_game_set_stereo.store(c.r[3] & 1, std::memory_order_relaxed);
+}
 void OSGetProgressiveMode(Cpu& c) { c.r[3] = sram_flags() >> 7; }
-void OSSetProgressiveMode(Cpu& c) { set_sram_flag(0x80, c.r[3] & 1); }
+void OSSetProgressiveMode(Cpu& c) {
+    set_sram_flag(0x80, c.r[3] & 1);
+    g_game_set_progressive.store(c.r[3] & 1, std::memory_order_relaxed);
+}
 void OSGetWirelessID(Cpu& c) { c.r[3] = rt::peek16(kSram + 0x30 + 2 * (c.r[3] & 3)); }  // (channel)
 void OSSetWirelessID(Cpu& c) { rt::poke16(kSram + 0x30 + 2 * (c.r[3] & 3), static_cast<uint16_t>(c.r[4])); }
 void OSGetGbsMode(Cpu& c) { c.r[3] = rt::peek16(kSram + 0x3C); }
@@ -346,7 +350,12 @@ void DCZeroRange(Cpu& c) {
 }
 
 // ---- the locked cache: 16 KB at 0xE0000000 (the runtime backs it). Its DMA
-// is a copy, done at once, so there's never a queue to wait for.
+// is a copy, done at once, so there's never a queue to wait for. Enabling it
+// sets HID2's LCE bit, which code reads to know it's there: the movie decoder
+// (THPVideoDecode, 800F0848) refuses to decode without it.
+constexpr uint32_t kHid2Lce = 0x10000000u;
+void LCEnable(Cpu&) { g_hid2 |= kHid2Lce; }
+void LCDisable(Cpu&) { g_hid2 &= ~kHid2Lce; }
 uint32_t blocks(uint32_t n) { return n == 0 ? 128 : n; }  // 0 means 128 blocks of 32 bytes
 void LCStoreBlocks(Cpu& c) { std::memmove(rt::guest_ptr(c.r[3] | 0x80000000u), rt::guest_ptr(c.r[4]), 32 * blocks(c.r[5])); }
 void LCStoreData(Cpu& c) {  // (dest, srcLC, bytes) -> DMA transactions issued
@@ -489,8 +498,8 @@ const rt::Provided kReplacements[] = {
     {0x800E7188u, "ICInvalidateRange", nothing},
     {0x800E71BCu, "ICFlashInvalidate", nothing},
     {0x800E71CCu, "ICEnable", nothing},
-    {0x800E72ACu, "LCEnable", nothing},
-    {0x800E72E4u, "LCDisable", nothing},
+    {0x800E72ACu, "LCEnable", LCEnable},
+    {0x800E72E4u, "LCDisable", LCDisable},
     {0x800E730Cu, "LCStoreBlocks", LCStoreBlocks},
     {0x800E7330u, "LCStoreData", LCStoreData},
     {0x800E73DCu, "LCQueueWait", nothing},

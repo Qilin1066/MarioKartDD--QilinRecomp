@@ -628,6 +628,9 @@ enum : uint32_t {
     kPartAll = 63,
 };
 uint32_t g_parts = kPartAll;  // changed since the last state was built
+// The load each matrix slot holds (the frame's loads), and the view last given.
+uint32_t g_slot_load[kMatrixSlots] = {kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad};
+uint16_t g_view = kNoView;
 void build_lights(const uint32_t* xf, State& s);
 void build_xf_regs(const uint32_t* xf, State& s);
 void build_bp(const Registers& r, State& s);
@@ -943,6 +946,30 @@ std::unique_ptr<Frame> next_frame(unsigned timeout_ms) {
 }
 
 void state_changed() { g_dirty = true, g_parts = kPartAll, cp_changed(); }
+void matrix_loaded(uint32_t address, const uint32_t* words, uint32_t tag, const float* view, uint32_t id) {
+    Frame& f = *g_frame;
+    if (view) {
+        // The frame's views, each once: a handful (a camera a player, and whatever 2D is drawn under).
+        uint16_t found = kNoView;
+        if (g_view != kNoView && std::memcmp(f.views[g_view].m, view, 48) == 0) found = g_view;
+        for (size_t i = 0; found == kNoView && i < f.views.size(); ++i)
+            if (std::memcmp(f.views[i].m, view, 48) == 0) found = uint16_t(i);
+        if (found == kNoView && f.views.size() < 64) {
+            found = uint16_t(f.views.size());
+            View& v = f.views.emplace_back();
+            std::memcpy(v.m, view, 48);
+            v.has_projection = false;
+        }
+        g_view = found;
+    }
+    if (address % 12 != 0 || address / 12 >= kMatrixSlots) return;  // a texture matrix, or not a whole slot
+    Load& l = f.loads.emplace_back();
+    l.tag = tag, l.id = id, l.slot = uint16_t(address / 12), l.view = g_view;
+    std::memcpy(l.mv, words, 48);
+    g_slot_load[l.slot] = uint32_t(f.loads.size() - 1);
+    g_dirty = true, g_parts |= kPartPos;  // (the same matrix again is still another load: the state's info changes)
+}
+
 void xf_changed(uint32_t address, uint32_t count) {
     const uint32_t end = address + count;
     const auto overlaps = [&](uint32_t lo, uint32_t hi) { return address < hi && end > lo; };
@@ -1133,6 +1160,22 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
         }
         g_state = uint32_t(f.states.size() - 1);
         g_dirty = false, g_parts = 0;
+        // Its info: the slots' loads and the view; the view's projection, if this is the first perspective one under it.
+        StateInfo& info = f.state_info.emplace_back();
+        std::memcpy(info.load, g_slot_load, sizeof info.load);
+        info.view = g_view;
+        // (The one that reaches farthest, if several are used under it: the scene's own, not a
+        // close-up's; far = p5 / p4.)
+        if (g_view != kNoView && r.xf[0x1026] == 0) {
+            View& v = f.views[g_view];
+            const float p4 = as_float(r.xf[0x1024]), p5 = as_float(r.xf[0x1025]);
+            const float far_z = p4 != 0 ? std::fabs(p5 / p4) : 0.0f;
+            const float had = v.has_projection && v.projection[4] != 0 ? std::fabs(v.projection[5] / v.projection[4]) : -1.0f;
+            if (far_z > had) {
+                std::memcpy(v.projection, r.xf + 0x1020, 24);
+                v.has_projection = true;
+            }
+        }
     }
     Draw d{};
     d.state = g_state;
@@ -1177,6 +1220,8 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     viewport_and_scissor(r, d);
     bind_textures(r, d);
     d.primitive = g_primitive_serial;
+    if (const uint32_t row = r.cp[0x30] & 63; row % 3 == 0 && row / 3 < kMatrixSlots && g_slot_load[row / 3] != kNoLoad)
+        d.tag = f.loads[g_slot_load[row / 3]].tag;
     f.packets.push_back({Packet::kDraw, uint32_t(f.draws.size())});
     g_join = {type <= 4, uint32_t(f.draws.size()), has, small};
     f.draws.push_back(d);
@@ -1315,6 +1360,8 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         g_frame = spare_frame();
         g_dirty = true;
         g_join.valid = false;
+        std::fill(std::begin(g_slot_load), std::end(g_slot_load), kNoLoad);  // loads don't outlive their frame
+        g_view = kNoView;
     }
 }
 

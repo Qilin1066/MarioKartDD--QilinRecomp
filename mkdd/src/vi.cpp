@@ -8,6 +8,9 @@
 // the cable) and SRAM's progressive flag or the player says so.
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
 #include <atomic>
 
 #include "boot.hpp"
@@ -148,6 +151,27 @@ void poll_retrace() {
         post_interrupt([](Cpu& c) {
             park_if_requested();  // the settings menu's pause: here, between frames
             ++g_retraces;
+            static const std::vector<double> threads_at = [] {  // MKDD_THREADS (threads.hpp): one time, or several with commas
+                std::vector<double> times;
+                for (const char* e = std::getenv("MKDD_THREADS"); e && *e;) {
+                    char* end = nullptr;
+                    times.push_back(std::strtod(e, &end));
+                    e = *end == ',' ? end + 1 : "";
+                }
+                return times;
+            }();
+            static size_t threads_said = 0;
+            if (threads_said < threads_at.size() && g_frames >= threads_at[threads_said] * 60) {
+                ++threads_said;
+                rt::log("guest threads at %.0f s of game time:", double(g_frames) / 60.0);
+                log_threads();
+                // MKDD_PEEK=<address>:<words> (hex): that much guest memory with it.
+                unsigned at = 0, words = 0;
+                if (const char* e = std::getenv("MKDD_PEEK"); e && std::sscanf(e, "%x:%x", &at, &words) == 2 && at >= 0x80000000u && at < 0x81800000u)
+                    for (unsigned i = 0; i < words && at + 4 * i < 0x81800000u - 16; i += 4)
+                        rt::log("%08X: %08X %08X %08X %08X", at + 4 * i, rt::peek32(at + 4 * i), rt::peek32(at + 4 * i + 4), rt::peek32(at + 4 * i + 8),
+                                rt::peek32(at + 4 * i + 12));
+            }
             if (g_retraces % 300 == 0) report();
             if (g_pre_cb) guest_callback(c, g_pre_cb, g_retraces, 0);
             if (g_flush_pending) g_shown = g_flushed, g_flush_pending = false;
@@ -205,10 +229,23 @@ void VIGetNextFrameBuffer(Cpu& c) { c.r[3] = g_set.fb; }
 void VIGetCurrentFrameBuffer(Cpu& c) { c.r[3] = g_shown.fb; }
 void VISetBlack(Cpu& c) { g_set.black = c.r[3] != 0; }
 void VIGetRetraceCount(Cpu& c) { c.r[3] = g_retraces; }
-// The field after the one being shown: interlaced, they alternate with the
-// retraces; progressive, every frame is whole and the answer is always 1
-// (VIGetNextField, 800B064C, with the picture at its default position).
-void VIGetNextField(Cpu& c) { c.r[3] = g_shown.progressive ? 1 : (g_retraces & 1) ^ 1; }
+// The field after the one being shown: they alternate with the retraces. With
+// progressive scan too: the hardware's line counter still runs through two
+// "fields" (each then a whole picture; the progressive timing's 1050 half
+// lines are one of them, VIGetNextField 800B064C with the table at 80345AA0),
+// and the movie player counts on it, taking a frame of its 59.94-a-second
+// movie only when the next field is the one it expects, which it flips after
+// each (THPPlayer's PlayControl, 801B4400).
+void VIGetNextField(Cpu& c) { c.r[3] = (g_retraces & 1) ^ 1; }
+// The line the beam is on within its field: the time since the last retrace
+// over the period, in the mode's lines (262 a field interlaced, 525 a picture
+// progressive: half the timing tables' 525 and 1050 half lines, 800B06E8).
+void VIGetCurrentLine(Cpu& c) {
+    const uint64_t period = g_period.load(std::memory_order_relaxed), now = time_base();
+    const uint64_t since = g_next_retrace > now ? period - std::min(period, g_next_retrace - now) : period - 1;
+    const uint64_t half_lines = g_shown.progressive ? 1050 : 525;
+    c.r[3] = static_cast<uint32_t>(since * half_lines / period / 2);
+}
 void VIGetTvFormat(Cpu& c) { c.r[3] = 0; }  // VI_NTSC
 void VIGetDTVStatus(Cpu& c) { c.r[3] = component_cable(); }
 
@@ -225,6 +262,7 @@ const rt::Provided kReplacements[] = {
     {0x800B0524u, "VISetBlack", VISetBlack},
     {0x800B05A0u, "VIGetRetraceCount", VIGetRetraceCount},
     {0x800B064Cu, "VIGetNextField", VIGetNextField},
+    {0x800B06E8u, "VIGetCurrentLine", VIGetCurrentLine},
     {0x800B0780u, "VIGetTvFormat", VIGetTvFormat},
     {0x800B07E8u, "VIGetDTVStatus", VIGetDTVStatus},
 };

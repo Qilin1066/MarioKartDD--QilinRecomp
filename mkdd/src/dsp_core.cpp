@@ -60,7 +60,7 @@ void Core::boot(const Program* p, uint16_t start) {
 void Core::run() {
     waiting = false;
     for (;;) {
-        if (halted || !program) return;
+        if (halted || !program || stop) return;
         if (pc >= 0x8000) {
             if (!rom) die("the microcode jumped into the DSP's ROM at %04X", pc);
             if (!rom(user, *this, pc)) return;
@@ -100,13 +100,12 @@ void Core::wr_slow(uint16_t a, uint16_t v) {
 
 uint16_t Core::hw_read(uint16_t a) {
     switch (a & 0xFF) {
-        case 0xFC: return static_cast<uint16_t>(dsp_mail >> 16);
-        case 0xFD: return static_cast<uint16_t>(dsp_mail);
-        case 0xFE: return static_cast<uint16_t>(cpu_mail >> 16);
+        case 0xFC: return static_cast<uint16_t>(dsp_mail.load() >> 16);
+        case 0xFD: return static_cast<uint16_t>(dsp_mail.load());
+        case 0xFE: return static_cast<uint16_t>(cpu_mail.load() >> 16);
         case 0xFF:
-            cpu_mail &= 0x7FFFFFFFu;
             progress = true;
-            return static_cast<uint16_t>(cpu_mail);
+            return static_cast<uint16_t>(cpu_mail.fetch_and(0x7FFFFFFFu));
         case 0xC9: return ifx[0xC9] & ~uint16_t(4);
         case 0xD3: return accelerator_read();
         case 0xD4: return static_cast<uint16_t>(acc_start >> 16);
@@ -132,8 +131,8 @@ void Core::hw_write(uint16_t a, uint16_t v) {
         case 0xFB:
             if ((v & 1) && irq) irq(user);
             return;
-        case 0xFC: dsp_mail = (dsp_mail & 0xFFFF) | (uint32_t(v & 0x7FFF) << 16); return;
-        case 0xFD: dsp_mail = (dsp_mail & 0x7FFF0000u) | v | 0x80000000u; return;
+        case 0xFC: dsp_mail = (dsp_mail.load() & 0xFFFF) | (uint32_t(v & 0x7FFF) << 16); return;
+        case 0xFD: dsp_mail = (dsp_mail.load() & 0x7FFF0000u) | v | 0x80000000u; return;
         case 0xCB:
             ifx[n] = v;
             dma();
@@ -167,6 +166,7 @@ void Core::dma() {
     if (!memory) die("a DSP DMA with no main memory to reach");
     uint8_t* p = memory(user, address, words * 2);
     dma_bytes += words * 2;
+    if (dma_hook) dma_hook(user, control, at, words, p);
     if (control & 1) {
         for (unsigned i = 0; i < words; ++i) {
             const uint16_t w = dram[at + i];

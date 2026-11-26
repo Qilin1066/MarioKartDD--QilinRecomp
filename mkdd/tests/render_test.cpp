@@ -40,7 +40,8 @@ void wake_idle() {}
 void raise_interrupt(uint32_t) {}
 void add_timer_source(std::function<void()>, std::function<uint64_t()>) {}
 void on_wpar_write(void (*)()) {}
-void map_mmio(const MmioRange&) {}
+std::vector<MmioRange> g_mapped;  // (--mtxtag writes the FIFO's registers through these)
+void map_mmio(const MmioRange& range) { g_mapped.push_back(range); }
 uint32_t frame_count() { return 0; }
 }  // namespace mkdd
 
@@ -50,6 +51,7 @@ int g_failures = 0;
 
 void check(bool ok, const std::string& what) {
     std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
+    std::fflush(stdout);  // (kept if a later scenario stops the program)
     if (!ok) ++g_failures;
 }
 
@@ -193,14 +195,26 @@ struct Target {
     }
     size_t last_draws = 0;  // the draws of the frame shown() drew last
     // The frames recorded are drawn, and the frame buffer read back.
-    std::vector<uint8_t> shown() {
+    // `hold`: the renderer keeps the frame, for pictures between it and the one before.
+    std::vector<uint8_t> shown(bool hold = false) {
         while (auto f = gx::next_frame(0)) {
             last_draws = f->draws.size();
-            renderer.render(*f);
-            gx::recycle_frame(std::move(f));
+            if (hold) {
+                renderer.render_held(std::move(f));
+            } else {
+                renderer.render(*f);
+                gx::recycle_frame(std::move(f));
+            }
         }
+        return read(renderer.xfb(kXfb));
+    }
+    // The picture between the two frames held, at `phase`; empty if the renderer gives none.
+    std::vector<uint8_t> between(float phase) {
+        const host::Image* x = renderer.render_between(phase);
+        return x ? read(x) : std::vector<uint8_t>{};
+    }
+    std::vector<uint8_t> read(const host::Image* x) {
         vkDeviceWaitIdle(gpu.device);
-        const host::Image* x = renderer.xfb(kXfb);
         if (!x) rt::fatal(nullptr, "render_test: no XFB image");
         const VkImage image = x->image;
         const uint32_t w = x->width, h = x->height;
@@ -284,6 +298,61 @@ void sanity(Target& t, Gx& g) {
 
 // The scale changed between two frames (Renderer::request_scale): the next frame is drawn at
 // the new size, over the picture the EFB held; and back.
+// The phase of each picture presented between two frames (interp::phase), as main.cpp's loop
+// asks for it: the newest frame came at 0, pictures are seen at the display's vblanks (the
+// first 3 ms later, as vblank steering leaves it; 5 ms for a display the game's clock can't
+// follow). On a display at a whole multiple n of the game's rate: n even steps, the frame
+// itself last; elsewhere, the share of the tick gone by.
+void presented_phases() {
+    using mkdd::FrameRate;
+    namespace interp = mkdd::interp;
+    const double tick = 1e9 * 1.001 / 60.0;
+    const uint64_t came = 5'000'000'000ull;
+    // The phases of the pictures seen during one tick on a display at `hz`, the first `first_ms` after the frame came.
+    const auto shown = [&](FrameRate rate, double hz, double first_ms) {
+        interp::set_frame_rate(rate, hz);
+        std::vector<double> out;
+        for (double at = first_ms * 1e6; at < tick; at += 1e9 / hz) out.push_back(interp::phase(came, came + uint64_t(at)));
+        return out;
+    };
+    const auto is = [](const std::vector<double>& got, std::initializer_list<double> want) {
+        if (got.size() != want.size()) return false;
+        size_t i = 0;
+        for (double w : want)
+            if (std::fabs(got[i++] - w) > 1e-3) return false;
+        return true;
+    };
+    const double least = 1.0 / 64.0;  // "the frame before": never quite 0
+    check(is(shown(FrameRate::display, 120.0, 3.0), {least, 0.5}), "120 Hz: the frame before and the half-way picture, each tick");
+    check(is(shown(FrameRate::display, 120000.0 / 1001.0, 3.0), {least, 0.5}), "119.88 Hz: the same");
+    check(is(shown(FrameRate::display, 180.0, 2.0), {least, 1.0 / 3, 2.0 / 3}), "180 Hz: thirds");
+    check(is(shown(FrameRate::display, 240.0, 3.0), {0.25, 0.5, 0.75, 1.0}), "240 Hz: quarters (first seen more than half a step after the frame came: a step on, as even)");
+    check(is(shown(FrameRate::display, 240.0, 1.0), {least, 0.25, 0.5, 0.75}) && is(shown(FrameRate::display, 240.0, 2.0), {least, 0.25, 0.5, 0.75}),
+          "240 Hz: the same steps wherever in the first half-step the frame came (jitter doesn't show)");
+    check(is(shown(FrameRate::display, 360.0, 1.0), {least, 1.0 / 6, 2.0 / 6, 3.0 / 6, 4.0 / 6, 5.0 / 6}), "360 Hz: sixths");
+    {
+        // 144 and 165 Hz aren't multiples: each picture is where the tick has got to when it is seen.
+        const auto p144 = shown(FrameRate::display, 144.0, 5.0);
+        check(is(p144, {5.0 / 16.6833, (5.0 + 6.9444) / 16.6833}), "144 Hz: the share of the tick gone by");
+        const auto p165 = shown(FrameRate::display, 165.0, 5.0);
+        check(p165.size() == 2 && std::fabs(p165[1] - p165[0] - 6.0606 / 16.6833) < 1e-3 && p165[1] < 1.0, "165 Hz: evenly spaced in time");
+        const auto free_run = shown(FrameRate::unlimited, 0.0 + 1000.0, 0.5);  // (a picture every millisecond)
+        bool rising = free_run.size() == 17;
+        for (size_t i = 1; i < free_run.size(); ++i) rising = rising && free_run[i] > free_run[i - 1];
+        check(rising && free_run.back() < 1.0, "unlimited: every picture further on than the last");
+    }
+    interp::set_frame_rate(FrameRate::display, 120.0);
+    check(interp::phase(came, came + uint64_t(tick) + 3'000'000) == 1.0 && interp::phase(came, came + 10 * uint64_t(tick)) == 1.0,
+          "a tick after it came, and for as long as nothing newer comes (a load, a stall), the frame itself");
+    check(interp::phase(came, came - 1'000'000) == least, "a picture timed before the frame came is the frame before");
+    interp::set_frame_rate(FrameRate::display, 0.0);
+    check(std::fabs(interp::phase(came, came + uint64_t(tick / 4)) - 0.25) < 1e-3, "a display whose rate isn't known: the share of the tick");
+    interp::set_frame_rate(FrameRate::original, 120.0);
+    check(!interp::between_frames(), "original: no pictures between");
+    interp::set_frame_rate(FrameRate::sixty, 240.0);
+    check(!interp::between_frames() && !interp::unlimited(), "60: none either");
+}
+
 void scale_change(Target& t, Gx& g) {
     quad(g, 0, 0, 640, 528, -0.5f, 200, 40, 90);
     const auto one = t.finish(g, false);  // (not cleared: the next frame draws over it)
@@ -477,6 +546,13 @@ struct Stream {
         for (float w : words) u32(f2u(w));
     }
     void call(uint32_t physical, uint32_t bytes) { u8(0x40), u32(physical), u32(bytes); }
+    // A position matrix load with its tag and view, as mtxtag.cpp's loaders make them.
+    static inline uint64_t sent = 0;  // bytes given to the decoder so far, by every Stream
+    void tagged(uint32_t address, const float mv[12], uint32_t tag, const float view[12]) {
+        mkdd::tag_matrix_at(sent + b.size(), tag, view);
+        u8(0x10), u32((11u << 16) | address);
+        for (int i = 0; i < 12; ++i) u32(f2u(mv[i]));
+    }
     // The viewport and scissor of a w x h rectangle at (x, y), with an orthographic projection over it in pixels.
     void port(float x, float y, float w, float h) {
         xff(0x101A, {w / 2, -h / 2, 16777215.0f, 342.0f + x + w / 2, 342.0f + y + h / 2, 16777215.0f});
@@ -524,6 +600,7 @@ struct Stream {
     }
     void send() {
         mkdd::decode_commands(b.data(), b.size());
+        sent += b.size();
         b.clear();
     }
 };
@@ -583,6 +660,11 @@ struct RaceFrame {
     // One player's view into `rect` (x, y, w, h).
     void view(Stream& st, const float rect[4], uint32_t frame) {
         st.port(rect[0], rect[1], rect[2], rect[3]);
+        // A perspective projection that lands the arrays' pixel coordinates where the orthographic
+        // one did, for points ten units ahead (flat drawing isn't blended between frames).
+        st.xff(0x1020, {20.0f / rect[2], 1.0f, -20.0f / rect[3], -1.0f, -1.0f / 99.0f, -100.0f / 99.0f});
+        st.xf(0x1026, {0});
+        const float camera[12] = {1, 0, 0, rect[0] + 0.25f * float(frame % 4), 0, 1, 0, rect[1], 0, 0, 1, 0};
         st.cp(0xA0, kPos), st.cp(0xB0, 12), st.cp(0xA1, kNrm), st.cp(0xB1, 6), st.cp(0xA2, kCol), st.cp(0xB2, 4);
         st.cp(0xA4, kUv), st.cp(0xB4, 4);
         const float sx = rect[2] / 608.0f, sy = rect[3] / 448.0f;
@@ -592,7 +674,8 @@ struct RaceFrame {
             st.texture(kTex + (material % kTextures) * 4096, 64, 64, 1);
             st.bp(0xE0, (material * 7) & 0xFF), st.bp(0xE1, (material * 13) & 0xFF);
             st.bp(0xF3, (7u << 16) | (7u << 19) | (material & 0xFF));
-            st.xff(0x0000, {sx, 0, 0, float(material % 8 + frame % 4), 0, sy, 0, float(material % 5), 0, 0, 1, 0});
+            const float mv[12] = {sx, 0, 0, float(material % 8 + frame % 4), 0, sy, 0, float(material % 5), 0, 0, 1, -10};
+            st.tagged(0x0000, mv, 0x80300000u + 64 * material, camera);
             st.xff(0x0400, {1, 0, 0, 0, 1, 0, 0, 0, 1});
             st.cp(0x50, lit ? (3u << 9) | (3u << 11) : (3u << 9) | (3u << 13));
             st.cp(0x60, 3u);
@@ -857,16 +940,160 @@ void lod_bias(Target& t, Stream& st) {
                                             std::to_string(got[1]) + " with");
 }
 
-// mkdd_render_test --bench [players] [frames] [vertices a strip]: what such a frame costs to decode and record,
+// ---- pictures between frames (interp.hpp)
+
+// A perspective projection for the scenes below: x and y of a point ten units ahead reach the
+// picture's edge at 5; near 1, far 400 (the cut and jump rules are in shares of the far
+// distance: a camera step over 1.56 here is a cut, a model's over 3.1 a jump).
+void perspective(Stream& st) {
+    st.xff(0x1020, {2.0f, 0.0f, 2.0f, 0.0f, -1.0f / 399.0f, -400.0f / 399.0f});
+    st.xf(0x1026, {0});
+}
+struct Mat {
+    float m[12];
+};
+Mat camera_at(float x) { return {{1, 0, 0, -x, 0, 1, 0, 0, 0, 0, 1, 0}}; }
+// A model turned `degrees` about the axis towards the camera, at (x, y) ten units ahead.
+Mat model_at(float x, float y, float degrees = 0) {
+    const float a = degrees * 3.14159265f / 180.0f, c = std::cos(a), s = std::sin(a);
+    return {{c, -s, 0, x, s, c, 0, y, 0, 0, 1, -10}};
+}
+// A white rectangle (half sizes w, h) drawn with the model matrix under the view, loaded with `tag`.
+void object(Stream& st, const Mat& view, const Mat& model, uint32_t tag, float w = 0.25f, float h = 0.25f) {
+    Mat mv = model;
+    for (int r = 0; r < 3; ++r) mv.m[4 * r + 3] += view.m[4 * r + 3];  // the cameras here only move
+    st.tagged(0, mv.m, tag, view.m);
+    stream_quad(st, -w, h, w, -h, 0, 0xFFFFFFFFu);
+}
+// The middle of what is lit in a window, and its extent.
+struct Blob {
+    double x = 0, y = 0;
+    int n = 0, w = 0, h = 0;
+};
+Blob blob(const std::vector<uint8_t>& px, int x0, int y0, int x1, int y1) {
+    Blob b;
+    int lx = 1 << 20, hx = -1, ly = 1 << 20, hy = -1;
+    for (int y = y0; y < y1; ++y)
+        for (int x = x0; x < x1; ++x)
+            if (at(px, x, y)[0] > 128) b.x += x + 0.5, b.y += y + 0.5, ++b.n, lx = std::min(lx, x), hx = std::max(hx, x), ly = std::min(ly, y), hy = std::max(hy, y);
+    if (b.n) b.x /= b.n, b.y /= b.n, b.w = hx - lx + 1, b.h = hy - ly + 1;
+    return b;
+}
+std::string num(double v) {
+    char s[32];
+    std::snprintf(s, sizeof s, "%.1f", v);
+    return s;
+}
+
+// Two frames, the camera moving 0.4 to the right between them: an object that
+// moves, one that turns 170 degrees, one that jumps, one only in the newer
+// frame and one only in the older. Screen x of world x under a camera at e:
+// 320 + 64 (x - e).
+void between_frames(Target& t, Stream& st) {
+    const auto frame = [&](int n) {
+        stream_begin(st);
+        perspective(st);
+        const Mat cam = camera_at(n ? 0.4f : 0.0f);
+        object(st, cam, model_at(n ? -1.0f : -2.0f, 3.0f), 0x80100000u);              // moves one unit
+        object(st, cam, model_at(2.0f, 3.0f, n ? 170.0f : 0.0f), 0x80100040u, 0.5f, 0.05f);  // a bar, turning
+        object(st, cam, model_at(n ? 3.0f : -3.0f, -1.5f), 0x80100080u);              // jumps six units
+        if (n) object(st, cam, model_at(0.0f, -3.5f), 0x801000C0u);                   // new in the second frame
+        else object(st, cam, model_at(3.0f, -3.5f), 0x80100100u);                     // gone from the second
+        st.end_frame();
+        st.send();
+        return t.shown(true);
+    };
+    const auto a = frame(0), b = frame(1);
+    const auto& pc = t.renderer.pairing();
+    check(pc.paired == 2 && pc.jumped == 1 && pc.alone == 2 && pc.cuts == 0,
+          "matrices pair by tag: " + std::to_string(pc.paired) + " paired, " + std::to_string(pc.jumped) + " jumped, " +
+              std::to_string(pc.alone) + " alone (2, 1, 2)");
+    const auto one = t.between(1.0f), zero = t.between(0.0f), half = t.between(0.5f);
+    check(!one.empty() && one == b, "the picture at phase 1 is the frame's own, pixel for pixel");
+    if (half.empty()) return check(false, "no picture between the two frames");
+    // At 0.5 the camera is at 0.2. The mover is at -1.5: x = 320 + 64 * -1.7 = 211.2 (the frames: 192 and 230.4).
+    const Blob mover = blob(half, 100, 20, 300, 130);
+    check(std::abs(mover.x - 211.2) < 1.0 && mover.n > 800, "half way, a moving object is half way: x " + num(mover.x) + " (211.2)");
+    // The bar is 64 pixels long: at 85 degrees it stands (blending the matrices' entries would leave a speck).
+    const Blob bar = blob(half, 380, 20, 520, 150);
+    check(bar.h > 45 && bar.w < 20 && std::abs(bar.x - (320 + 64 * 1.8)) < 1.5, "half way through a half turn, a bar stands on end: " +
+                                                                                   std::to_string(bar.w) + " x " + std::to_string(bar.h) + " at x " + num(bar.x));
+    // The jumper is where the newer frame has it (3), seen from 0.2: 499.2. Nothing at the place half way.
+    const Blob jumper = blob(half, 420, 300, 600, 400), midway = blob(half, 250, 300, 400, 400);
+    check(std::abs(jumper.x - 499.2) < 1.0 && midway.n == 0, "an object that jumps isn't shown half way: x " + num(jumper.x) + " (499.2), " +
+                                                                 std::to_string(midway.n) + " pixels in between");
+    // The new object stays put in the world (0) under the blended camera: 307.2. The one that left is gone.
+    const Blob fresh = blob(half, 200, 420, 420, 528), gone = blob(half, 440, 420, 640, 528);
+    check(std::abs(fresh.x - 307.2) < 1.0 && gone.n == 0, "an object new in the frame stands still in the world, one gone from it isn't drawn: x " +
+                                                              num(fresh.x) + " (307.2), " + std::to_string(gone.n) + " pixels of the other");
+    // Phase 0 with everything paired is the frame before (the same draws, its matrices).
+    const auto pair = [&](int n) {
+        stream_begin(st);
+        perspective(st);
+        const Mat cam = camera_at(n ? 0.4f : 0.0f);
+        object(st, cam, model_at(n ? -1.0f : -2.0f, 3.0f), 0x80100000u);
+        object(st, cam, model_at(2.0f, -2.0f, n ? 50.0f : 0.0f), 0x80100040u, 0.5f, 0.05f);
+        st.end_frame();
+        st.send();
+        return t.shown(true);
+    };
+    const auto a2 = pair(0);
+    pair(1);
+    check(t.between(0.0f) == a2, "the picture at phase 0 is the frame before, pixel for pixel");
+    (void)a, (void)zero;
+    // A cut: the camera 30 units away in a tick. No picture between; the caller shows the frame.
+    stream_begin(st);
+    perspective(st);
+    object(st, camera_at(30.4f), model_at(30.0f, 0.0f), 0x80100000u);
+    st.end_frame();
+    st.send();
+    t.shown(true);
+    check(t.between(0.5f).empty() && t.renderer.pairing().cuts == 1, "a camera cut gives no picture between");
+}
+
+// Four views of one model (one tag, drawn four times): each view's camera is
+// blended by itself, and the one that cuts shows the newer frame's view.
+void between_four_views(Target& t, Stream& st) {
+    static constexpr float kMove[4] = {0.4f, 0.8f, 3.0f, -0.4f};  // each camera's step; the third's is a cut
+    const auto frame = [&](int n) {
+        stream_begin(st);
+        for (unsigned v = 0; v < 4; ++v) {
+            st.port(float(v % 2) * 304.0f, float(v / 2) * 224.0f, 304, 224);
+            perspective(st);
+            object(st, camera_at(0.001f * float(v) + (n ? kMove[v] : 0.0f)), model_at(0.0f, 0.0f), 0x80200000u);  // (no two cameras alike)
+        }
+        st.end_frame();
+        st.send();
+        return t.shown(true);
+    };
+    frame(0), frame(1), frame(0);                    // (each camera has made a step before the one tested)
+    frame(1);
+    const auto half = t.between(0.5f);
+    bool ok = !half.empty();
+    std::string got;
+    for (unsigned v = 0; ok && v < 4; ++v) {
+        const int x0 = int(v % 2) * 304, y0 = int(v / 2) * 224;
+        const Blob b = blob(half, x0, y0, x0 + 304, y0 + 224);
+        // A view is 304 wide: 30.4 pixels a unit. Half the step, or all of it for the cut.
+        const double want = x0 + 152 - 30.4 * (v == 2 ? kMove[v] : kMove[v] / 2);
+        ok = ok && b.n > 100 && std::abs(b.x - want) < 1.0;
+        got += num(b.x - x0) + " ";
+    }
+    check(ok && t.renderer.pairing().cuts == 1, "four views blend each by its own camera, and the one that cuts doesn't: x " + got +
+                                                    "(145.9 139.8 60.8 158.1)");
+}
+
+// mkdd_render_test --bench [players] [frames] [vertices a strip] [pictures between]: what such a frame costs to decode and record,
 // and to draw (the renderer's own time on the CPU, and the GPU's where it has timestamps).
-int bench(host::Gpu& gpu, unsigned players, unsigned frames, unsigned strip) {
+int bench(host::Gpu& gpu, unsigned players, unsigned frames, unsigned strip, unsigned pictures) {
     Target t(gpu);
     RaceFrame race(strip);
     Stream st;
     st.setup();
     st.bp(0x43, 1), st.bp(0x41, (1u << 3) | (1u << 4));  // RGBA6_Z24, colour and alpha updates
     st.send();
-    std::vector<double> record_ms, render_ms;
+    std::vector<double> record_ms, render_ms, between_ms;
+    size_t paired = 0;
     size_t draws = 0, vertices = 0, states = 0, bytes = 0;
     auto& stats = gx::recorder_stats();
     uint64_t gpu0 = 0, timed0 = 0;
@@ -881,9 +1108,20 @@ int bench(host::Gpu& gpu, unsigned players, unsigned frames, unsigned strip) {
         while (auto f = gx::next_frame(0)) {
             draws = f->draws.size(), vertices = f->vertices.size() + f->small.size(), states = f->states.size();
             const uint64_t r0 = gx::now_ns();
-            t.renderer.render(*f);
-            drawn += double(gx::now_ns() - r0) / 1e6;
-            gx::recycle_frame(std::move(f));
+            if (pictures) {  // held, and that many pictures between it and the frame before
+                t.renderer.render_held(std::move(f));
+                drawn += double(gx::now_ns() - r0) / 1e6;
+                paired = t.renderer.pairing().paired;
+                for (unsigned k = 1; k <= pictures; ++k) {
+                    const uint64_t b0 = gx::now_ns();
+                    const bool made = t.renderer.render_between(float(k) / float(pictures + 1)) != nullptr;
+                    if (n >= 10 && made) between_ms.push_back(double(gx::now_ns() - b0) / 1e6);
+                }
+            } else {
+                t.renderer.render(*f);
+                drawn += double(gx::now_ns() - r0) / 1e6;
+                gx::recycle_frame(std::move(f));
+            }
         }
         if (n >= 10) record_ms.push_back(double(t1 - t0) / 1e6), render_ms.push_back(drawn);
     }
@@ -896,6 +1134,39 @@ int bench(host::Gpu& gpu, unsigned players, unsigned frames, unsigned strip) {
                 static_cast<unsigned long long>(states), median(record_ms), *std::min_element(record_ms.begin(), record_ms.end()), median(render_ms),
                 *std::min_element(render_ms.begin(), render_ms.end()),
                 timed ? double(stats.gpu_ns.load() - gpu0) / 1e6 / double(timed) : 0.0);
+    if (pictures && !between_ms.empty())
+        std::printf("  %u picture%s between frames: %.3f ms each on the CPU (median; fastest %.3f), %.3f ms on the GPU; %llu matrices paired\n",
+                    pictures, pictures == 1 ? "" : "s", median(between_ms), *std::min_element(between_ms.begin(), between_ms.end()),
+                    t.renderer.between_gpu_ms(), static_cast<unsigned long long>(paired));
+    else if (pictures) std::printf("  no pictures between frames were made\n");
+    return 0;
+}
+
+// mkdd_render_test --mtxtag: the bytes mtxtag.cpp's two loaders write to the FIFO for a fixed
+// set of matrices and slots, in hex, for tools/check/mtxtag_check.py to compare with what the
+// game's own code writes for the same.
+int mtxtag_bytes() {
+    constexpr uint32_t kMatrix = 0x80600000u, kFifo = 0x00700000u;
+    mkdd::init_gpu();
+    rt::Cpu c = rt::new_cpu();
+    const auto reg = [&](uint32_t address, uint32_t value) {
+        for (const mkdd::MmioRange& r : mkdd::g_mapped)
+            if (address >= r.begin && address < r.end) return r.write(c, address, value, 4);
+        rt::fatal(nullptr, "render_test: register %08X isn't mapped", address);
+    };
+    reg(0xCC00300Cu, kFifo), reg(0xCC003010u, kFifo + 0xFFE0u), reg(0xCC003014u, kFifo);  // the CPU's FIFO, not linked to the GPU
+    static constexpr uint32_t kSlots[4] = {0, 3, 27, 30};
+    for (uint32_t k = 0; k < 4; ++k)
+        for (uint32_t i = 0; i < 12; ++i) rt::poke32(kMatrix + 64 * k + 4 * i, 0x3F800000u + 0x00010203u * (k * 12 + i + 1));
+    for (const rt::Provided& p : mkdd::mtxtag::replacements())
+        for (uint32_t k = 0; k < 4; ++k) {
+            c.r[3] = kMatrix + 64 * k, c.r[4] = kSlots[k], c.lr = 0x80001234u;
+            p.fn(c);
+        }
+    for (int i = 0; i < 32; ++i) rt::g_pipe_write(c, 0, 1);  // the last burst out
+    std::printf("mtxtag: ");
+    for (uint32_t i = 0; i < 2 * 4 * 53; ++i) std::printf("%02x", *rt::guest_ptr(0x80000000u + kFifo + i));
+    std::printf("\n");
     return 0;
 }
 
@@ -909,13 +1180,14 @@ int main(int argc, char** argv) {
         return std::getenv("QILIN_REQUIRE_GRAPHICS") ? 1 : 77;
     }
     rt::init({kNoFunctions, {}});  // guest memory, for textures
+    if (argc >= 2 && std::strcmp(argv[1], "--mtxtag") == 0) return mtxtag_bytes();
     host::Gpu gpu = host::Gpu::create({}, false);
     std::printf("device: %s (logic ops %s, wide lines %s, large points %s)\n", gpu.name.c_str(), gpu.logic_op ? "yes" : "no",
                 gpu.wide_lines ? "yes" : "no", gpu.large_points ? "yes" : "no");
     gx::set_rendering(true);
     if (argc >= 2 && std::strcmp(argv[1], "--bench") == 0) {
         const int code = bench(gpu, argc >= 3 ? unsigned(std::atoi(argv[2])) : 1, argc >= 4 ? unsigned(std::atoi(argv[3])) : 200,
-                               argc >= 5 ? unsigned(std::atoi(argv[4])) : 5);
+                               argc >= 5 ? unsigned(std::atoi(argv[4])) : 5, argc >= 6 ? unsigned(std::atoi(argv[5])) : 0);
         gpu.destroy();
         return code;
     }
@@ -925,6 +1197,7 @@ int main(int argc, char** argv) {
         g.setup();
         sanity(t, g);
         scale_change(t, g);
+        presented_phases();
         copy_filter(t, g);
         if (gpu.logic_op) logic_ops(t, g, false, "the GPU's");
         lines_and_points(t, g, gpu.wide_lines && gpu.large_points, "the GPU's");
@@ -941,6 +1214,8 @@ int main(int argc, char** argv) {
         indexed_matrices(t, st);
         lod_bias(t, st);
         z_before_alpha_test(t, st);
+        between_frames(t, st);
+        between_four_views(t, st);
         stream_begin(st), st.end_frame(), st.send();
         t.shown();
     }

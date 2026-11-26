@@ -38,6 +38,8 @@
 #include "gx.hpp"
 #include "gpu.hpp"
 #include "enhance.hpp"
+#include "hud.hpp"
+#include "interp.hpp"
 #include "input.hpp"
 #include "input_map.hpp"
 #include "menu.hpp"
@@ -198,8 +200,11 @@ static void start_watchdog() {
     }).detach();
 }
 
+// Pictures presented (the game's frames, and those between them), for the readout.
+static std::atomic<uint64_t> g_pictures_shown{0};
+
 // The F3 readout's details (each second) and the timing log (each 5 s).
-static void report_timing(qilin::host::Display* display, mkdd::Menu* menu, qilin::host::AudioOut* audio) {
+static void report_timing(qilin::host::Display* display, mkdd::Menu* menu, qilin::host::AudioOut* audio, mkdd::Renderer* renderer = nullptr) {
     namespace rt = qilin::rt;
     using clock = std::chrono::steady_clock;
     static auto next = clock::now() + std::chrono::seconds(1);
@@ -220,7 +225,15 @@ static void report_timing(qilin::host::Display* display, mkdd::Menu* menu, qilin
     const double record = per(now.record, last.record, now.frames - last.frames);
     const double draw = per(now.render, last.render, now.rendered - last.rendered);
     const double gpu_ms = per(now.gpu_ns, last.gpu_ns, now.gpu_timed - last.gpu_timed);
+    const unsigned logic_fps = unsigned(now.rendered - last.rendered);  // the game's frames drawn in this second
     last = now;
+    // Pictures between frames: how many were shown, and what the newest frame's matrices paired with.
+    static uint64_t shown_last = 0;
+    const uint64_t shown_now = g_pictures_shown.load(std::memory_order_relaxed);
+    const unsigned shown_fps = unsigned(shown_now - shown_last);
+    shown_last = shown_now;
+    const bool between = renderer && mkdd::interp::between_frames();
+    const mkdd::interp::Blender::Counts pairs = between ? renderer->pairing() : mkdd::interp::Blender::Counts{};
     double present_wait = 0.0;
     if (display) {
         const auto ps = display->take_present_stats();
@@ -242,13 +255,27 @@ static void report_timing(qilin::host::Display* display, mkdd::Menu* menu, qilin
         char a[96], b[96];
         std::snprintf(a, sizeof a, "game %.1f ms  draw %.1f ms  GPU %.1f ms", record, draw, gpu_ms);
         std::snprintf(b, sizeof b, "present wait %.1f ms  sound %.0f ms queued", present_wait, sound_now);
-        menu->set_frame_details({a, b});
+        char c[128];
+        if (between)
+            std::snprintf(c, sizeof c, "logic %u fps  shown %u fps  matrices: %u of %u paired, %u alone, %u jumped; %u cuts", logic_fps,
+                          shown_fps, pairs.paired, pairs.loads, pairs.alone, pairs.jumped, pairs.cuts);
+        else
+            std::snprintf(c, sizeof c, "logic %u fps  shown %u fps", logic_fps, shown_fps);
+        menu->set_frame_details({a, b, c});
     }
+    static unsigned logic_sum = 0, shown_sum = 0;
+    logic_sum += logic_fps, shown_sum += shown_fps;
     if (++seconds % 5) return;
     const auto ft = display ? display->frame_times().summary() : qilin::host::FrameTimes::Summary{};
     if (ft.frames)
         rt::log("  frame times (last %.0f s): %.1f fps (%.2f ms), 1%% low %.1f fps, 0.1%% low %.1f fps, worst %.1f ms; waiting to present %.2f ms a frame",
                 ft.average_ms * double(ft.frames) / 1000.0, ft.fps, ft.average_ms, ft.low1_fps, ft.low01_fps, ft.worst_ms, present_wait);
+    if (between)
+        rt::log("  pictures between frames: logic %.1f fps, shown %.1f fps; the newest frame's matrices: %u of %u paired, %u alone, %u jumped; "
+                "%u views, %u cuts; %.2f ms of GPU a picture",
+                logic_sum / 5.0, shown_sum / 5.0, pairs.paired, pairs.loads, pairs.alone, pairs.jumped, pairs.views, pairs.cuts,
+                renderer->between_gpu_ms());
+    logic_sum = shown_sum = 0;
     if (g_vbl.slack_count) {
         rt::log("  vblank steering: presented %.2f ms before the vblank on average (target %.2f), %llu just missed; game clock %+.3f%%",
                 g_vbl.slack_sum / double(g_vbl.slack_count) / 1e6, g_vbl.target / 1e6, static_cast<unsigned long long>(g_vbl.late),
@@ -334,6 +361,8 @@ int main(int argc, char** argv) {
     rt::provide(mkdd::exi_replacements());
     rt::provide(mkdd::ar_replacements());
     rt::provide(mkdd::enhance::replacements());
+    rt::provide(mkdd::mtxtag::replacements());  // the tagged matrix loaders: pictures between frames (interp.hpp)
+    mkdd::hud::set_follows_world(mkdd::mtxtag::follows_world);
     mkdd::init_hardware();
     if (bench_dff) {  // then out at once: the GPU thread is waiting, and exit's destructors would wait for it
         const int code = mkdd::bench_recording(bench_dff, bench_times);
@@ -426,6 +455,7 @@ int main(int argc, char** argv) {
             mkdd::enhance::set_aspect(aspect, settings.hud);
         }
         if (mkdd::enhance::frame_rate_supported()) mkdd::enhance::set_frame_rate(settings.frame_rate, 0);
+        else rt::log("frame rate: the game's own (pictures between frames aren't in this build)");
         if (const char* e = std::getenv("MKDD_SCALE")) scale = static_cast<unsigned>(std::clamp(std::atoi(e), 1, 8));
         renderer = std::make_unique<mkdd::Renderer>(display->gpu(), scale, settings.anisotropy);
         static mkdd::Renderer* saving = nullptr;  // what was compiled since the last save, kept for next time
@@ -495,6 +525,24 @@ int main(int argc, char** argv) {
     const char* every_text = std::getenv("MKDD_DUMP_EVERY");
     const uint64_t every = every_text ? std::max<uint64_t>(1, std::strtoull(every_text, nullptr, 10)) : 60;
     const uint32_t dump_w = 1280, dump_h = 960;  // the offscreen target's size (above)
+    const uint32_t dump_burst = [] {  // MKDD_DUMP_BURST=n: see the dump, at the end of the loop
+        const char* t = std::getenv("MKDD_DUMP_BURST");
+        return t ? uint32_t(std::clamp(std::atoi(t), 1, 16)) : 1u;
+    }();
+    // Pictures between frames (interp.hpp): when the newest frame came, what VI shows, and the
+    // clock for presents that nothing else paces. MKDD_PRESENT_HZ stands in for a display's
+    // refresh where there is none (--offscreen), for tests.
+    const double present_hz_override = [] {
+        const char* t = std::getenv("MKDD_PRESENT_HZ");
+        return t ? std::clamp(std::atof(t), 1.0, 1000.0) : 0.0;
+    }();
+    const auto clock_ns = [] {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    };
+    uint64_t arrived_ns = 0, next_present_ns = 0;
+    uint32_t vi_xfb = 0, vi_h = 0;
+    bool was_between = false, was_unlimited = false;
+    double shown_phase = 1.0;
     uint8_t trigger_clicks[mkdd::kPlayers] = {};
     bool wait_control_release = false;
     uint64_t sequence = 0, shown = 0;
@@ -502,6 +550,19 @@ int main(int argc, char** argv) {
     if (display) start_watchdog();
     for (;;) {
         g_main_passes.fetch_add(1, std::memory_order_relaxed);
+        {  // What the game itself set in SRAM (os.hpp) goes into the settings file, as the console keeps it.
+            const int stereo = mkdd::g_game_set_stereo.exchange(-1, std::memory_order_relaxed);
+            const int progressive = mkdd::g_game_set_progressive.exchange(-1, std::memory_order_relaxed);
+            const bool sound_changed = stereo >= 0 && settings.sound != unsigned(stereo);
+            const bool progressive_changed = progressive >= 0 && settings.progressive != (progressive != 0);
+            if (sound_changed) settings.sound = unsigned(stereo);
+            if (progressive_changed) settings.progressive = progressive != 0;
+            if (sound_changed || progressive_changed) {
+                rt::log("the game changed the console's settings: sound %s, progressive scan %s (saved)", settings.sound ? "stereo" : "mono",
+                        settings.progressive ? "on" : "off");
+                if (!mkdd::save_settings(data, settings)) rt::log("the settings can't be saved");
+            }
+        }
         if (display) {
             std::array<std::string, qilin::host::kPlayerPlaces> chosen;
             for (unsigned p = 0; p < mkdd::kPlayers; ++p) chosen[p] = settings.players[p].controller;
@@ -589,9 +650,39 @@ int main(int argc, char** argv) {
             return t ? std::atof(t) : -1.0;
         }();
         if (specialize_from >= 0) renderer->set_specialization(mkdd::frame_count() / 60.0 >= specialize_from);
+        // The frame rate (enhance.hpp): the game's own, or pictures between its frames at the
+        // display's rate (or as fast as they draw, without vsync). The display's refresh as last
+        // looked at (below), or the stand-in.
+        const double present_hz = present_hz_override > 0 ? present_hz_override : mkdd::g_display_hz.load(std::memory_order_relaxed);
+        if (mkdd::enhance::frame_rate_supported()) mkdd::enhance::set_frame_rate(settings.frame_rate, present_hz);
+        // (At the display's rate on a display no faster than the game there is nothing to put
+        // between: the frames as they come, with no tick of latency added.)
+        const bool between = mkdd::interp::between_frames() && (mkdd::interp::unlimited() || present_hz > 60.5);
+        if (between != was_between) {
+            rt::log(between ? "frame rate: pictures between the game's frames (%s)" : "frame rate: the game's own%s",
+                    !between ? "" : mkdd::interp::unlimited() ? "unlimited, no vsync" : "the display's refresh rate");
+            was_between = between;
+        }
+        if (mkdd::interp::unlimited() && display->picture().vsync) {  // unlimited presents without waiting for the retrace
+            qilin::host::Picture p = display->picture();
+            p.vsync = false;
+            display->set_picture(p);
+            was_unlimited = true;
+        } else if (!mkdd::interp::unlimited() && was_unlimited) {  // and back to the settings' own
+            display->set_picture(mkdd::picture_of(settings));
+            was_unlimited = false;
+        }
+        bool frame_came = false;
         // Draw what the guest recorded, then show what VI shows.
         for (int i = 0; i < 2; ++i)  // what's queued (two at most), then on to showing
-            if (auto f = mkdd::gx::next_frame(i == 0 ? 4 : 0)) {
+            if (auto f = mkdd::gx::next_frame(between ? 0 : i == 0 ? 4 : 0)) {
+                if (between) {  // drawn as ever, and kept: the pictures until the next one are blended towards it
+                    mkdd::gx::Frame* kept = f.get();
+                    renderer->render_held(std::move(f));
+                    arrived_ns = clock_ns(), frame_came = true;
+                    if (kept->captured) rt::log("MKDD_DFF: no picture of the captured frame while pictures between frames are on (frame_rate)");
+                    continue;
+                }
                 renderer->render(*f);
                 if (f->captured && display) {  // MKDD_DFF: our picture of the captured frame, beside it
                     for (const auto& c : f->copies)
@@ -634,32 +725,108 @@ int main(int argc, char** argv) {
         }
         // Every second: where a frame's time goes, for the F3 readout; every
         // 5 s, the log has it with how evenly frames reached the screen.
-        if (display) report_timing(display.get(), menu.get(), audio.get());
+        if (display) report_timing(display.get(), menu.get(), audio.get(), renderer.get());
         uint32_t xfb, w, h;
-        if (!mkdd::take_xfb(&sequence, 0, xfb, w, h)) continue;
-        if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {
-            display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), h);
-            steer_to_vblank();
+        const bool vi_new = mkdd::take_xfb(&sequence, 0, xfb, w, h);
+        if (vi_new) vi_xfb = xfb, vi_h = h;
+        // Pictures between frames: one a pass, each at the phase of the moment it will be seen,
+        // from the frame before (just above 0) to the newest (1, a tick after it came). Not while
+        // VI shows black or before a frame is held: then, and with the game's own rate, the path
+        // below, which shows each frame as VI shows it and nothing else.
+        const mkdd::gx::Frame* newest = between ? renderer->held() : nullptr;
+        if (newest && vi_xfb) {
+            const bool vsynced = display->sdl_window() && display->picture().vsync;
+            uint64_t now = clock_ns(), seen = now;
+            if (mkdd::interp::unlimited()) {
+                // as fast as they draw
+            } else if (vsynced) {
+                // The present itself waits for the display; the picture is seen at the next vblank.
+                uint64_t vblank = 0, period = 0;
+                if (mkdd::display_vblank(vblank, period)) seen = qilin::host::next_vblank(now, vblank, period);
+            } else {
+                // No vsync, or no window: a clock at the display's rate (59.94 if that isn't known).
+                const uint64_t period = static_cast<uint64_t>(1e9 / (present_hz > 0 ? present_hz : 59.94));
+                if (next_present_ns == 0 || now > next_present_ns + 4 * period) next_present_ns = now;  // the start, or after a stall
+                if (now < next_present_ns) std::this_thread::sleep_for(std::chrono::nanoseconds(next_present_ns - now));
+                seen = next_present_ns;
+                next_present_ns += period;
+            }
+            const double phase = mkdd::interp::phase(arrived_ns, seen);
+            const qilin::host::Image* x = phase < 1.0 ? renderer->render_between(float(phase)) : nullptr;
+            if (!x) {  // the newest frame itself (its phase has come, or it can't be blended): its own picture
+                uint32_t at = vi_xfb;
+                for (const auto& c : newest->copies)
+                    if (c.to_xfb) at = c.dest;
+                x = renderer->xfb(at);
+                if (!x) x = renderer->xfb(vi_xfb);
+                shown_phase = 1.0;
+            } else {
+                shown_phase = phase;
+            }
+            if (!x) continue;  // (no picture of it yet)
+            display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(),
+                                   vi_h ? vi_h : x->height / renderer->scale());
+            g_pictures_shown.fetch_add(1, std::memory_order_relaxed);
+            if (frame_came) steer_to_vblank();
             if (menu) menu->frame_shown();  // (F9: a capture takes it)
         } else {
-            uint64_t s2 = sequence - 1;
-            if (mkdd::take_frame(&s2, 0, rgba, w, h)) {
-                display->present(w, h, rgba.data(), mkdd::enhance::shown_aspect(), h);
-                if (menu) menu->frame_shown();
+            if (!vi_new) {
+                if (between) std::this_thread::sleep_for(std::chrono::milliseconds(1));  // (frames aren't waited for above)
+                continue;
+            }
+            shown_phase = 1.0;
+            if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {
+                display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), h);
+                g_pictures_shown.fetch_add(1, std::memory_order_relaxed);
+                steer_to_vblank();
+                if (menu) menu->frame_shown();  // (F9: a capture takes it)
+            } else {
+                uint64_t s2 = sequence - 1;
+                if (mkdd::take_frame(&s2, 0, rgba, w, h)) {
+                    display->present(w, h, rgba.data(), mkdd::enhance::shown_aspect(), h);
+                    g_pictures_shown.fetch_add(1, std::memory_order_relaxed);
+                    if (menu) menu->frame_shown();
+                }
             }
         }
         if (dump && ++shown % every == 0) {
-            const std::vector<uint8_t> px = display->read_back();
-            char name[512];
-            std::snprintf(name, sizeof name, "%s/frame%05llu.ppm", dump, static_cast<unsigned long long>(shown / every));
-            if (FILE* fp = std::fopen(name, "wb")) {
+            const auto write = [&](const char* name, const std::vector<uint8_t>& px, double phase) {
+                FILE* fp = std::fopen(name, "wb");
+                if (!fp) return;
                 std::fprintf(fp, "P6\n%u %u\n255\n", dump_w, dump_h);
-                for (size_t i = 0; i + 3 < px.size(); i += 4) std::fwrite(&px[i], 1, 3, fp);
+                std::vector<uint8_t> rgb(px.size() / 4 * 3);
+                for (size_t n = 0; n < px.size() / 4; ++n) std::memcpy(&rgb[n * 3], &px[n * 4], 3);
+                std::fwrite(rgb.data(), 1, rgb.size(), fp);
                 std::fclose(fp);
                 dump_index << std::filesystem::path(name).filename().string() << ',' << sequence << '\n';
                 dump_index.flush();
                 if (!dump_index) rt::fatal(nullptr, "capture frame index write failed");
-                rt::log("dumped %s at %.1f s of game time", name, mkdd::frame_count() / 60.0);
+                rt::log("dumped %s at %.1f s of game time (phase %.3f)", name, mkdd::frame_count() / 60.0, phase);
+            };
+            char name[512];
+            std::snprintf(name, sizeof name, "%s/frame%05llu.ppm", dump, static_cast<unsigned long long>(shown / every));
+            write(name, display->read_back(), shown_phase);
+            // MKDD_DUMP_BURST=n, with pictures between frames: the same two frames at phases 1/n to
+            // n/n as well (whatever the clock says), for comparing a picture between with its
+            // neighbours: frame00012_1of4.ppm ... The last is the newest frame itself.
+            if (const mkdd::gx::Frame* held = between && dump_burst > 1 && vi_xfb ? renderer->held() : nullptr) {
+                for (uint32_t k = 1; k <= dump_burst; ++k) {
+                    const double phase = double(k) / double(dump_burst);
+                    const qilin::host::Image* x = k < dump_burst ? renderer->render_between(float(phase)) : nullptr;
+                    const bool blended = x != nullptr;
+                    if (!x) {
+                        uint32_t at = vi_xfb;
+                        for (const auto& c : held->copies)
+                            if (c.to_xfb) at = c.dest;
+                        x = renderer->xfb(at);
+                    }
+                    if (!x) break;
+                    display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(),
+                                           vi_h ? vi_h : x->height / renderer->scale());
+                    std::snprintf(name, sizeof name, "%s/frame%05llu_%uof%u%s.ppm", dump, static_cast<unsigned long long>(shown / every), k,
+                                  dump_burst, blended || k == dump_burst ? "" : "_unblended");
+                    write(name, display->read_back(), phase);
+                }
             }
         }
     }

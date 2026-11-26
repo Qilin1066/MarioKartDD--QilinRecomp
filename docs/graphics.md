@@ -135,6 +135,51 @@ What changed, in order of effect:
 
 About 19 ns a vertex and 45 ns a primitive remain on that CPU (from the same frame as 50-vertex strips: 0.77 ms). Not done, in the order I'd take them on the Pi 4: the vertex is 76 bytes where this game's needs 44 (two texture coordinates at most), written once by the decoder and copied once more to the GPU's buffer (12 MB a 4-view frame, each way); a draw's state snapshot copies 5 KB when a matrix changes (272 a frame now, so 1.4 MB: no longer first).
 
+## Pictures between frames
+
+The game steps and draws 59.94 times a second with no time step to scale (`docs/enhancements.md`, A), so a higher frame rate is the renderer drawing the newer of two recorded frames again with its matrices part of the way back towards the older one's. The guest's only part is two leaf functions replaced natively.
+
+- **Tags** (`mtxtag.cpp`): `J3DFifoLoadPosMtxImm` (`80067A64`) and `GXLoadPosMtxImm` (`800C20D8`) write the originals' bytes (`tools/check/mtxtag_check.py --dol … --test …/mkdd_render_test` runs the DOL's own instructions and compares: 424 bytes from 8 calls, the same) and say who loads (the J3D shape packet at `[803ACFD0]`; or the caller's address with bit 1 set) and the view matrix at `803ACF90`. The note travels beside the stream: `gpu.cpp` keeps a ring of (offset in the bytes sent to the decoder, tag, view), and the decoder, reaching an XF load at that offset, gives it to the recorder with the load. Indexed loads (`0x20`) are tagged by their source address with bit 0 set and take the view last given.
+- **Records** (`gx.hpp`): `Frame::loads` (every load of a position matrix into slots 0-9: tag, slot, view, the matrix), `Frame::views` (each distinct view matrix once, with the first perspective projection drawn under it), `Frame::state_info` (beside each state: the load each slot holds and the view). `Draw::tag` and `gx::draw_tag(const gx::Draw&)` give a draw's tag.
+- **Pairing** (`interp.cpp`, once a frame): the n-th load by one tag into one slot pairs with the n-th in the frame before, if both frames have as many (else those stay unpaired: a particle system whose count changed, say). Views pair by order, if there are as many.
+- **Blending**: a loaded matrix is the view times the model's own. The view is blended as a rotation (slerp) and an eye position; the model's as rotation, scale and translation apart; a matrix with shear, entry by entry. Normal matrices follow by the inverse transpose of the change, lights move with the view, a view's projection is blended where it changed. Unpaired loads keep their place in the world under the blended view.
+- **Not blended** (drawn as the newer frame has them): orthographic drawing (all 2D); untagged matrices; texture matrices; a view that **cuts** (a turn over 60° in a tick, or the eye moving more than a hundredth of the far distance and more than six times its last step); a model that **jumps** (more than a fiftieth of the far distance in a tick: it is drawn at its new place); every view when the number of views changed.
+- **Drawing** (`Renderer::render_held`, `render_between(phase)`): the frame is drawn once as ever, which makes its texture copies and its own picture; that drawing remembers each draw's pipeline and texture set. A picture between replays the packets into a second EFB with the blended states: draws as they were, texture copies not made again (their clears are), the last copy into one of three pictures. It starts from the clear the frame before ended with, so a frame whose predecessor didn't end by clearing colour and depth, or that changes pixel format in mid-frame, has no pictures between (the caller shows the frame). So the blur's feedback, the shadows' and the shimmer's copies are made once a tick from the tick's own state, and a picture between samples the newer frame's; the Z the CPU reads back likewise.
+- **Phases**: 1 is the frame itself, pixel for pixel; 0, with everything paired, the frame before; both tested.
+- **Pacing** (`interp.hpp`): `set_frame_rate(rate, display_hz)`; original and 60 change nothing (frames shown as they come, nothing held); display and unlimited hold the newest frame for one tick while pictures from the one before towards it are shown, their phase from `interp::phase(arrived_ns, present_ns)` (even steps k/n where the refresh is n times the game's rate). `main.cpp`'s loop has to call these; that part isn't in my files (the report has the lines).
+
+Measured (`--bench players 300 5 pictures`, the race-shaped frame with tagged matrices and a perspective projection; same machine and caveats as above):
+
+| | renderer CPU a frame | a picture between: CPU | GPU |
+|---|---|---|---|
+| 1 view (68 draws, 39,400 vertices) | 0.55 ms median (0.41 fastest) | 0.15 ms median (0.10 fastest) | 0.70 ms (the frame itself: 0.69) |
+| 4 views (272 draws, 157,600 vertices) | 1.8 ms median (1.4 fastest) | 0.49 ms median (0.29 fastest) | 1.5 ms (the frame itself: 1.5) |
+
+The path without pictures between is as it was: the commit before and this one on the same scene, run back to back under the same load (the machine was at 100%), gave medians of 2.07-2.13 ms against 2.09-2.14 for decoding and recording one view and 0.55-0.57 against 0.46-0.49 for the renderer on the CPU; four views 8.0-8.4 against 6.5-8.4 and 1.5-1.6 against 1.2-1.5.
+
+### Checked on the attract mode's demos (2026-11-26)
+
+Offscreen, `frame_rate = display` with `MKDD_PRESENT_HZ` 120 and 240, through the opening movie, the title and the demo races with one, two and four views; `MKDD_INTERP_LOG=<file>` writes what follows every 600 frames, and `MKDD_DUMP_BURST` gave the pictures looked at.
+
+- **Pairing.** A race frame loads 250-600 position matrices with one view and 1,100-1,450 with four. Before each particle and simple model was told apart, 55-70% paired: particles (`JPADrawRotBillboard` and its kin, `stParticleDraw`) pair by count alone and lose all partners whenever one is born or dies, and every `ExModel::simpleDraw` object lost its partner on one frame in ten, when any object came into or left the view. `mtxtag.cpp` now takes the particle's, the list link's or the model's address from the register its caller keeps it in (`Load::id`; eight call sites, each checked in the function's code): **97-99% pair**, the rest being particles in their first frame. J3D shape packets always paired (skinned drivers and karts too: their matrices arrive through the tagged loader; no indexed loads were seen failing). Nothing was untagged.
+- **Scale.** The view's far distance is 200,000 in a race (5,000 in menus). A racing camera moves at most 93 units a tick (1/2000 of far) and turns under 10 degrees; the demos' cuts move it 10,000-30,000 or turn it over 45 degrees. Models move mostly under 1/2000 of far, tailing off by 1/250. The rules were 1/100 (cut) and 1/50 (jump) of far and a 60 degree turn, chosen blind; they are now **1/256, 1/128 and 20 degrees**. The far distance is taken from the projection that reaches farthest under a view: the first one drawn was a close-up's in the opening scenes and made every particle a "jump".
+- **Frames without pictures between**: the THP movies (the pixel format changes in mid-frame, every frame), and one frame at each change of scene. Flat scenes (title, menus) now ask for none: there is nothing to move.
+- **Looked at** (phases 2/4 and 4/4 of the same two frames, one, two and four views): karts and their skinned drivers whole, dust and item boxes in step with the road, the split screen's seams and the 2D overlay as in the frame. Not judged, because stills can't show it: texture-matrix animation and the copies sampled from the newer frame stepping at 60 against 120 Hz motion, and wheels.
+- **Cost in the game** (GTX 1080 Ti, the machine shared): a picture between costs the drawing thread 0.6-0.9 ms with one view (340-420 draws), 0.9-1.0 ms with two (420-550) and 1.0-1.4 ms with four (620-920), and the GPU 1.9-2.1, 1.7-1.9 and 2.2-2.4 ms; the frame itself 2.3-4.2 ms of the thread and 1.7-3.3 ms of the GPU. At 240 Hz that is three pictures a tick: about 4 ms of the thread and 7 ms of the GPU in 16.7.
+
+### To check live (pictures between frames)
+
+1. Pairing in a played race (the demos are checked above): items thrown and held, Lakitu, the award scene.
+2. The thresholds on what the demos don't have: Lakitu's rescue, cannons, replays; a false cut shows as one tick without smoothing, a missed one as a smear. A particle's address is reused by the pool: one that dies and one born at the same address in the same tick pair wrongly unless they are far enough apart to count as a jump.
+3. Wheels: slerp takes the short way round, so a wheel turning more than half a revolution a tick appears to turn backwards between frames (as it would on film).
+4. Skinned models (`driver.bmd`: several slots a packet; indexed loads tagged by address): limbs between frames, and whether the matrices at one address really are one bone from frame to frame.
+5. Geometry the CPU places (particle stripes, water, tyre marks: the matrix is the bare view): steps at the tick rate under a smooth camera; look for judder against the course.
+6. Texture matrices (scrolls, env maps) and the effects sampled from the newer frame's copies (shadows a tick ahead of their karts, the shimmer, the blur): visible or not at 120 and 240 Hz.
+7. Split screen: that each player's camera is a distinct view in the same order every frame; two cameras with the same matrix in one frame would count as one view and stop blending.
+8. Frames that can't be blended at all (no clear at the end of the frame before): none expected in this game; the count should stay 0 outside movies.
+9. Latency: one tick more than without, by design; the early frame end at `JFWDisplay::endRender` (`docs/enhancements.md`) would give a tick back in every mode and isn't done.
+10. The tag ring (16,384 loads between the guest and the decoder): a load beyond it goes untagged; count them in a busy 4-player race.
+
 ## Tools
 
 - A GLSL compiler isn't on the build machine and CI installs `glslang-tools`. For the shader change here, glslang 15.1.0 was built from source in scratch (`work\gpu\bin\glslangValidator.exe`), and `tools/build_shaders.py` used as it is. Every shader's SPIR-V bytes changed with the compiler's version; only `copy.frag` changed in source.

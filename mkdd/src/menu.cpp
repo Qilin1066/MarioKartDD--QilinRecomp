@@ -38,7 +38,7 @@ constexpr unsigned kCaptureFrames = 4; // F9: this many pictures in a row
 constexpr const char* kHint = "F1 or Esc (controller: Back + Start): settings";
 // What an option that needs the game patched says beside it (enhance.hpp).
 constexpr const char* kNeedsAspect = "(not yet: needs the game's cameras, culling and HUD patched; the picture is 4:3)";
-constexpr const char* kNeedsFrameRate = "(not yet: the game computes 60 pictures a second and has no time step; more need pictures drawn between them)";
+constexpr const char* kNeedsFrameRate = "(not in this build: the game's two matrix loaders aren't replaced, so no pictures can be drawn between its frames)";
 
 // ImGui's Vulkan backend loads its functions through volk's loader.
 VkInstance g_instance = VK_NULL_HANDLE;
@@ -701,13 +701,19 @@ void Menu::display_page() {
     }
     ImGui::Checkbox("Vsync (off: the lowest latency, may tear)", &s_.vsync);
     {
-        static constexpr const char* kRates[] = {"Original (60)", "60 (every frame drawn, in LAN play too)", "The display's refresh rate", "Unlimited"};
+        static constexpr const char* kRates[] = {"60 (original)", "60", "The display's refresh rate", "Unlimited"};
         const bool can = enhance::frame_rate_supported();
         int rate = int(s_.frame_rate);
         ImGui::BeginDisabled(!can);
         if (ImGui::Combo("Frame rate", &rate, kRates, 4)) s_.frame_rate = FrameRate(rate);
         ImGui::EndDisabled();
-        if (!can) ImGui::TextDisabled("%s", kNeedsFrameRate);
+        // The game computes 59.94 frames a second whatever is chosen; more are pictures drawn between them.
+        ImGui::TextDisabled("%s", !can ? kNeedsFrameRate
+                                  : s_.frame_rate == FrameRate::display
+                                      ? "(pictures drawn between the game's 60 frames, one for each refresh of a faster display; one frame, 17 ms, later)"
+                                  : s_.frame_rate == FrameRate::unlimited
+                                      ? "(pictures between the game's 60 frames as fast as they draw, without vsync; one frame, 17 ms, later)"
+                                      : "(each of the game's frames as it comes; for this game original and 60 are the same)");
     }
     ImGui::BeginDisabled(!display_.gpu().present_wait);
     ImGui::Checkbox("Low latency (with vsync: at most one frame waiting)", &s_.low_latency);

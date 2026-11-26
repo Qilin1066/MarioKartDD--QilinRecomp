@@ -57,6 +57,10 @@ uint64_t time_base();
 // Whether a component cable is plugged in (the port's progressive setting,
 // set_console in boot.hpp): VIGetDTVStatus.
 bool component_cable();
+// SRAM settings the game itself changed (OSSetSoundMode, OSSetProgressiveMode):
+// 0 or 1 once it has, -1 otherwise. The main loop takes them (exchange with
+// -1) and writes them to the settings file, as the console keeps them in SRAM.
+inline std::atomic<int> g_game_set_stereo{-1}, g_game_set_progressive{-1};
 // The console's reset switch, held or not: the host sets it; the game reads
 // it through OSGetResetSwitchState.
 inline std::atomic<bool> g_reset_button{false};

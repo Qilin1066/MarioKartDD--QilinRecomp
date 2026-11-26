@@ -265,7 +265,7 @@ if(QILIN_HOST)
     # The game's renderer end to end, without the game: GX register writes through
     # the recorder and renderer, the frame read back (skipped without Vulkan 1.3).
     add_executable(mkdd_render_test mkdd/tests/render_test.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp
-                   mkdd/src/renderer.cpp mkdd/src/priority.cpp mkdd/src/gpu.cpp)
+                   mkdd/src/renderer.cpp mkdd/src/priority.cpp mkdd/src/gpu.cpp mkdd/src/interp.cpp mkdd/src/mtxtag.cpp)
     target_include_directories(mkdd_render_test PRIVATE mkdd/src)
     target_sources(mkdd_render_test PRIVATE mkdd/src/hud.cpp)  # (the recorder places the HUD)
     target_link_libraries(mkdd_render_test PRIVATE qilin_host qilin_rt qilin_warnings)
@@ -363,13 +363,13 @@ else()
 endif()
 add_test(NAME qilin_difftest COMMAND qilin_difftest)
 
-# The same reference against the game's own code (recomp/tests/difftest/game.cpp): every
-# function of main.dol lifted with no plan, each run from random states. Not part of "all"
+# The same reference against the game's own code (recomp/tests/difftest/game.cpp): main.dol
+# lifted with the library plan, each lifted function run from made-up states. Not part of "all"
 # (32 large files): build the target qilin_game_difftest, then run it on main.dol. Its lifted
 # code is compiled with our warning set, which is what shows the lifter's output is clean.
 if(QILIN_GAME_DOL)
     set(gen_all ${CMAKE_CURRENT_BINARY_DIR}/generated_all)
-    set(gen_all_sources ${gen_all}/table.cpp)
+    set(gen_all_sources ${gen_all}/table.cpp ${gen_all}/replaced.cpp)
     foreach(i RANGE 31)
         if(i LESS 10)
             set(i "0${i}")
@@ -378,16 +378,16 @@ if(QILIN_GAME_DOL)
     endforeach()
     add_custom_command(
         OUTPUT ${gen_all}/functions.hpp ${gen_all_sources}
-        COMMAND qilin lift ${QILIN_GAME_DOL} -o ${gen_all} --files 32
-        DEPENDS qilin ${QILIN_GAME_DOL}
-        COMMENT "Lifting every function of main.dol for the differential test")
+        COMMAND qilin lift ${QILIN_GAME_DOL} -o ${gen_all} --plan ${CMAKE_CURRENT_SOURCE_DIR}/data/GM4E01/plan.tsv --files 32
+        DEPENDS qilin ${QILIN_GAME_DOL} ${CMAKE_CURRENT_SOURCE_DIR}/data/GM4E01/plan.tsv
+        COMMENT "Lifting main.dol for the differential test")
     add_executable(qilin_game_difftest EXCLUDE_FROM_ALL recomp/tests/difftest/game.cpp recomp/tests/difftest/ref.cpp
                    ${gen_all_sources})
     target_include_directories(qilin_game_difftest PRIVATE recomp/tests/difftest ${gen_all})
     target_link_libraries(qilin_game_difftest PRIVATE qilin_core qilin_rt qilin_warnings)
     qilin_tool(qilin_game_difftest)
     if(MSVC)
-        target_compile_options(qilin_game_difftest PRIVATE /bigobj)
+        target_compile_options(qilin_game_difftest PRIVATE /bigobj /MP)
         target_link_options(qilin_game_difftest PRIVATE /STACK:16777216)  # lifted calls nest as the guest's do
     endif()
 endif()
@@ -407,7 +407,8 @@ if(Python3_FOUND)
 endif()
 
 # The game's runtime: everything in mkdd but the code lifted from main.dol.
-set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/pilot.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
+set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/pilot.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/interp.cpp mkdd/src/mtxtag.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
+list(APPEND mkdd_runtime_sources mkdd/src/dsp_trace.cpp)  # (MKDD_AUDIO_DUMP, MKDD_AUDIO_TRACE)
 list(APPEND mkdd_runtime_sources mkdd/src/input.cpp)  # the controller ports (input.hpp)
 list(APPEND mkdd_runtime_sources mkdd/src/enhance.cpp mkdd/src/hud.cpp)  # the widened picture (enhance.hpp)
 
