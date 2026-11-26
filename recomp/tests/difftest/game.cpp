@@ -1,23 +1,27 @@
-// qilin_game_difftest: the game's own functions, lifted with no plan, each run
-// against the reference interpreter (ref.cpp) from the same random states.
+// qilin_game_difftest: the game's own functions, lifted with the library plan,
+// each run against the reference interpreter (ref.cpp) from the same states.
 //
-//   qilin_game_difftest <main.dol> [--plan plan.tsv] [--trials n] [--seed n] [--steps n] [--only address]
-//
-// With the library plan, only the functions it lifts are tested, and a run that
-// reaches replaced or dropped code is skipped, as one that reaches a stub is.
+//   qilin_game_difftest <main.dol> [--trials n] [--seed n] [--steps n] [--only address] [--data symbols-data.txt]
 //
 // Where qilin_difftest checks each instruction alone, this checks what the
 // lifter makes of whole functions: its register model across calls, branches,
 // jump tables, tail calls, falling into the next function, single mode and
 // the write-backs on every way out. The interpreter runs first, on the DOL's
-// image with everything around it (BSS, a heap, the stack) filled with
-// plausible values: pointers into the heap, small numbers, floats, and
-// "vtables" of function addresses. A run counts when it comes back to its
-// caller (or traps) having stayed inside that memory and inside lifted code;
-// then the lifted function runs from the same state, and every register and
-// every byte of memory must agree. Runs that go astray (a wild pointer, a
-// hardware register, a function that isn't lifted, too long) are skipped and
-// counted: random arguments take most functions somewhere, not everywhere.
+// image with everything around it made to look like a running game's memory:
+// a heap of 64-byte objects whose first word is mostly a vtable of the image,
+// the rest pointers to other objects, small numbers, floats and function
+// addresses; BSS and the stack likewise; and the first megabyte of the address
+// space backed too, so that a null or small "pointer" reads something on both
+// sides instead of ending the run. Each function's arguments follow its own
+// first use of them: a register it loads through gets an object, one it
+// compares with a small constant a number near it.
+//
+// A run counts when it comes back to its caller (or traps) having stayed
+// inside that memory and inside the program; then the lifted function runs
+// from the same state, and every register and every byte of memory must
+// agree. Code the plan replaces or drops, and the few functions the lifter
+// refuses, return at once on both sides (the lifted thunk calls a hook that
+// does nothing here). Runs that go astray are skipped and counted.
 #include <algorithm>
 #include <bit>
 #include <charconv>
@@ -33,6 +37,7 @@
 #include <random>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include "cfg.hpp"
@@ -50,10 +55,10 @@ using ppc::Op;
 namespace {
 
 // The test's memory: the image low in it, then soup. Above the heap, a zone
-// of function addresses (what a vtable pointer in the soup points at) and the
-// stack.
+// of function addresses (a stand-in vtable) and the stack. And [0, kLow).
 constexpr uint32_t kLo = 0x80000000u, kHi = 0x80800000u, kSize = kHi - kLo;
-constexpr uint32_t kHeapLo = 0x80480000u, kHeapHi = 0x80700000u;
+constexpr uint32_t kLow = 0x100000u;
+constexpr uint32_t kHeapLo = 0x80480000u, kHeapHi = 0x80700000u, kObject = 0x40u;
 constexpr uint32_t kVtableLo = 0x80700000u, kVtableHi = 0x80740000u;
 constexpr uint32_t kStackTop = 0x807F0000u;
 constexpr uint32_t kReturn = 0xFFFFFFFCu;  // LR on entry: back to the test
@@ -67,13 +72,12 @@ struct Astray {  // the lifted code did what the interpreter's run rules out
 };
 
 // What the interpreter needs to know of the program, by text word.
-enum : uint8_t { kStart = 1, kStub = 2, kTable = 4 };
+enum : uint8_t { kStart = 1, kNoBody = 2, kTable = 4 };  // kNoBody: replaced, dropped or not liftable: returns at once
 struct Program {
     uint32_t text_lo = 0, text_hi = 0;
     std::vector<Insn> code;
     std::vector<uint8_t> flags;
     std::map<uint32_t, std::vector<uint32_t>> tables;  // by the bctr's address: targets, sorted
-    uint32_t image_lo = 0, image_hi = 0;
 
     bool in_text(uint32_t a) const { return a >= text_lo && a < text_hi && a % 4 == 0 && code[(a - text_lo) / 4].valid(); }
     size_t index(uint32_t a) const { return (a - text_lo) / 4; }
@@ -94,9 +98,9 @@ Outcome interpret(ref::State& s, const Program& p, uint32_t entry, unsigned max_
     for (unsigned steps = 0; steps < max_steps; ++steps) {
         if (!p.in_text(pc)) return skip("left the code");
         const size_t i = p.index(pc);
-        if ((p.flags[i] & (kStart | kStub)) == (kStart | kStub)) return skip("reached a function that isn't lifted");
-        const Insn in = p.code[i];
-        executed.push_back(static_cast<uint32_t>(i));
+        const bool no_body = (p.flags[i] & kStart) && (p.flags[i] & kNoBody);
+        const Insn in = no_body ? ppc::decode(0x4E800020u) : p.code[i];  // (a blr)
+        if (!no_body) executed.push_back(static_cast<uint32_t>(i));
         const unsigned bo = in.rd(), bi = in.ra();
         // A call: the lifted code calls the function and carries on at `back`.
         auto call = [&](uint32_t target, uint32_t back) {
@@ -187,8 +191,11 @@ void on_call(rt::Cpu& c, uint32_t target) {
     if (it == e || it->address != target) throw Astray{std::format("called {:08X}, which isn't a function", target)};
     it->fn(c);
 }
-void on_trap(rt::Cpu&, uint32_t pc, const char*) { throw Trapped{pc}; }
-void on_replaced(rt::Cpu&, uint32_t f) { throw Astray{std::format("called replaced function {:08X}", f)}; }
+void on_trap(rt::Cpu&, uint32_t pc, const char* why) {
+    if (std::string_view(why).starts_with("not lifted")) return;  // a function the lifter refuses: returns at once here
+    throw Trapped{pc};
+}
+void on_replaced(rt::Cpu&, uint32_t) {}  // replaced or dropped code: returns at once here
 const rt::CpuHooks kHooks{slow_read, slow_write, on_call, on_trap, on_replaced, [](rt::Cpu&) {}};
 
 uint32_t g_current = 0;
@@ -209,23 +216,63 @@ uint32_t parse_u32(std::string_view s, int radix) {
     return v;
 }
 
+// What a function first does with each GPR, read off its instructions in
+// address order (not by path: a hint for choosing arguments, nothing more).
+enum class Use : uint8_t { Unknown, Pointer, Index, Number };
+struct ArgHints {
+    Use use[32] = {};
+    uint32_t bound[32] = {};  // Number: the constant it's compared with
+};
+ArgHints hints_of(const Function& f, const Cfg& cfg) {
+    ArgHints h;
+    bool seen[32] = {};
+    for (uint32_t a : f.insns) {
+        const Insn in = cfg.insn(a);
+        const ppc::Spec& s = ppc::spec(in.op);
+        if ((s.flags & ppc::kLk) && in.lk()) break;  // a call: the registers are the callee's from here
+        bool d_form = false, has_rb = false, has_ra = false, has_rd = false;
+        for (ppc::Opnd o : s.operands) {
+            d_form |= o == ppc::Opnd::d_rA0 || o == ppc::Opnd::psq_d_rA0;
+            has_rb |= o == ppc::Opnd::rB;
+            has_ra |= o == ppc::Opnd::rA || o == ppc::Opnd::rA0;
+            has_rd |= o == ppc::Opnd::rD;
+        }
+        has_ra |= d_form;
+        const bool memory = (s.flags & (ppc::kLoad | ppc::kStore)) || in.op == Op::dcbz;
+        auto first = [&](unsigned r, Use u, uint32_t bound = 0) {
+            if (!seen[r]) h.use[r] = u, h.bound[r] = bound;
+            seen[r] = true;
+        };
+        if (memory) {
+            if (in.ra() != 0) first(in.ra(), Use::Pointer);
+            if (!d_form && has_rb) first(in.rb(), in.ra() == 0 ? Use::Pointer : Use::Index);
+        } else if ((in.op == Op::cmpi || in.op == Op::cmpli) && in.uimm() < 0x400) {
+            first(in.ra(), Use::Number, in.uimm());
+        }
+        if (has_rd) seen[in.rd()] = true;
+        if (has_ra) seen[in.ra()] = true;
+        if (has_rb) seen[in.rb()] = true;
+    }
+    return h;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::println(stderr, "usage: qilin_game_difftest <main.dol> [--plan plan.tsv] [--trials n] [--seed n] [--steps n] [--only address]");
+        std::println(stderr, "usage: qilin_game_difftest <main.dol> [--trials n] [--seed n] [--steps n] [--only address] [--data symbols-data.txt]");
         return 2;
     }
     unsigned trials = 8, max_steps = 20000;
     uint32_t seed = 20261125u, only = 0;
-    std::string plan_path;
+    std::string data_path;
     for (int i = 2; i + 1 < argc; i += 2) {
         const std::string_view o = argv[i];
         if (o == "--trials") trials = parse_u32(argv[i + 1], 10);
         else if (o == "--seed") seed = parse_u32(argv[i + 1], 10);
         else if (o == "--steps") max_steps = parse_u32(argv[i + 1], 10);
         else if (o == "--only") only = parse_u32(argv[i + 1], 16);
-        else if (o == "--plan") plan_path = argv[i + 1];
+        else if (o == "--data") data_path = argv[i + 1];
         else {
             std::println(stderr, "game difftest: unknown option {}", o);
             return 2;
@@ -248,8 +295,6 @@ int main(int argc, char** argv) {
     }
 
     Program p;
-    p.image_lo = dol->base();
-    p.image_hi = dol->image_end();
     for (const DolSection& s : dol->sections)
         if (s.text) {
             if (!p.text_lo) p.text_lo = s.address;
@@ -258,41 +303,17 @@ int main(int argc, char** argv) {
     p.code.resize((p.text_hi - p.text_lo) / 4);
     p.flags.assign(p.code.size(), 0);
     for (uint32_t a = p.text_lo; a < p.text_hi; a += 4) p.code[p.index(a)] = cfg.insn(a);
-    // The plan's ranges that aren't lifted (start, end, plan, library per line; the narrowest range decides).
-    struct Range {
-        uint32_t start, end;
-        bool lift;
-    };
-    std::vector<Range> plan;
-    if (!plan_path.empty()) {
-        std::ifstream f(plan_path);
-        std::string l;
-        while (std::getline(f, l)) {
-            if (l.empty() || l[0] == '#') continue;
-            const size_t t1 = l.find('	'), t2 = l.find('	', t1 + 1), t3 = l.find('	', t2 + 1);
-            if (t3 == std::string::npos) continue;
-            plan.push_back({parse_u32(l.substr(0, t1), 16), parse_u32(l.substr(t1 + 1, t2 - t1 - 1), 16), l.substr(t2 + 1, t3 - t2 - 1) == "lift"});
-        }
-        if (plan.empty()) {
-            std::println(stderr, "game difftest: cannot read the plan {}", plan_path);
-            return 1;
-        }
-    }
-    auto planned_out = [&](uint32_t a) {
-        const Range* best = nullptr;
-        for (const Range& r : plan)
-            if (a >= r.start && a < r.end && (!best || r.end - r.start < best->end - best->start)) best = &r;
-        return !plan.empty() && (!best || !best->lift);
-    };
+    for (unsigned k = 0; k < gen::kReplacedCount; ++k) p.flags[p.index(gen::kReplaced[k].address)] |= kNoBody;
     std::vector<uint32_t> lifted;  // the functions under test
+    std::map<uint32_t, ArgHints> hints;
     size_t lifted_insns = 0;
     for (const auto& [start, f] : cfg.functions()) {
-        p.flags[p.index(start)] |= kStart;
-        if (planned_out(start) || !lift(lift_input(cfg, f)).ok) {
-            p.flags[p.index(start)] |= kStub;
-            continue;
-        }
+        uint8_t& flags = p.flags[p.index(start)];
+        flags |= kStart;
+        if (!(flags & kNoBody) && !lift(lift_input(cfg, f)).ok) flags |= kNoBody;
+        if (flags & kNoBody) continue;
         lifted.push_back(start);
+        hints[start] = hints_of(f, cfg);
         lifted_insns += f.insns.size();
         for (const JumpTable& t : f.jtabs) {
             p.flags[p.index(t.at)] |= kTable;
@@ -311,44 +332,87 @@ int main(int argc, char** argv) {
         }
     }
 
-    // The memory every run starts from.
+    // The image's vtables, as CodeWarrior lays them out: a type-info pointer (or 0), a zero, then
+    // function addresses; an object's first word points at the first of those two words.
+    std::vector<uint32_t> vtables, globals;
+    for (const DolSection& s : dol->sections) {
+        if (s.text) continue;
+        for (uint32_t a = (s.address + 3) & ~3u; a + 16 <= s.end(); a += 4) {
+            if (dol->u32(a + 4) == 0 && p.function(dol->u32(a + 8)) && p.function(dol->u32(a + 12)) && !p.function(dol->u32(a))) vtables.push_back(a);
+            if ((a & 31) == 0) globals.push_back(a);
+        }
+    }
+    // Named data, if given: better targets for a pointer into the image than every 32nd byte.
+    if (!data_path.empty()) {
+        std::ifstream f(data_path);
+        std::string l;
+        std::vector<uint32_t> named;
+        while (std::getline(f, l))
+            if (l.size() > 8 && l[0] != '#' && l[8] == ' ') {
+                const uint32_t a = parse_u32(l.substr(0, 8), 16);
+                if (dol->mapped(a, 4) && !cfg.in_text(a)) named.push_back(a);
+            }
+        if (named.empty()) {
+            std::println(stderr, "game difftest: no data symbols in {}", data_path);
+            return 1;
+        }
+        globals = std::move(named);
+    }
+    if (vtables.empty()) vtables.push_back(kVtableLo);
+
+    // The memory every run starts from: [0, kLow) and [kLo, kHi).
     std::mt19937 soup_rng(seed);
-    std::vector<uint8_t> pristine(kSize, 0);
+    std::vector<uint8_t> pristine(kSize, 0), pristine_low(kLow, 0);
     auto put = [&](uint32_t a, uint32_t v) {
-        for (unsigned k = 0; k < 4; ++k) pristine[a - kLo + k] = static_cast<uint8_t>(v >> (24 - 8 * k));
+        uint8_t* at = a < kLow ? pristine_low.data() + a : pristine.data() + (a - kLo);
+        for (unsigned k = 0; k < 4; ++k) at[k] = static_cast<uint8_t>(v >> (24 - 8 * k));
     };
+    const uint32_t objects = (kHeapHi - kHeapLo - 0x200) / kObject;
+    auto object = [&](std::mt19937& r) { return kHeapLo + 0x100 + (r() % objects) * kObject; };
     auto heap_pointer = [&](std::mt19937& r) { return kHeapLo + 0x100 + (r() % ((kHeapHi - kHeapLo - 0x200) / 8)) * 8; };
+    auto global = [&](std::mt19937& r) { return globals[r() % globals.size()]; };
     auto soup = [&](std::mt19937& r) -> uint32_t {
         const unsigned k = r() % 100;
-        if (k < 45) return heap_pointer(r);
-        if (k < 50) return kVtableLo + (r() % ((kVtableHi - kVtableLo - 0x400) / 4)) * 4;
-        if (k < 65) return r() % 32;
-        if (k < 75) return 0;
-        if (k < 87) return std::bit_cast<uint32_t>(std::ldexp(static_cast<float>(r()) / 4294967296.0f - 0.5f, static_cast<int>(r() % 12)));
+        if (k < 48) return object(r);
+        if (k < 51) return heap_pointer(r);
+        if (k < 55) return kVtableLo + (r() % ((kVtableHi - kVtableLo - 0x400) / 4)) * 4;
+        if (k < 56) return lifted[r() % lifted.size()];
+        if (k < 60) return global(r);
+        if (k < 80) return r() % 32;
+        if (k < 92) return 0;
+        if (k < 96) return std::bit_cast<uint32_t>(std::ldexp(static_cast<float>(r()) / 4294967296.0f - 0.5f, static_cast<int>(r() % 12)));
         return static_cast<uint32_t>(r());
     };
+    for (uint32_t a = 0; a < kLow; a += 4) put(a, soup(soup_rng));
+    for (uint32_t a = kLo; a < dol->base(); a += 4) put(a, soup(soup_rng));
     for (uint32_t a = dol->image_end() & ~3u; a < kHi; a += 4) put(a, soup(soup_rng));
     for (uint32_t a = (dol->bss_address + 3) & ~3u; a + 4 <= dol->bss_address + dol->bss_size; a += 4) put(a, soup(soup_rng));
     for (uint32_t a = kVtableLo; a < kVtableHi; a += 4) put(a, lifted[soup_rng() % lifted.size()]);
+    for (uint32_t a = kHeapLo + 0x100; a + kObject <= kHeapHi; a += kObject)  // most objects have a vtable, most of those a real one
+        if (const unsigned k = soup_rng() % 10; k < 7) put(a, k < 5 ? vtables[soup_rng() % vtables.size()] : kVtableLo + (soup_rng() % 0x8000) * 4);
     std::copy(dol->image().begin(), dol->image().begin() + (dol->bss_address - dol->base()), pristine.begin() + (dol->base() - kLo));
     for (const DolSection& s : dol->sections)  // (the small-data sections lie inside the BSS range)
         std::copy_n(dol->image().begin() + (s.address - dol->base()), s.size, pristine.begin() + (s.address - kLo));
 
     rt::GuestMemory lifted_memory, ref_memory;
-    if (!lifted_memory.reserve() || !lifted_memory.commit(kLo, kSize) || !ref_memory.reserve() || !ref_memory.commit(kLo, kSize)) {
-        std::println(stderr, "game difftest: cannot reserve guest memory");
-        return 1;
-    }
+    for (rt::GuestMemory* m : {&lifted_memory, &ref_memory})
+        if (!m->reserve() || !m->commit(kLo, kSize) || !m->commit(0, kLow)) {
+            std::println(stderr, "game difftest: cannot reserve guest memory");
+            return 1;
+        }
     uint8_t* const lm = lifted_memory.base() + kLo;
     uint8_t* const rm = ref_memory.base() + kLo;
-    std::memcpy(lm, pristine.data(), kSize);
-    std::memcpy(rm, pristine.data(), kSize);
-    std::vector<uint8_t> dirty(kSize / kPage, 0);
+    for (uint8_t* base : {lifted_memory.base(), ref_memory.base()}) {
+        std::memcpy(base + kLo, pristine.data(), kSize);
+        std::memcpy(base, pristine_low.data(), kLow);
+    }
+    std::vector<uint8_t> dirty((kSize + kLow) / kPage, 0);  // the main range's pages, then the low one's
     std::signal(SIGSEGV, on_crash);
 
     std::vector<uint8_t> covered(p.code.size(), 0);
     std::vector<uint32_t> executed;
     std::map<std::string, size_t> skipped;
+    std::map<uint32_t, size_t> faults;  // wild accesses, by the address's top byte
     size_t compared = 0, tested = 0, failures = 0, runs = 0, traps = 0;
     for (const uint32_t start : lifted) {
         if (only && start != only) continue;
@@ -358,15 +422,21 @@ int main(int argc, char** argv) {
             std::println(stderr, "game difftest: fn_{:08X} is missing from the lifted table", start);
             return 1;
         }
+        const ArgHints& hint = hints.at(start);
         bool any = false;
         for (unsigned trial = 0; trial < trials; ++trial, ++runs) {
             std::mt19937 rng(seed ^ (start * 2654435761u) ^ (trial * 40503u));
             rt::Cpu c;
-            // Arguments: mostly objects in the heap (every trial has a different mix).
+            // Arguments: what the function first does with each register decides (three trials in
+            // four); otherwise mostly objects, in a mix that changes with the trial.
             const unsigned pointers = 40 + 15 * (trial % 5);
             for (unsigned r = 0; r < 32; ++r) {
                 const unsigned k = rng() % 100;
-                c.r[r] = k < pointers ? heap_pointer(rng) : k < pointers + 15 ? rng() % 64 : k < pointers + 20 ? 0 : soup(rng);
+                const Use use = trial % 4 == 3 ? Use::Unknown : hint.use[r];
+                if (use == Use::Pointer) c.r[r] = k < 80 ? object(rng) : k < 90 ? global(rng) : k < 97 ? heap_pointer(rng) : 0;
+                else if (use == Use::Index) c.r[r] = (rng() % 16) * (k < 50 ? 4 : 1);
+                else if (use == Use::Number) c.r[r] = k < 90 ? rng() % (hint.bound[r] + 2) : static_cast<uint32_t>(rng());
+                else c.r[r] = k < pointers ? object(rng) : k < pointers + 15 ? rng() % 64 : k < pointers + 20 ? 0 : soup(rng);
             }
             c.r[1] = kStackTop - 0x800 - (rng() % 256) * 16;
             c.r[2] = sda[0];
@@ -403,14 +473,18 @@ int main(int argc, char** argv) {
             s.mem = ref_memory.base();
             s.lo = kLo;
             s.hi = kHi;
+            s.low = kLow;
             s.dirty = dirty.data();
             executed.clear();
             const Outcome ref_end = interpret(s, p, start, max_steps, executed);
             auto restore = [&](bool lifted_too) {
                 for (size_t page = 0; page < dirty.size(); ++page)
                     if (dirty[page]) {
-                        std::memcpy(rm + page * kPage, pristine.data() + page * kPage, kPage);
-                        if (lifted_too) std::memcpy(lm + page * kPage, pristine.data() + page * kPage, kPage);
+                        const bool low = page >= kSize / kPage;
+                        const size_t at = low ? (page - kSize / kPage) * kPage : page * kPage;
+                        const uint8_t* from = (low ? pristine_low.data() : pristine.data()) + at;
+                        std::memcpy((low ? ref_memory.base() : rm) + at, from, kPage);
+                        if (lifted_too) std::memcpy((low ? lifted_memory.base() : lm) + at, from, kPage);
                         dirty[page] = 0;
                     }
             };
@@ -422,6 +496,7 @@ int main(int argc, char** argv) {
             }
             if (ref_end.end == End::Skipped) {
                 ++skipped[ref_end.why];
+                if (s.fault) ++faults[s.fault_at >> 24];
                 restore(false);
                 continue;
             }
@@ -459,13 +534,18 @@ int main(int argc, char** argv) {
             for (unsigned g = 0; g < 8; ++g)
                 if (c.gqr[g] != s.gqr[g]) diffs.push_back(std::format("gqr{} {:08X} vs {:08X}", g, c.gqr[g], s.gqr[g]));
             if (static_cast<bool>(c.reserve) != s.reserve || (s.reserve && c.reserved != s.reserve_addr)) diffs.push_back("reservation differs");
-            const bool memory_differs = std::memcmp(lm, rm, kSize) != 0;
-            if (memory_differs) {
-                size_t i = 0;
-                while (lm[i] == rm[i]) ++i;
-                diffs.push_back(std::format("memory at {:08X}: {:02X} vs {:02X} (was {:02X})", kLo + i, lm[i], rm[i], pristine[i]));
+            bool memory_differs = false;
+            for (const auto& [l, r, size, base] : {std::tuple{lm, rm, kSize, kLo}, std::tuple{lifted_memory.base(), ref_memory.base(), kLow, 0u}})
+                if (std::memcmp(l, r, size) != 0) {
+                    size_t i = 0;
+                    while (l[i] == r[i]) ++i;
+                    diffs.push_back(std::format("memory at {:08X}: {:02X} vs {:02X}", base + static_cast<uint32_t>(i), l[i], r[i]));
+                    memory_differs = true;
+                }
+            if (memory_differs || !diffs.empty()) {
+                std::memcpy(lm, pristine.data(), kSize);
+                std::memcpy(lifted_memory.base(), pristine_low.data(), kLow);
             }
-            if (memory_differs || !diffs.empty()) std::memcpy(lm, pristine.data(), kSize);
             restore(true);
             ++compared;
             traps += ref_trapped;
@@ -490,5 +570,9 @@ int main(int argc, char** argv) {
     for (const auto& [why, n] : skipped) by.emplace_back(n, why);
     std::ranges::sort(by, std::greater{});
     for (const auto& [n, why] : by) std::println("  {:7} runs skipped: {}", n, why);
+    std::string where;
+    for (const auto& [top, n] : faults)
+        if (n * 50 >= runs) where += std::format(" {:02X}xxxxxx {},", top, n);
+    if (!where.empty()) std::println("  wild accesses by address:{}", where.substr(0, where.size() - 1));
     return failures ? 1 : 0;
 }

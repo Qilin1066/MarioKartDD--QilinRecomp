@@ -24,11 +24,14 @@ struct State {
     uint32_t reserve_addr = 0;
     uint8_t* mem = nullptr;  // guest address a is mem[a]
     bool trapped = false;
-    // Running real code (game.cpp): memory is [lo, hi) only. An access outside
-    // it sets `fault` (the load reads 0, the store is dropped), and each store
-    // marks its 4 KB page in `dirty` (one byte per page from lo).
+    // Running real code (game.cpp): memory is [lo, hi) and [0, low) only. An
+    // access outside them sets `fault` (the load reads 0, the store is
+    // dropped), and each store marks its 4 KB page in `dirty` (one byte per
+    // page from lo, then one per page of the low range).
     uint32_t lo = 0, hi = 0;  // hi == 0: unchecked
+    uint32_t low = 0;
     bool fault = false;
+    uint32_t fault_at = 0;
     uint8_t* dirty = nullptr;
 };
 
