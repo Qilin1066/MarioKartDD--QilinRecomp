@@ -85,6 +85,15 @@ When things go wrong, the game's own messages appear:
   folder again puts the card back.
 - Card B pulled while its ghosts are listed: the game returns to the slot screen with slot B empty, without a
   message.
+- Card A pulled while the first save is written (after CARDCreate, during CARDWrite): "Data could not be
+  created.", then "No Memory Card found in Slot A. Continue without saving game data?" and "Insert a Memory Card
+  ...". Put back, A reads the new file, which holds only erased blocks: "This game data is corrupted and cannot
+  be loaded. If you save new game data, it will overwrite the corrupted data.", then the title menu.
+- Card A pulled during the time trial's record save (CARDWrite of the game's file) or during SAVE GHOST (after
+  CARDCreate of the ghost's file, during its CARDWrite): "An error may have occurred during saving.", the same
+  red window as for a write the host refuses, waiting for a button. On the card the game's file is the one
+  from before, byte for byte, with nothing new in the history; a ghost's file stays created but erased (all
+  0xFF), as a real card would leave it after the create.
 
 Other games' files in the folder count against the free blocks and are
 visible as the SDK shows them: readable by number if they are public, never
@@ -105,6 +114,16 @@ change rewrites (creating or deleting a file two, a write or a status change
 one, formatting five). The game uses the synchronous calls from a thread of
 its own: that thread sleeps for the time. The asynchronous forms return at
 once and call back as an interrupt; the card answers BUSY meanwhile.
+
+A change (create, write, status, rename, delete, format) reaches the host
+file when the card's time is over, and only if the card is still in. A card
+pulled out meanwhile (its folder deleted or moved) ends the call with NOCARD,
+as the SDK's does, and the detach callback follows if one was given (the game
+gives none); its files stay as they were before the call. A real card would
+hold whatever sectors had been written; here a change is whole or not at all.
+`MKDD_CARD_PULL_AT=<n>[:<seconds>]` pulls the card halfway through the nth
+`CARDWrite` of a run (the folder becomes `card-a.pulled`) and, with seconds,
+puts it back that long after.
 
 ## Safe writes
 
@@ -133,4 +152,4 @@ A backup is itself a `.gci` under another name.
 temporary folder: results and free blocks, the status's banner and icon
 offsets, permissions, the time each call takes, the order asynchronous calls
 finish in, a write cut short, a write whose backup fails, delete, restore,
-format, a card pulled out. `mkdd_save_history_test` covers the history alone.
+format, a card pulled out, and pulled out during a write (both forms). `mkdd_save_history_test` covers the history alone.
