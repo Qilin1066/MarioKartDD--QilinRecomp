@@ -107,11 +107,18 @@ From the disc: 387 distinct models (all `J3D2bmd3`, no BDL), 1,039 materials, 2,
 | `ShimmerScreen` colour (RGB565, half) and depth (**Z16**, half, sampled as IA8) | | done: Z16 holds the depth's middle byte as intensity and the high byte as alpha (`depth_copies` test); the base had the high byte as intensity |
 | `ShadowScreen` | A8, half scale, from the EFB's alpha | done (`clear_by_z_texture` test) |
 | `MaskScreen` (20 of 30×32), `GeoVisionSupervisor` (200×120, the course's screens) | RGB565 | done |
-| `ZCaptureNode` | **Z24X8, 2×2, read by the CPU** (`getZValue`: is a player's mark or the sun hidden?) | done, late: a copy of one tile or less in RGBA8's layout is also written to guest memory when the GPU has drawn it, one or two frames after the game asked (`depth_copies` test). The console has it at once. |
+| `ZCaptureNode` | **Z24X8, 2×2, read by the CPU** (`getZValue`: is a player's mark or the sun hidden?) | done, on time: below (`depth_copies`, `z_on_time` tests) |
 | Any other copy | | stays a GPU image found by its address; **guest memory isn't written**. The game reads no other copy on the CPU (searched: only `JUTTexture::load` binds them). |
 | The copy filter | set all frame | colour copies filtered; depth copies **not** (as Dolphin; a blend of depth bytes means nothing) |
 | To the XFB | filter, clamp, gamma 1, clear | done |
 | The XFB written by the CPU | `JUTDirectPrint`, `JUTException` (debug text, the crash screen) | **not done** in the renderer: the picture shown is the GPU's copy. A crash screen would not show. |
+
+**The Z the CPU reads, on time** (2026-11-26). `RaceDrawer::drawSceneFirstStage` copies 2×2 pixels of depth for each of its 11 nodes a view (`ZCaptureNode::capture`, then `GXPixModeSync`), and `Race2D::calcPlayerMark` and `TFlareLine::calc` read the first pixel in the next pass's calculation (`ZCaptureNode::getZValue`, `8029582C`: bytes 1, 32 and 33 of the tile), which `System::run` makes straight after `JFWDisplay::endRender`: the console's GPU has made the copy by then. Here:
+- the renderer, at the last of a run of such copies, ends the command buffer there and submits it signalling the next value of a timeline semaphore, and records the rest of the frame in another (`submit_cpu_copies`);
+- `getZValue` is wrapped (the plan, `mtxtag.cpp`): it catches the GPU thread up with what the game has sent (`sync_decoder`, gpu.cpp: the frame the copies are in has ended at endRender's draw done), then waits until every copy to that node's buffer handed to the renderer is in memory (`await_cpu_copy`, texture.cpp: waiting on the semaphore itself and writing the tile, so the drawing thread needn't come back to it);
+- the recorder counts a frame's copies for the CPU as it queues it, so a read waits only for copies on their way (none when nothing draws: `--headless`).
+
+  Measured on the captured race frames (`mkdd_render_test --zwait-dff`, GTX 1080 Ti): the copies are in memory 0.27 ms after the renderer starts on a four-view frame (44 copies), against 2.3 ms for its recording and 4.2 ms for the GPU's end of the frame; one view (11 copies) 0.28 ms. What the game's read waits is that, plus the drawing thread's start on the frame. Not answered on time: with the early frame end off (`MKDD_EARLY_END=0`, a `MKDD_DFF` capture) the frame ends only at the next pass's copy, after the read, which then gets what memory held, as before. The pictures are unchanged (`--picture-dff` of both captures at 1x and 3x, byte for byte).
 
 ### Not used, so untouched
 Anti-aliased EFB, EFB peeks and pokes, bounding box, tokens, TMEM preloads, C4/C14X2, emboss, NBT, logic ops, orthographic fog, fog range adjustment, field rendering (`GXSetFieldMode`/`GXSetFieldMask` only from `__GXInitGX`). The first three would stop loudly or log; the rest are implemented in the base anyway.
@@ -226,7 +233,7 @@ The aspect path (enhance.cpp, hud.cpp) widens the game's cameras and stretches t
 1. The boot: `GXInit`'s register writes all land in mapped ranges; the first `GXDrawDone`; the logo. If `GXAbortFrame` is ever reached, the log says "the FIFO is reset".
 2. The first frame's picture against Dolphin (`picture_check.py`): the EFB clear by Z texture, 608×448, the interlaced filter. A GameCube `.dff` has not been through Dolphin's player yet.
 3. Indirect textures (a green shell, the menus' title lines), then the screen effects in a race: shadows (EFB alpha, subtract blending), ghosts, blur, shimmer (Z16 through swap table 1), the masks.
-4. The 2×2 depth read-back: player marks and the lens flare should hide behind scenery, a frame or two late at worst. If the lateness shows, the copy has to be answered on the game's thread instead.
+4. The 2×2 depth read-back: player marks and the lens flare should hide behind scenery in the same frame as on the console; the log names any read not answered within 250 ms.
 5. Particles with clipping off, and `stParticleDraw`'s lines (texture offsets).
 6. The real cost of a frame (`MKDD_DFF` a race frame, then `--bench-record`), and how many draws remain after joining: a J3D shape changes matrices between packets, not within one.
 7. Pipelines: `pipeline_seed.inc` is empty; make it from a play-through's `pipelines.keys` (`tools/make_pipeline_seed.py`) so a first run compiles nothing while playing.

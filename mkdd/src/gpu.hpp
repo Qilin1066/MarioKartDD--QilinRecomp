@@ -35,6 +35,10 @@ void load_position_matrix(qilin::rt::Cpu& c, uint32_t matrix, uint32_t xf_addres
 void tag_matrix_at(uint64_t stream_offset, uint32_t tag, const float view[12], uint32_t id = 0, uint8_t context = 0);
 // The context (gx.hpp's kContext...) the matrices loaded from now on carry; returns the one before.
 uint8_t set_matrix_context(uint8_t context);
+// The guest's thread: everything it has sent to the pipe so far is decoded and recorded on
+// return (the GPU thread is waited for; a frame those commands ended is queued). For a read
+// of a copy the CPU makes (texture.hpp's await_cpu_copy). Cheap when nothing was sent since.
+void sync_decoder();
 // Commands given straight to the decoder on the calling thread, as the GPU
 // thread gives it the pipe's bursts (the tests and their bench: no registers
 // mapped, no GPU thread; a command may be split between calls).

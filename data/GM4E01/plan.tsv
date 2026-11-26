@@ -81,5 +81,7 @@
 801D0F50	801D0F68	replace	game: aspect getters (enhancements)
 801D0F68	801E7ABC	lift	game: Osako (system, applications, network)
 801E7ABC	8024A7E0	lift	game: Sato (items, objects, effects)
-8024A7E0	8029866C	lift	game: Shiraiwa (map objects, wipes)
+8024A7E0	8029582C	lift	game: Shiraiwa (map objects, wipes)
+8029582C	8029584C	wrap	game: ZCaptureNode::getZValue (the Z read back on time)
+8029584C	8029866C	lift	game: Shiraiwa (map objects, wipes)
 8029866C	802D8518	lift	game: Yamamoto (kart physics, camera)

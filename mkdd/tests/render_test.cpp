@@ -10,6 +10,7 @@
 // device.
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -37,6 +38,7 @@
 #include "os.hpp"
 #include "recorder.hpp"
 #include "renderer.hpp"
+#include "texture.hpp"
 #include "video.hpp"
 #include "qilin/host/vulkan.hpp"
 #include "qilin/rt/system.hpp"
@@ -868,6 +870,44 @@ void depth_copies(Target& t, Stream& st) {
           std::string("a 2x2 Z24X8 copy reaches guest memory for the CPU (4C CC CC): ") + got);
 }
 
+// The Z the CPU reads, on time (ZCaptureNode::getZValue, texture.hpp's await_cpu_copy): the
+// renderer runs on a thread of its own, as in the game, and starts late; the game's read,
+// made straight after the frame is handed over, waits until the copy is in memory, and finds
+// the frame's own depth there, not what the memory held.
+void z_on_time(Target& t, Stream& st) {
+    constexpr uint32_t kZTile = 0x00990000u;
+    std::memset(guest(kZTile), 0xFF, 64);
+    std::atomic<bool> stop{false};
+    std::thread drawer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        while (!stop.load())
+            if (auto f = gx::next_frame(1)) {
+                t.renderer.render(*f);
+                gx::recycle_frame(std::move(f));
+            }
+    });
+    stream_begin(st);
+    stream_quad(st, 0, 0, 640, 528, -0.3f, 0x000000FFu);           // depth 0x4CCCCC
+    st.bp(0x43, 3);
+    st.bp(0x49, 100u | (200u << 10)), st.bp(0x4A, 1u | (1u << 10)), st.bp(0x4B, kZTile >> 5), st.bp(0x4D, 1);
+    st.bp(0x52, 12u << 3);                                          // Z24X8, 2x2
+    st.bp(0x43, 0);
+    stream_quad(st, 0, 0, 640, 528, -0.6f, 0x000000FFu);           // after the copy: not in it
+    st.end_frame();
+    const uint64_t t0 = gx::now_ns();
+    st.send();
+    const bool answered = gx::await_cpu_copy(kZTile);
+    const double waited = double(gx::now_ns() - t0) / 1e6;
+    const uint8_t* m = guest(kZTile);
+    char got[64];
+    std::snprintf(got, sizeof got, "%02X %02X %02X after %.0f ms", m[1], m[32], m[33], waited);
+    check(answered && m[1] == 0x4C && m[32] == 0xCC && std::abs(int(m[33]) - 0xCC) <= 1,
+          std::string("the game's read of a 2x2 Z copy waits for it and finds the frame's depth (4C CC CC): ") + got);
+    stop.store(true);
+    drawer.join();
+    check(gx::await_cpu_copy(kZTile), "... and a read with nothing on its way doesn't wait");
+}
+
 // Four players: each view's viewport and scissor take a quarter of the 608x448
 // picture, and a quad larger than the view stays inside it.
 void split_screen(Target& t, Stream& st) {
@@ -1415,6 +1455,64 @@ int bench_dff(const char* path, unsigned times) {
 #endif
 }
 
+// mkdd_render_test --zwait-dff <file.dff> [loops]: what answering the copies the CPU reads costs
+// on a captured frame. Each loop's frame is drawn while another thread, as the game's would,
+// waits for every one of them (texture.hpp); the times from the start of drawing to the last
+// copy in memory, to the end of the renderer's recording, and to the GPU's end of the frame.
+int zwait_dff(host::Gpu& gpu, const char* path, unsigned loops) {
+    mkdd::Renderer renderer(gpu, 1);
+    std::vector<double> answer, recorded, finished;
+    size_t copies = 0;
+    mkdd::replay_dff(path, loops, [&](gx::Frame& f) {
+        std::vector<uint32_t> dests;
+        for (const gx::Copy& c : f.copies)
+            if (c.to_memory && !c.to_xfb) dests.push_back(c.dest);
+        copies = dests.size();
+        const uint64_t t0 = gx::now_ns();
+        std::atomic<uint64_t> t_answer{0};
+        std::thread reader([&] {
+            for (uint32_t d : dests) gx::await_cpu_copy(d);
+            t_answer.store(gx::now_ns());
+        });
+        renderer.render(f);
+        const uint64_t t1 = gx::now_ns();
+        vkDeviceWaitIdle(gpu.device);
+        const uint64_t t2 = gx::now_ns();
+        reader.join();
+        answer.push_back(double(t_answer.load() - t0) / 1e6), recorded.push_back(double(t1 - t0) / 1e6), finished.push_back(double(t2 - t0) / 1e6);
+    });
+    renderer.finish_copies();
+    if (answer.size() > 5) answer.erase(answer.begin(), answer.begin() + 5), recorded.erase(recorded.begin(), recorded.begin() + 5),
+        finished.erase(finished.begin(), finished.begin() + 5);  // (the first loops compile pipelines)
+    std::printf("%s: %zu copies for the CPU a frame; from the start of drawing: all in memory %.3f ms (median; fastest %.3f), "
+                "recording done %.3f ms, the GPU done %.3f ms\n",
+                path, copies, median(answer), *std::min_element(answer.begin(), answer.end()), median(recorded), median(finished));
+    return 0;
+}
+
+// mkdd_render_test --picture-dff <file.dff> <out.ppm> [loops] [scale]: the frame's picture as our renderer
+// draws it (the last loop's copy to the frame buffer, at the EFB's scale, as it stands), for
+// comparing two builds byte for byte.
+int picture_dff(host::Gpu& gpu, const char* path, const char* out, unsigned loops, unsigned scale) {
+    Target t(gpu);
+    t.renderer.request_scale(scale);
+    uint32_t xfb = 0;
+    mkdd::replay_dff(path, loops, [&](gx::Frame& f) {
+        t.renderer.render(f);
+        for (const gx::Copy& c : f.copies)
+            if (c.to_xfb) xfb = c.dest;
+    });
+    const host::Image* x = t.renderer.xfb(xfb);
+    if (!x) return std::puts("no picture"), 1;
+    const auto px = t.read(x);
+    FILE* fp = std::fopen(out, "wb");
+    if (!fp) return 1;
+    std::fprintf(fp, "P6\n%u %u\n255\n", x->width, x->height);
+    for (size_t k = 0; k + 3 < px.size(); k += 4) std::fwrite(&px[k], 1, 3, fp);
+    std::fclose(fp);
+    return 0;
+}
+
 // mkdd_render_test --pipe [bench]: stores of every size to the write-gather pipe, at any address
 // in its block, through the stores lifted code makes (cpu.hpp), reach the CPU's FIFO in memory as
 // their bytes in order, bursts crossed or not. With bench, what a word store costs.
@@ -1476,6 +1574,16 @@ int main(int argc, char** argv) {
     std::printf("device: %s (logic ops %s, wide lines %s, large points %s)\n", gpu.name.c_str(), gpu.logic_op ? "yes" : "no",
                 gpu.wide_lines ? "yes" : "no", gpu.large_points ? "yes" : "no");
     gx::set_rendering(true);
+    if (argc >= 3 && std::strcmp(argv[1], "--zwait-dff") == 0) {
+        const int code = zwait_dff(gpu, argv[2], argc >= 4 ? unsigned(std::atoi(argv[3])) : 50);
+        gpu.destroy();
+        return code;
+    }
+    if (argc >= 4 && std::strcmp(argv[1], "--picture-dff") == 0) {
+        const int code = picture_dff(gpu, argv[2], argv[3], argc >= 5 ? unsigned(std::atoi(argv[4])) : 1, argc >= 6 ? unsigned(std::atoi(argv[5])) : 1);
+        gpu.destroy();
+        return code;
+    }
     if (argc >= 2 && std::strcmp(argv[1], "--bench") == 0) {
         const int code = bench(gpu, argc >= 3 ? unsigned(std::atoi(argv[2])) : 1, argc >= 4 ? unsigned(std::atoi(argv[3])) : 200,
                                argc >= 5 ? unsigned(std::atoi(argv[4])) : 5, argc >= 6 ? unsigned(std::atoi(argv[5])) : 0);
@@ -1501,6 +1609,7 @@ int main(int argc, char** argv) {
         joined_primitives(t, st);
         clear_by_z_texture(t, st);
         depth_copies(t, st);
+        z_on_time(t, st);
         split_screen(t, st);
         indexed_matrices(t, st);
         lod_bias(t, st);

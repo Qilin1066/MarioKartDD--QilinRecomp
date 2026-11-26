@@ -18,6 +18,7 @@
 #include "interp.hpp"
 #include "recorder.hpp"
 #include "priority.hpp"
+#include "texture.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -127,13 +128,17 @@ struct Slot {
     VkFence fence = VK_NULL_HANDLE;
     Buffer vertices, indices, states, staging;
     // Copies the CPU reads (gx::Copy::to_memory): four bytes a pixel in
-    // `readback`, written to guest memory once the fence has passed.
+    // `readback`, the work up to them submitted at once (submit_cpu_copies), and written to
+    // guest memory when the GPU has passed them (texture.hpp).
     struct Readback {
         VkDeviceSize at;
         uint32_t dest, width, height;
     };
     Buffer readback;
     std::vector<Readback> readbacks;
+    size_t readbacks_handed = 0;                // those of `readbacks` submitted
+    std::vector<VkCommandBuffer> parts;         // a frame's command buffers after `cmd`, where it was split
+    unsigned parts_used = 0;
     VkDescriptorPool descriptors = VK_NULL_HANDLE;
     std::vector<Spare> garbage;  // images this frame stopped using: spare once its fence has passed
 };
@@ -215,6 +220,10 @@ struct Renderer::Impl {
     Image efb_other;  // made at the first change of pixel format: convert() draws into it, and the two swap
     Slot slots[2];
     unsigned slot = 0;
+    // Copies the CPU reads: the GPU's progress through them (a timeline semaphore, its
+    // value the last ticket passed) and the last ticket handed out.
+    VkSemaphore cpu_timeline = VK_NULL_HANDLE;
+    uint64_t cpu_ticket = 0;
     // Pictures between frames (render_held, render_between): the two frames
     // held, how the newer one's draws were drawn (to draw them again), an EFB
     // of their own, command buffers and state buffers of their own, and three
@@ -376,6 +385,13 @@ struct Renderer::Impl {
 
     void create() {
         start_specialization();
+        {
+            VkSemaphoreTypeCreateInfo ti{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+            ti.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+            VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &ti};
+            check(vkCreateSemaphore(gpu.device, &si, nullptr, &cpu_timeline), "vkCreateSemaphore (timeline)");
+            gx::set_ticket_wait(wait_ticket, this);
+        }
         VkFormatProperties fp;
         vkGetPhysicalDeviceFormatProperties(gpu.physical, VK_FORMAT_D32_SFLOAT, &fp);
         if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) depth_format = VK_FORMAT_X8_D24_UNORM_PACK32;
@@ -502,13 +518,20 @@ struct Renderer::Impl {
         submit(s);
     }
 
-    void submit(Slot& s) {
+    void submit(Slot& s) { submit(s.cmd, s.fence); }
+    // `ticket`: the value cpu_timeline takes when the GPU has done this (and all before it); 0: none.
+    void submit(VkCommandBuffer cmd, VkFence fence, uint64_t ticket = 0) {
         VkCommandBufferSubmitInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-        cbi.commandBuffer = s.cmd;
+        cbi.commandBuffer = cmd;
+        VkSemaphoreSubmitInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        signal.semaphore = cpu_timeline;
+        signal.value = ticket;
+        signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
         si.commandBufferInfoCount = 1;
         si.pCommandBufferInfos = &cbi;
-        check(vkQueueSubmit2(gpu.queue, 1, &si, s.fence), "vkQueueSubmit2");
+        if (ticket) si.signalSemaphoreInfoCount = 1, si.pSignalSemaphoreInfos = &signal;
+        check(vkQueueSubmit2(gpu.queue, 1, &si, fence), "vkQueueSubmit2");
     }
 
     VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, bool vertices, VkPrimitiveTopology topology,
@@ -1344,6 +1367,8 @@ struct Renderer::Impl {
         if (at + 64 > kRoom) {
             static bool said = false;
             approximated(said, "more than 64 EFB copies for the CPU in a frame: the rest aren't written to memory");
+            gx::cpu_copy_submitted(c.dest, 0, nullptr, 0, 0);  // (not waited for)
+            gx::cpu_copies_reached(0);
             return;
         }
         VkBufferImageCopy regions[16];
@@ -1361,28 +1386,62 @@ struct Renderer::Impl {
         host::transition(cmd, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         s.readbacks.push_back({at, c.dest & 0x1FFFFFFFu, c.dest_width, c.dest_height});
     }
-    // The slot's GPU work is done: its copies for the CPU go to guest memory,
-    // as the texture the console would have written (a 4x4 tile: alpha and
-    // red of each pixel, then green and blue). The game's thread may be
-    // running: it sees the bytes a frame or two after the copy, where the
-    // console has them when the GPU reaches the copy.
-    void finish_readbacks(Slot& s) {
-        for (const Slot::Readback& r : s.readbacks) {
-            const uint8_t* px = static_cast<const uint8_t*>(s.readback.mapped) + r.at;
-            uint8_t* tile = rt::guest_ptr(0x80000000u | r.dest);
-            for (uint32_t y = 0; y < r.height; ++y)
-                for (uint32_t x = 0; x < r.width; ++x) {
-                    const uint32_t i = y * 4 + x;
-                    tile[2 * i] = px[4 * i + 3], tile[2 * i + 1] = px[4 * i];
-                    tile[32 + 2 * i] = px[4 * i + 1], tile[32 + 2 * i + 1] = px[4 * i + 2];
-                }
+    // The copies for the CPU recorded since the last of them were handed over go to the GPU
+    // now, in a submission of their own that signals the next ticket (`cpu_timeline`): the
+    // game's thread waits for that to read them (texture.hpp), not for the rest of the frame,
+    // which the next command buffer of the slot records. Inside the EFB's rendering; returns
+    // the command buffer to go on with.
+    VkCommandBuffer submit_cpu_copies(VkCommandBuffer cmd, Slot& s) {
+        vkCmdEndRendering(cmd);
+        VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};  // the read-back buffer, for the host
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        mb.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+        mb.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+        VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        d.memoryBarrierCount = 1;
+        d.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cmd, &d);
+        check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
+        submit(cmd, VK_NULL_HANDLE, ++cpu_ticket);
+        hand_readbacks(s);
+        if (s.parts_used == s.parts.size()) {
+            VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            cai.commandPool = s.pool;
+            cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cai.commandBufferCount = 1;
+            VkCommandBuffer more;
+            check(vkAllocateCommandBuffers(gpu.device, &cai, &more), "vkAllocateCommandBuffers");
+            s.parts.push_back(more);
         }
-        s.readbacks.clear();
+        VkCommandBuffer next = s.parts[s.parts_used++];
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check(vkBeginCommandBuffer(next, &bi), "vkBeginCommandBuffer");  // (the pool resets it)
+        barrier(next);
+        begin_efb(next);
+        return next;
     }
-    // Readbacks of frames the GPU has finished, without waiting for it.
+    // The slot's copies for the CPU not yet handed over: ready at the current ticket.
+    void hand_readbacks(Slot& s) {
+        for (; s.readbacks_handed < s.readbacks.size(); ++s.readbacks_handed) {
+            const Slot::Readback& r = s.readbacks[s.readbacks_handed];
+            gx::cpu_copy_submitted(r.dest, cpu_ticket, static_cast<const uint8_t*>(s.readback.mapped) + r.at, r.width, r.height);
+        }
+    }
+    // Copies for the CPU the GPU has passed, without waiting for it: to guest memory (where the
+    // game's thread hasn't put them already).
     void poll_readbacks() {
-        for (Slot& s : slots)
-            if (!s.readbacks.empty() && vkGetFenceStatus(gpu.device, s.fence) == VK_SUCCESS) finish_readbacks(s);
+        uint64_t value = 0;
+        if (cpu_timeline && vkGetSemaphoreCounterValue(gpu.device, cpu_timeline, &value) == VK_SUCCESS) gx::cpu_copies_reached(value);
+    }
+    static bool wait_ticket(void* context, uint64_t ticket, uint64_t timeout_ns) {
+        const Impl& r = *static_cast<const Impl*>(context);
+        VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+        wi.semaphoreCount = 1;
+        wi.pSemaphores = &r.cpu_timeline;
+        wi.pValues = &ticket;
+        return vkWaitSemaphores(r.gpu.device, &wi, timeout_ns) == VK_SUCCESS;
     }
 
     void clamp_rect(VkRect2D& r) const {
@@ -1507,7 +1566,8 @@ struct Renderer::Impl {
         Slot& s = slots[slot];
         const uint64_t w0 = gx::now_ns();  // the GPU finishing the frame before last
         check(vkWaitForFences(gpu.device, 1, &s.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
-        finish_readbacks(s);
+        poll_readbacks();  // (the slot's are all passed: its buffer is free again)
+        s.readbacks.clear(), s.readbacks_handed = 0, s.parts_used = 0;
         gx::recorder_stats().gpu_wait_ns.fetch_add(gx::now_ns() - w0, std::memory_order_relaxed);
         if (timed[slot]) {  // the frame this slot drew last: done (its fence passed)
             uint64_t t[2];
@@ -1621,12 +1681,22 @@ struct Renderer::Impl {
         };
         std::vector<CopyDump> dumps;
         if (probing) probe(probe_i), copy_dumps = &dumps;
-        for (const gx::Packet& pk : f.packets) {
+        for (size_t pi = 0; pi < f.packets.size(); ++pi) {
+            const gx::Packet& pk = f.packets[pi];
             if (probing && probe_i > 0) probe(probe_i);
             if (probing) ++probe_i;
             if (pk.kind != gx::Packet::kDraw) {
-                if (pk.kind == gx::Packet::kCopy) copy(cmd, s, f.copies[pk.index]);
-                else convert(cmd, s, pk.index);
+                if (pk.kind == gx::Packet::kCopy) {
+                    copy(cmd, s, f.copies[pk.index]);
+                    // The last of a run of copies the CPU reads: the work so far goes to the GPU now.
+                    const auto for_cpu = [&](size_t i) {
+                        return i < f.packets.size() && f.packets[i].kind == gx::Packet::kCopy && f.copies[f.packets[i].index].to_memory &&
+                               !f.copies[f.packets[i].index].to_xfb;
+                    };
+                    if (for_cpu(pi) && !for_cpu(pi + 1) && s.readbacks_handed < s.readbacks.size()) cmd = submit_cpu_copies(cmd, s);
+                } else {
+                    convert(cmd, s, pk.index);
+                }
                 bound = VK_NULL_HANDLE;
                 blend_set = false;
                 same_valid = false;
@@ -1759,7 +1829,8 @@ struct Renderer::Impl {
             timed[slot] = true;
         }
         check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
-        submit(s);
+        submit(cmd, s.fence, s.readbacks_handed < s.readbacks.size() ? ++cpu_ticket : 0);
+        hand_readbacks(s);
         if (probing) {
             vkDeviceWaitIdle(gpu.device);
             report_probe(f, static_cast<const uint8_t*>(probe_buf.mapped), probe_i);
@@ -1979,6 +2050,9 @@ struct Renderer::Impl {
 
     void destroy() {
         vkDeviceWaitIdle(gpu.device);
+        poll_readbacks();
+        gx::set_ticket_wait(nullptr, nullptr);
+        vkDestroySemaphore(gpu.device, cpu_timeline, nullptr);
         for (Slot* each : {&slots[0], &slots[1], &between[0], &between[1]}) {
             Slot& s = *each;
             for (Spare& g : s.garbage) g.image.destroy(gpu);

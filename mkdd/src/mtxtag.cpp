@@ -29,6 +29,7 @@
 
 #include "gpu.hpp"
 #include "interp.hpp"
+#include "texture.hpp"
 #include "qilin/rt/system.hpp"
 
 namespace mkdd::mtxtag {
@@ -86,10 +87,24 @@ void follows_world_wrapper(Cpu& c) {
     rt::wrapped(Address)(c);
     set_matrix_context(before);
 }
+// ZCaptureNode::getZValue (8029582C, a leaf: the first pixel's Z from the node's 2x2 Z24X8
+// copy, its buffer at this+8; doldecomp's names). Race2D::calcPlayerMark and TFlareLine::calc
+// call it in the pass after the one whose drawing made the copy (RaceDrawer::drawSceneFirstStage),
+// when the console's GPU has made it long since. Here the copy is answered as soon as the
+// renderer has drawn up to it: the decoder is caught up with what the game has sent, and the
+// read waits for the copy to reach memory (texture.hpp).
+void z_value_wrapper(Cpu& c) {
+    const uint32_t buffer = rt::peek32(c.r[3] + 8);
+    sync_decoder();
+    gx::await_cpu_copy(buffer & 0x03FFFFFFu);
+    rt::wrapped(0x8029582Cu)(c);
+}
+
 const rt::Provided kWrappers[] = {
     {0x8014573Cu, "Race2D::drawPlayerMark", follows_world_wrapper<0x8014573Cu>},
     {0x80146CF0u, "Race2D::drawAlarm", follows_world_wrapper<0x80146CF0u>},
     {0x80147B1Cu, "Race2D::drawBomb", follows_world_wrapper<0x80147B1Cu>},
+    {0x8029582Cu, "ZCaptureNode::getZValue", z_value_wrapper},
 };
 
 const rt::Provided kReplacements[] = {

@@ -9,8 +9,12 @@
 #include "recorder.hpp"
 
 #include <bit>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <map>
+#include <mutex>
 #include <unordered_map>
 #include <tuple>
 
@@ -348,6 +352,112 @@ int32_t texture_from_copy(uint32_t address, uint32_t w, uint32_t h, Frame& frame
 }
 
 void textures_invalidated() { g_hashed.clear(), forget_memo(); }
+
+// ---- copies the CPU reads (texture.hpp)
+namespace {
+constexpr uint32_t cpu_key(uint32_t dest) { return dest & 0x01FFFFFFu; }
+struct CpuCopy {
+    uint32_t dest;
+    uint64_t ticket;
+    const uint8_t* rgba;
+    uint32_t width, height;
+};
+// Never destroyed: the guest's threads may wait on them as static destructors run.
+std::mutex& g_cpu_lock = *new std::mutex;
+std::condition_variable& g_cpu_cv = *new std::condition_variable;
+std::unordered_map<uint32_t, uint32_t> g_cpu_outstanding;  // by destination: handed to the renderer, not yet in memory
+std::deque<CpuCopy> g_cpu_submitted;                       // in the order submitted
+TicketWait g_ticket_wait = nullptr;
+void* g_ticket_context = nullptr;
+uint64_t g_cpu_waits = 0, g_cpu_wait_ns = 0;
+
+// As the console writes a copy in RGBA8's layout (Z24X8's too: X, Z high | Z middle, low):
+// a 4x4 tile, alpha and red of each pixel, then green and blue. (Under g_cpu_lock.)
+void write_tile(const CpuCopy& c) {
+    uint8_t* tile = rt::guest_ptr(0x80000000u | cpu_key(c.dest));
+    for (uint32_t y = 0; c.rgba && y < c.height; ++y)  // (null: one the renderer couldn't read back)
+        for (uint32_t x = 0; x < c.width; ++x) {
+            const uint32_t i = y * 4 + x;
+            const uint8_t* px = c.rgba + 4 * i;
+            tile[2 * i] = px[3], tile[2 * i + 1] = px[0];
+            tile[32 + 2 * i] = px[1], tile[32 + 2 * i + 1] = px[2];
+        }
+    if (auto it = g_cpu_outstanding.find(cpu_key(c.dest)); it != g_cpu_outstanding.end() && --it->second == 0) g_cpu_outstanding.erase(it);
+}
+void reach(uint64_t ticket) {  // (under g_cpu_lock)
+    const size_t before = g_cpu_submitted.size();
+    std::erase_if(g_cpu_submitted, [&](const CpuCopy& c) {  // (in order: a destination's copies are written oldest first)
+        if (c.ticket > ticket) return false;
+        write_tile(c);
+        return true;
+    });
+    if (g_cpu_submitted.size() != before) g_cpu_cv.notify_all();
+}
+}  // namespace
+
+void cpu_copies_queued(const Frame& frame) {
+    std::lock_guard l(g_cpu_lock);
+    for (const Copy& c : frame.copies)
+        if (c.to_memory && !c.to_xfb) ++g_cpu_outstanding[cpu_key(c.dest)];
+}
+void cpu_copy_submitted(uint32_t dest, uint64_t ticket, const uint8_t* rgba, uint32_t width, uint32_t height) {
+    std::lock_guard l(g_cpu_lock);
+    g_cpu_submitted.push_back({dest, ticket, rgba, width, height});
+    g_cpu_cv.notify_all();
+}
+void cpu_copies_reached(uint64_t ticket) {
+    std::lock_guard l(g_cpu_lock);
+    reach(ticket);
+}
+void set_ticket_wait(TicketWait wait, void* context) {
+    std::lock_guard l(g_cpu_lock);
+    g_ticket_wait = wait, g_ticket_context = context;
+    if (!wait) {  // the renderer is gone: what it never drew won't come
+        g_cpu_submitted.clear();
+        g_cpu_outstanding.clear();
+        g_cpu_cv.notify_all();
+    }
+}
+bool await_cpu_copy(uint32_t dest) {
+    std::unique_lock l(g_cpu_lock);
+    const uint32_t key = cpu_key(dest);
+    if (!g_cpu_outstanding.contains(key)) return true;
+    const uint64_t t0 = now_ns(), deadline = t0 + 250'000'000ull;
+    bool ok = true;
+    while (g_cpu_outstanding.contains(key)) {
+        const uint64_t now = now_ns();
+        if (now >= deadline || !g_ticket_wait) {
+            ok = false;
+            break;
+        }
+        uint64_t ticket = 0;
+        for (const CpuCopy& c : g_cpu_submitted)
+            if (cpu_key(c.dest) == key) {
+                ticket = c.ticket;
+                break;
+            }
+        if (!ticket) {  // the renderer hasn't reached it yet
+            g_cpu_cv.wait_for(l, std::chrono::nanoseconds(deadline - now));
+            continue;
+        }
+        const TicketWait wait = g_ticket_wait;
+        void* context = g_ticket_context;
+        l.unlock();
+        const bool passed = wait(context, ticket, deadline - now);
+        l.lock();
+        if (passed) reach(ticket);
+    }
+    ++g_cpu_waits, g_cpu_wait_ns += now_ns() - t0;
+    if (!ok) {
+        static unsigned said = 0;
+        if (++said <= 5) rt::log("render: a copy the CPU reads (to %08X) wasn't drawn within 250 ms: the game reads what memory held", dest);
+    }
+    return ok;
+}
+void cpu_copy_waits(uint64_t& waits, uint64_t& ns) {
+    std::lock_guard l(g_cpu_lock);
+    waits = g_cpu_waits, ns = g_cpu_wait_ns;
+}
 
 void textures_end_frame(Frame& frame) {
     ++g_frame;

@@ -964,6 +964,16 @@ void init_gpu() {
 }
 uint64_t fifo_wait_ns() { return g_fifo_wait_ns.load(std::memory_order_relaxed); }
 
+void sync_decoder() {
+    static uint64_t synced = ~0ull;  // the bytes forwarded when it last returned (the guest's thread only)
+    const uint64_t forwarded = g_forwarded.load(std::memory_order_relaxed);
+    if (!g_gpu_threaded || (forwarded == synced && g_outgoing_size == 0)) return;
+    hand_over();
+    std::unique_lock l(g_gpu_lock);
+    g_gpu_cv.wait(l, [] { return g_incoming.empty() && !g_gpu_busy; });
+    synced = forwarded;
+}
+
 void load_position_matrix(Cpu& c, uint32_t matrix, uint32_t xf_address, uint32_t tag, uint32_t view, uint32_t id) {
     // Where the command will start in the decoder's stream: the bursts sent on so far and the
     // bytes gathered since. (Unlinked, nothing reaches the decoder and there is nothing to tag.)

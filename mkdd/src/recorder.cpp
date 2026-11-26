@@ -1079,6 +1079,7 @@ void submit(std::unique_ptr<Frame> frame) {
     g_queue_cv.wait(l, [] { return g_queue.size() < 2 || !g_rendering; });
     g_stats.wait_ns.fetch_add(now_ns() - t0, std::memory_order_relaxed);
     g_queue.push_back(std::move(frame));
+    cpu_copies_queued(*g_queue.back());  // (the game's read of them waits from now on: texture.hpp)
     g_queue_cv.notify_all();
 }
 
