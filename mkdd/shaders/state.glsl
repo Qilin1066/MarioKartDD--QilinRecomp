@@ -31,6 +31,7 @@ layout(push_constant) uniform Push {
                  // 0x100: true colour (eight bits a channel in an EFB with alpha, no dither)
     float scale; // EFB pixels to target pixels
     float point_size;  // points: in target pixels
+    float scale_x;     // the same across: more than `scale` where the picture is shown wider than drawn for
 } pc;
 
 #define S st[pc.state]

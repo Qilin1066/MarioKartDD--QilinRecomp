@@ -56,6 +56,7 @@ struct Push {
     uint32_t state, has, flags;
     float scale;
     float point_size;
+    float scale_x;
 };
 
 // GX's logic ops as blending, for GPUs without logic ops (Dolphin's
@@ -195,6 +196,12 @@ VkShaderModule module(VkDevice dev, const uint32_t* code, size_t bytes) {
 struct Renderer::Impl {
     host::Gpu& gpu;
     unsigned scale;
+    // The EFB's columns for each of the console's (`scale` lines for each line): more than
+    // `scale` when the picture is shown wider than the game drew it for (request_widening), so
+    // the stretch across the screen doesn't cost sharpness. A whole number, so pixel positions
+    // stay exact. Lines' widths and points' sizes go by `scale`.
+    unsigned xscale;
+    float widening = 1.0f;
     // MKDD_PROBE: the captured frame's texture copies, read back as they're made.
     struct CopyDump {
         Buffer buf;
@@ -353,7 +360,7 @@ struct Renderer::Impl {
         }
     }
 
-    explicit Impl(host::Gpu& g, unsigned s) : gpu(g), scale(s) {}
+    explicit Impl(host::Gpu& g, unsigned s) : gpu(g), scale(s), xscale(s) {}
     unsigned wanted_scale = 0;  // Renderer::request_scale: applied by the next render (0: none)
 
     void set_anisotropy(unsigned level) {
@@ -372,8 +379,8 @@ struct Renderer::Impl {
         VkFormatProperties fp;
         vkGetPhysicalDeviceFormatProperties(gpu.physical, VK_FORMAT_D32_SFLOAT, &fp);
         if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) depth_format = VK_FORMAT_X8_D24_UNORM_PACK32;
-        efb = Image::create(gpu, kEfbWidth * scale, kEfbHeight * scale, kColor, kEfbUsage);
-        efb_depth = Image::create(gpu, kEfbWidth * scale, kEfbHeight * scale, depth_format,
+        efb = Image::create(gpu, kEfbWidth * xscale, kEfbHeight * scale, kColor, kEfbUsage);
+        efb_depth = Image::create(gpu, kEfbWidth * xscale, kEfbHeight * scale, depth_format,
                                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
         white = Image::create(gpu, 1, 1, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         {
@@ -1209,7 +1216,7 @@ struct Renderer::Impl {
         if (picture && !c.to_xfb) return clear_after(cmd, c);
         vkCmdEndRendering(cmd);
         barrier(cmd);
-        const uint32_t w = std::max(1u, c.dest_width * scale), h = std::max(1u, c.dest_height * scale);
+        const uint32_t w = std::max(1u, c.dest_width * xscale), h = std::max(1u, c.dest_height * scale);
         Image* target;
         if (c.to_xfb) {
             Image& x = picture ? *picture : xfbs[c.dest & 0x1FFFFFFFu];
@@ -1283,7 +1290,7 @@ struct Renderer::Impl {
                 // All of the colour, or none, and the depth: the GPU's own clear (no
                 // pixel shader; a GPU can clear a whole surface without writing it
                 // pixel by pixel). Exactly the values the clear pipeline writes.
-                VkRect2D cs{{c.src[0] * int(scale), c.src[1] * int(scale)}, {uint32_t(c.src[2]) * scale, uint32_t(c.src[3]) * scale}};
+                VkRect2D cs{{c.src[0] * int(xscale), c.src[1] * int(scale)}, {uint32_t(c.src[2]) * xscale, uint32_t(c.src[3]) * scale}};
                 clamp_rect(cs);
                 if (cs.extent.width && cs.extent.height) {
                     VkClearAttachment a[2];
@@ -1308,9 +1315,9 @@ struct Renderer::Impl {
             vkCmdSetDepthTestEnable(cmd, c.clear_depth);
             vkCmdSetDepthWriteEnable(cmd, c.clear_depth);
             vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_ALWAYS);
-            const VkViewport cv{float(c.src[0] * int(scale)), float(c.src[1] * int(scale)), float(c.src[2] * int(scale)),
+            const VkViewport cv{float(c.src[0] * int(xscale)), float(c.src[1] * int(scale)), float(c.src[2] * int(xscale)),
                                 float(c.src[3] * int(scale)), 0, 1};
-            VkRect2D cs{{c.src[0] * int(scale), c.src[1] * int(scale)}, {uint32_t(c.src[2]) * scale, uint32_t(c.src[3]) * scale}};
+            VkRect2D cs{{c.src[0] * int(xscale), c.src[1] * int(scale)}, {uint32_t(c.src[2]) * xscale, uint32_t(c.src[3]) * scale}};
             clamp_rect(cs);
             vkCmdSetViewport(cmd, 0, 1, &cv);
             vkCmdSetScissor(cmd, 0, 1, &cs);
@@ -1340,7 +1347,7 @@ struct Renderer::Impl {
                 VkBufferImageCopy& r = regions[n++] = {};
                 r.bufferOffset = at + 4 * (y * 4 + x);
                 r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                r.imageOffset = {int32_t(x * scale + scale / 2), int32_t(y * scale + scale / 2), 0};
+                r.imageOffset = {int32_t(x * xscale + xscale / 2), int32_t(y * scale + scale / 2), 0};
                 r.imageExtent = {1, 1, 1};
             }
         host::transition(cmd, target.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1446,9 +1453,11 @@ struct Renderer::Impl {
     // so the EFB (and its twin, made again when next needed) can be replaced. The colour is
     // carried over, filtered; the depth is cleared to the far plane.
     void apply_scale() {
-        const unsigned to = wanted_scale;
+        const unsigned to = wanted_scale ? wanted_scale : scale;
         wanted_scale = 0;
-        if (to == 0 || to == scale) return;
+        // Across: enough whole columns for the widened picture (16:9 on the game's 4:3 is 1.33 times: 2 at 1x, 3 at 2x).
+        const unsigned to_x = std::max(to, unsigned(std::ceil(float(to) * widening - 0.01f)));
+        if (to == scale && to_x == xscale) return;
         vkDeviceWaitIdle(gpu.device);
         poll_readbacks();  // (made at the old scale: finished with it)
         // The EFB for pictures between frames is made again at the new size when next needed; the
@@ -1456,9 +1465,9 @@ struct Renderer::Impl {
         if (efb_between.image) efb_between.destroy(gpu), efb_depth_between.destroy(gpu);
         can_blend = false;
         Image old = efb, old_depth = efb_depth;
-        scale = to;
-        efb = Image::create(gpu, kEfbWidth * scale, kEfbHeight * scale, kColor, kEfbUsage);
-        efb_depth = Image::create(gpu, kEfbWidth * scale, kEfbHeight * scale, depth_format,
+        scale = to, xscale = to_x;
+        efb = Image::create(gpu, kEfbWidth * xscale, kEfbHeight * scale, kColor, kEfbUsage);
+        efb_depth = Image::create(gpu, kEfbWidth * xscale, kEfbHeight * scale, depth_format,
                                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
         one_time([&](VkCommandBuffer cmd) {
             host::transition(cmd, efb.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
@@ -1595,7 +1604,7 @@ struct Renderer::Impl {
             VkBufferImageCopy r{};
             r.bufferOffset = VkDeviceSize(at_slot) * 8;
             r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            r.imageOffset = {probe_x * int32_t(scale), probe_y * int32_t(scale), 0};
+            r.imageOffset = {probe_x * int32_t(xscale), probe_y * int32_t(scale), 0};
             r.imageExtent = {1, 1, 1};
             vkCmdCopyImageToBuffer(cmd, efb.image, VK_IMAGE_LAYOUT_GENERAL, probe_buf.buffer, 1, &r);
             r.bufferOffset += 4;
@@ -1679,9 +1688,10 @@ struct Renderer::Impl {
             }
             if (keep_replay) replay[pk.index] = {p, bound_textures};
             const float sc = float(scale);
-            VkViewport vp{d.viewport[0] * sc, d.viewport[1] * sc, d.viewport[2] * sc, d.viewport[3] * sc,
+            const float sx = float(xscale);
+            VkViewport vp{d.viewport[0] * sx, d.viewport[1] * sc, d.viewport[2] * sx, d.viewport[3] * sc,
                           std::clamp(d.viewport[4], 0.0f, 1.0f), std::clamp(d.viewport[5], 0.0f, 1.0f)};
-            VkRect2D r{{d.scissor[0] * int(scale), d.scissor[1] * int(scale)}, {uint32_t(d.scissor[2]) * scale, uint32_t(d.scissor[3]) * scale}};
+            VkRect2D r{{d.scissor[0] * int(xscale), d.scissor[1] * int(scale)}, {uint32_t(d.scissor[2]) * xscale, uint32_t(d.scissor[3]) * scale}};
             clamp_rect(r);
             if (r.extent.width == 0 || r.extent.height == 0) continue;
             if (!same_valid || std::memcmp(&vp, &last_viewport, sizeof vp) != 0) vkCmdSetViewport(cmd, 0, 1, &vp), last_viewport = vp;
@@ -1710,7 +1720,7 @@ struct Renderer::Impl {
                     approximated(said, "points are one pixel: this GPU has no large points");
                 }
             }
-            Push push{d.state, d.has, 0u, sc, point};
+            Push push{d.state, d.has, 0u, sc, point, float(xscale)};
             const auto reads_src_alpha = [](uint8_t factor) { return factor == VK_BLEND_FACTOR_SRC_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; };
             if (d.pipeline.blend && (reads_src_alpha(d.pipeline.src) || reads_src_alpha(d.pipeline.dst))) push.flags |= 1u;
             if (d.pipeline.logic && !gpu.logic_op) push.flags |= kLogicBlend[d.pipeline.logic - 1u].help << 4;
@@ -1901,7 +1911,7 @@ struct Renderer::Impl {
             const Replay& rp = replay[pk.index];
             if (!rp.pipeline) continue;  // not drawn in the frame either (an empty viewport or scissor)
             const gx::Draw& d = f.draws[pk.index];
-            VkRect2D r{{d.scissor[0] * int(scale), d.scissor[1] * int(scale)}, {uint32_t(d.scissor[2]) * scale, uint32_t(d.scissor[3]) * scale}};
+            VkRect2D r{{d.scissor[0] * int(xscale), d.scissor[1] * int(scale)}, {uint32_t(d.scissor[2]) * xscale, uint32_t(d.scissor[3]) * scale}};
             clamp_rect(r);
             if (r.extent.width == 0 || r.extent.height == 0) continue;
             if (rp.pipeline != bound) vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp.pipeline), bound = rp.pipeline;
@@ -1920,7 +1930,8 @@ struct Renderer::Impl {
             if (rp.textures != bound_textures)
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gx_layout, 1, 1, &rp.textures, 0, nullptr), bound_textures = rp.textures;
             // (The dynamic state is set for every draw here: a few hundred a picture once primitives are joined.)
-            const VkViewport vp{d.viewport[0] * sc, d.viewport[1] * sc, d.viewport[2] * sc, d.viewport[3] * sc,
+            const float sx = float(xscale);
+            const VkViewport vp{d.viewport[0] * sx, d.viewport[1] * sc, d.viewport[2] * sx, d.viewport[3] * sc,
                                 std::clamp(d.viewport[4], 0.0f, 1.0f), std::clamp(d.viewport[5], 0.0f, 1.0f)};
             vkCmdSetViewport(cmd, 0, 1, &vp);
             vkCmdSetScissor(cmd, 0, 1, &r);
@@ -1931,7 +1942,7 @@ struct Renderer::Impl {
             float point = 1.0f;
             if (d.pipeline.topology == 1 && gpu.wide_lines) vkCmdSetLineWidth(cmd, std::clamp(float(d.line_width) / 6.0f * sc, 1.0f, gpu.max_line_width));
             else if (d.pipeline.topology == 2) point = std::clamp(float(d.point_size) / 6.0f * sc, 1.0f, gpu.max_point_size);
-            Push push{d.state, d.has, 0u, sc, point};
+            Push push{d.state, d.has, 0u, sc, point, float(xscale)};
             const auto reads_src_alpha = [](uint8_t factor) { return factor == VK_BLEND_FACTOR_SRC_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; };
             if (d.pipeline.blend && (reads_src_alpha(d.pipeline.src) || reads_src_alpha(d.pipeline.dst))) push.flags |= 1u;
             if (d.pipeline.logic && !gpu.logic_op) push.flags |= kLogicBlend[d.pipeline.logic - 1u].help << 4;
@@ -2005,6 +2016,8 @@ Renderer::Renderer(host::Gpu& gpu, unsigned scale, unsigned anisotropy) : impl_(
 void Renderer::set_anisotropy(unsigned level) { impl_->set_anisotropy(level); }
 void Renderer::request_scale(unsigned scale) { impl_->wanted_scale = std::clamp(scale, 1u, 8u); }
 unsigned Renderer::scale() const { return impl_->scale; }
+void Renderer::request_widening(float times) { impl_->widening = std::clamp(times, 1.0f, 3.0f); }
+unsigned Renderer::width_scale() const { return impl_->xscale; }
 void Renderer::set_true_color(bool on) { impl_->true_color = on; }
 void Renderer::save_now() {
     std::vector<uint8_t> keys;
