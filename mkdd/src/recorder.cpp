@@ -821,6 +821,68 @@ void build_state(const Registers& r, State& s, uint32_t parts) {
     if (parts & (kPartBp | kPartXfRegs)) build_bp(r, s);
 }
 
+// The blocks of a State (States::kBlock bytes each) that rebuilding `parts` may change.
+static_assert(offsetof(State, posmtx) == 0 && offsetof(State, nrmmtx) < offsetof(State, postmtx) &&
+              offsetof(State, postmtx) < offsetof(State, lights) && offsetof(State, lights) < offsetof(State, projection) &&
+              offsetof(State, projection) < offsetof(State, pixel_center) && offsetof(State, xf) < offsetof(State, bp) &&
+              offsetof(State, bp) < offsetof(State, texdims) && offsetof(State, fog_range) < sizeof(State),
+              "blocks_of takes the parts' members to lie in this order");
+constexpr uint32_t blocks_in(size_t from, size_t to) {  // the blocks bytes [from, to) lie in
+    uint32_t m = 0;
+    for (size_t b = from / States::kBlock; b * States::kBlock < to; ++b) m |= 1u << b;
+    return m;
+}
+constexpr uint32_t blocks_of(uint32_t parts) {
+    uint32_t m = 0;
+    if (parts & kPartPos) m |= blocks_in(offsetof(State, posmtx), offsetof(State, nrmmtx));
+    if (parts & kPartNormal) m |= blocks_in(offsetof(State, nrmmtx), offsetof(State, postmtx));
+    if (parts & kPartPost) m |= blocks_in(offsetof(State, postmtx), offsetof(State, lights));
+    if (parts & kPartLights) m |= blocks_in(offsetof(State, lights), offsetof(State, projection));
+    if (parts & kPartXfRegs) m |= blocks_in(offsetof(State, projection), offsetof(State, bp));
+    if (parts & (kPartBp | kPartXfRegs)) m |= blocks_in(offsetof(State, bp), sizeof(State));
+    return m;
+}
+static_assert(blocks_of(kPartAll) == (1u << States::kBlocks) - 1 && blocks_of(kPartPos) == 0xFu && blocks_in(0, 0) == 0);
+// The state as last built: each new one is made from it, then kept in the frame's blocks.
+State g_built{};
+// Within the parts, what was written since the last state: XF words [g_pos_lo, g_pos_hi) of the position
+// matrices, and BP registers by bit. A state then copies those alone (most draws load a matrix or two
+// and change a few colours).
+uint32_t g_pos_lo = 0, g_pos_hi = 256;
+uint64_t g_bp_dirty[4] = {~0ull, ~0ull, ~0ull, ~0ull};
+void build_bp_derived(const Registers& r, State& s);
+void build_whole(const Registers& r, State& s) {
+    build_state(r, s, kPartAll);
+    g_pos_lo = 256, g_pos_hi = 0;
+    std::fill(std::begin(g_bp_dirty), std::end(g_bp_dirty), 0ull);
+}
+// build_state(r, s, parts) on the state last built, copying only what was written; returns the blocks it may have changed.
+uint32_t build_changed(const Registers& r, State& s, uint32_t parts) {
+    uint32_t blocks = blocks_of(parts & (kPartNormal | kPartPost | kPartLights | kPartXfRegs));
+    if ((parts & kPartPos) && g_pos_lo < g_pos_hi) {
+        std::memcpy(&s.posmtx[0][0] + g_pos_lo, r.xf + g_pos_lo, (g_pos_hi - g_pos_lo) * 4);  // (floats by their bits)
+        blocks |= blocks_in(offsetof(State, posmtx) + 4 * g_pos_lo, offsetof(State, posmtx) + 4 * g_pos_hi);
+    }
+    build_state(r, s, parts & (kPartNormal | kPartPost | kPartLights));
+    if (parts & kPartXfRegs) build_xf_regs(r.xf, s);
+    if (parts & kPartBp)
+        for (unsigned w = 0; w < 4; ++w)
+            for (uint64_t m = g_bp_dirty[w]; m; m &= m - 1) {
+                const unsigned reg = 64 * w + unsigned(std::countr_zero(m));
+                s.bp[reg / 4][reg % 4] = r.bp[reg];
+                blocks |= blocks_in(offsetof(State, bp) + 4 * reg, offsetof(State, bp) + 4 * reg + 4);
+            }
+    if (parts & (kPartBp | kPartXfRegs)) {
+        // (The write mask, 0xFE, changes without a BP write's notice: set by its own write, cleared by the next.)
+        s.bp[0xFE / 4][0xFE % 4] = r.bp[0xFE];
+        build_bp_derived(r, s);
+        blocks |= blocks_in(offsetof(State, bp) + 4 * 0xFE, sizeof(State));
+    }
+    g_pos_lo = 256, g_pos_hi = 0;
+    std::fill(std::begin(g_bp_dirty), std::end(g_bp_dirty), 0ull);
+    return blocks;
+}
+
 void build_lights(const uint32_t* xf, State& s) {
     for (int l = 0; l < 8; ++l) {
         const uint32_t* L = xf + 0x600 + 16 * l;
@@ -880,9 +942,12 @@ void build_xf_regs(const uint32_t* xf, State& s) {
 }
 
 void build_bp(const Registers& r, State& s) {
-    const uint32_t* xf = r.xf;
-    // Pixel side.
     for (int i = 0; i < 256; ++i) s.bp[i / 4][i % 4] = r.bp[i];
+    build_bp_derived(r, s);
+}
+// What the shaders take from BP registers worked out (and the fog's part of the viewport).
+void build_bp_derived(const Registers& r, State& s) {
+    const uint32_t* xf = r.xf;
     for (unsigned m2 = 0; m2 < 8; ++m2) {
         const uint32_t image0 = r.bp[(m2 < 4 ? 0x88 : 0xA8) + m2 % 4];
         s.texdims[m2][0] = int32_t((image0 & 0x3FF) + 1);
@@ -1152,7 +1217,7 @@ void xf_changed(uint32_t address, uint32_t count) {
     const uint32_t end = address + count;
     const auto overlaps = [&](uint32_t lo, uint32_t hi) { return address < hi && end > lo; };
     uint32_t parts = 0;
-    if (overlaps(0x000, 0x100)) parts |= kPartPos;
+    if (overlaps(0x000, 0x100)) parts |= kPartPos, g_pos_lo = std::min(g_pos_lo, address), g_pos_hi = std::max(g_pos_hi, std::min(end, 0x100u));
     if (overlaps(0x400, 0x460)) parts |= kPartNormal;
     if (overlaps(0x500, 0x600)) parts |= kPartPost;
     if (overlaps(0x600, 0x680)) parts |= kPartLights;
@@ -1328,14 +1393,15 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     }
     if (g_dirty) {
         // From the frame's last state where there is one, redoing what changed.
+        // (Into the state last built, then into the frame: only the blocks that differ are copied.)
         const uint32_t parts = f.states.empty() ? uint32_t(kPartAll) : g_parts;
-        if (f.states.empty()) f.states.emplace_back();
-        else f.states.push_back(f.states.back());
-        build_state(r, f.states.back(), parts);
+        if (parts == kPartAll) build_whole(r, g_built), f.states.push(g_built);
+        else f.states.push(g_built, build_changed(r, g_built, parts));
         if (g_check_decode && parts != kPartAll) [[unlikely]] {  // MKDD_CHECK_DECODE: the same as built whole
-            State whole;
+            State whole, kept;
             build_state(r, whole, kPartAll);
-            if (std::memcmp(&whole, &f.states.back(), sizeof whole) != 0)
+            f.states.resolve(f.states.size() - 1, kept);
+            if (std::memcmp(&whole, &kept, sizeof whole) != 0)
                 rt::fatal(nullptr, "MKDD_CHECK_DECODE: a state built from the one before differs (parts %X)", parts);
         }
         g_state = uint32_t(f.states.size() - 1);
@@ -1416,6 +1482,7 @@ void bp_written(uint32_t reg, uint32_t value, bool changed) {
     if (reg == 0x66) textures_invalidated(), g_join.valid = false;  // (a texture may be new under the same registers)
     if (!changed) return;  // the state is what it was (commands are acted on by gpu.cpp either way)
     g_parts |= kPartBp;
+    g_bp_dirty[(reg & 0xFF) / 64] |= 1ull << (reg % 64);
     if (reg >= 0xE0 && reg <= 0xE7) {  // TEV colour registers and konstants: 11-bit signed, the type bit says which
         const unsigned i = (reg - 0xE0) / 2;
         const bool konst = (value >> 23) & 1;
@@ -1496,7 +1563,7 @@ Survey* const g_survey = [] () -> Survey* {
 void survey(const Frame& f, uint64_t frame_number) {
     Survey& s = *g_survey;
     for (const Draw& d : f.draws) {
-        const State& st = f.states[d.state];
+        const State st = f.states[d.state];  // (a copy: the frame keeps them as blocks)
         if (st.projection[3][2] != -1.0f || d.pipeline.topology != 0) continue;
         float lo = 2.0f, hi = -1.0f;
         const auto vertex = [&](uint32_t i) {

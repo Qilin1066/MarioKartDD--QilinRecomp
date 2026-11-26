@@ -1421,7 +1421,8 @@ struct Renderer::Impl {
                 continue;
             }
             const gx::Draw& d = f.draws[pk.index];
-            const auto& bp = f.states[d.state].bp;
+            const gx::State st = f.states[d.state];  // (a copy: the frame keeps its states as blocks)
+            const auto& bp = st.bp;
             const auto reg = [&](unsigned r) { return bp[r / 4][r % 4]; };
             const unsigned stages = ((reg(0x00) >> 10) & 15) + 1;
             rt::log("probe #%llu draw %u (primitive %u): rgba %u,%u,%u,%u -> %u,%u,%u,%u  z %.7f -> %.7f", static_cast<unsigned long long>(i), pk.index, d.primitive, a[0], a[1], a[2], a[3], b[0], b[1],
@@ -1431,7 +1432,6 @@ struct Renderer::Impl {
                     d.depth_test, d.depth_write, d.depth_func, d.index_count, d.cull, d.has);
             rt::log("    genmode %06X zmode(40) %06X blend(41) %06X dstalpha(42) %06X pe(43) %06X alphacmp(F3) %06X fog(EE-F2) %06X %06X",
                     reg(0x00), reg(0x40), reg(0x41), reg(0x42), reg(0x43), reg(0xF3), reg(0xEE), reg(0xF2));
-            const auto& st = f.states[d.state];
             for (int k = 0; k < 4; ++k)
                 rt::log("    konst %d: %d,%d,%d,%d  reg %d: %d,%d,%d,%d", k, st.konst[k][0], st.konst[k][1], st.konst[k][2],
                         st.konst[k][3], k, st.tev_regs[k][0], st.tev_regs[k][1], st.tev_regs[k][2], st.tev_regs[k][3]);
@@ -1535,7 +1535,7 @@ struct Renderer::Impl {
         put(static_cast<uint8_t*>(s.vertices.mapped) + small_at, f.small.data(), small_bytes);
         std::memset(static_cast<uint8_t*>(s.vertices.mapped) + zeros_at, 0, 64);
         put(s.indices.mapped, f.indices.data(), f.indices.size() * 4);
-        put(s.states.mapped, f.states.data(), f.states.size() * sizeof(gx::State));
+        f.states.resolve_all(static_cast<gx::State*>(s.states.mapped));  // (in order, from the frame's shared blocks)
 
         check(vkResetFences(gpu.device, 1, &s.fence), "vkResetFences");
         check(vkResetCommandBuffer(s.cmd, 0), "vkResetCommandBuffer");

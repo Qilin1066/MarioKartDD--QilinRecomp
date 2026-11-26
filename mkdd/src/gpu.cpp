@@ -473,7 +473,7 @@ int bench_recording(const char* dff_path, unsigned times) {
     Cpu c = rt::new_cpu();
     gx::set_rendering(true);  // frames are queued (and taken back below), as when drawing
     std::vector<double> ms;
-    uint64_t draws = 0, vertices = 0, states = 0, hashed_before = 0;
+    uint64_t draws = 0, vertices = 0, states = 0, state_bytes = 0, hashed_before = 0;
     for (unsigned i = 0; i < times + 5; ++i) {
         if (i == 5) hashed_before = gx::recorder_stats().hashed_bytes.load();  // five to warm the caches up, not counted
         dff.registers();
@@ -483,7 +483,7 @@ int bench_recording(const char* dff_path, unsigned times) {
         decode(c, commands.data(), commands.size(), used, false);
         const uint64_t t1 = gx::now_ns();
         while (auto f = gx::next_frame(0)) {
-            if (i >= 5) draws += f->draws.size(), vertices += f->vertices.size() + f->small.size(), states += f->states.size();
+            if (i >= 5) draws += f->draws.size(), vertices += f->vertices.size() + f->small.size(), states += f->states.size(), state_bytes += f->states.blocks() * gx::States::kBlock;
             gx::recycle_frame(std::move(f));
         }
         if (i >= 5) ms.push_back(double(t1 - t0) / 1e6);
@@ -492,10 +492,10 @@ int bench_recording(const char* dff_path, unsigned times) {
     double sum = 0;
     for (double v : ms) sum += v;
     std::printf("recording %s, %u times: median %.3f ms, fastest %.3f, slowest %.3f, mean %.3f; "
-                "%llu draws, %llu vertices and %llu states a frame, %llu KB of textures checked\n",
+                "%llu draws, %llu vertices and %llu states (%llu KB) a frame, %llu KB of textures checked\n",
                 dff_path, times, ms[ms.size() / 2], ms.front(), ms.back(), sum / double(ms.size()),
                 static_cast<unsigned long long>(draws / times), static_cast<unsigned long long>(vertices / times),
-                static_cast<unsigned long long>(states / times),
+                static_cast<unsigned long long>(states / times), static_cast<unsigned long long>(state_bytes / times / 1024),
                 static_cast<unsigned long long>((gx::recorder_stats().hashed_bytes.load() - hashed_before) / times / 1024));
     return 0;
 }

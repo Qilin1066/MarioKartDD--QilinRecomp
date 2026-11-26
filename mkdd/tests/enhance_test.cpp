@@ -229,7 +229,8 @@ struct Span {
 Span span_of(const gx::Frame& f, size_t i) {
     Span s;
     const gx::Draw& d = f.draws[i];
-    const float* row = f.states[d.state].projection[0];
+    const gx::State st = f.states[d.state];  // (a copy: the frame keeps its states as blocks)
+    const float* row = st.projection[0];
     const auto one = [&](const float* pos) {
         const float px = d.viewport[0] + (row[0] * pos[0] + row[3] + 1) * 0.5f * d.viewport[2];
         s.x0 = std::min(s.x0, px), s.x1 = std::max(s.x1, px);

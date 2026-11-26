@@ -11,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <new>
 #include <utility>
@@ -281,13 +282,70 @@ struct Unfilled : std::allocator<T> {
     void construct(U* p, A&& a, More&&... more) { ::new (static_cast<void*>(p)) U(std::forward<A>(a), std::forward<More>(more)...); }
 };
 
+// A frame's states, kept as blocks of 256 bytes: a state shares each block whose bytes are the same as
+// the state before's (a draw mostly changes a matrix or a colour of the 5 KB; a four-view race frame has
+// 843 states). Read a state whole with resolve (or operator[], a copy), or all of them in order into the
+// renderer's buffer with resolve_all: the State layout the shaders read is unchanged.
+class States {
+public:
+    static constexpr size_t kBlock = 256, kBlocks = (sizeof(State) + kBlock - 1) / kBlock;
+    size_t size() const { return index_.size() / kBlocks; }
+    bool empty() const { return index_.empty(); }
+    size_t blocks() const { return blocks_.size(); }  // made this frame (each kBlock bytes)
+    void clear() { blocks_.clear(), index_.clear(); }
+    void resolve(size_t i, State& out) const {
+        auto* to = reinterpret_cast<uint8_t*>(&out);
+        const uint32_t* at = index_.data() + i * kBlocks;
+        for (size_t b = 0; b + 1 < kBlocks; ++b) std::memcpy(to + b * kBlock, blocks_[at[b]].bytes, kBlock);
+        std::memcpy(to + (kBlocks - 1) * kBlock, blocks_[at[kBlocks - 1]].bytes, sizeof(State) - (kBlocks - 1) * kBlock);
+    }
+    State operator[](size_t i) const {
+        State s;
+        resolve(i, s);
+        return s;
+    }
+    void resolve_all(State* out) const {
+        for (size_t i = 0, n = size(); i < n; ++i) resolve(i, out[i]);
+    }
+    // A new state, last. `changed`: a bit for each block that may differ from the state before's (the
+    // others are taken as the same without looking); each of those is compared, and shared if it is.
+    void push(const State& s, uint32_t changed = (1u << kBlocks) - 1) {
+        const auto* from = reinterpret_cast<const uint8_t*>(&s);
+        const size_t n = index_.size();
+        const bool first = n == 0;
+        index_.resize(n + kBlocks);
+        uint32_t* at = index_.data() + n;
+        const uint32_t* before = first ? nullptr : at - kBlocks;
+        for (size_t b = 0; b < kBlocks; ++b) {
+            const size_t bytes = b + 1 < kBlocks ? kBlock : sizeof(State) - b * kBlock;
+            if (!first) {
+                if (!((changed >> b) & 1) || std::memcmp(blocks_[before[b]].bytes, from + b * kBlock, bytes) == 0) {
+                    at[b] = before[b];
+                    continue;
+                }
+            }
+            at[b] = uint32_t(blocks_.size());
+            Block& k = blocks_.emplace_back();
+            std::memcpy(k.bytes, from + b * kBlock, bytes);
+        }
+    }
+
+private:
+    struct Block {
+        alignas(16) uint8_t bytes[kBlock];
+    };
+    std::vector<Block, Unfilled<Block>> blocks_;  // (each written as it is made)
+    std::vector<uint32_t> index_;  // kBlocks a state
+};
+static_assert(States::kBlocks <= 32, "a block mask is 32 bits");
+
 // One frame: everything from one XFB copy to the next.
 struct Frame {
     // (The recorder writes every byte of each vertex and index it makes room for.)
     std::vector<Vertex, Unfilled<Vertex>> vertices;
     std::vector<SmallVertex, Unfilled<SmallVertex>> small;  // draws with PipelineKey::small_vertices index these
     std::vector<uint32_t, Unfilled<uint32_t>> indices;
-    std::vector<State> states;
+    States states;
     std::vector<StateInfo> state_info;  // one for each state
     std::vector<Load> loads;
     std::vector<View> views;
