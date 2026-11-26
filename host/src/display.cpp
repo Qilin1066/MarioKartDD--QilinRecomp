@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 #include "qilin/host/pacing.hpp"
 #include "qilin/host/vulkan.hpp"
@@ -121,6 +122,12 @@ struct Display::Impl {
     Image target;     // headless: what's presented
     bool need_rebuild = false;
     bool vsync_built = true;  // the present mode the swapchain has
+    // Rebuilds for a suboptimal swapchain since the window last changed size:
+    // a few, then it is used as it is (a surface that stays suboptimal would
+    // otherwise cost a rebuild, with a wait for the GPU, every frame).
+    unsigned suboptimal_rebuilds = 0;
+    unsigned surfaces_lost = 0;  // in a row, without a present between
+    std::chrono::steady_clock::time_point hidden_next{};  // minimised: the next present's time
     // With vsync and VK_KHR_present_wait: each present has an id, and the next
     // frame waits until the one before is on screen, so at most one waits in
     // the queue (a frame less latency than a full FIFO queue). 0: none yet on
@@ -349,6 +356,36 @@ struct Display::Impl {
     void destroy_views() {
         for (VkImageView v : swap_views) vkDestroyImageView(gpu.device, v, nullptr);
         swap_views.clear();
+    }
+
+    // The window's surface is gone (the display driver restarted, the window
+    // moved to a display another adapter drives): a new one, and a swapchain
+    // on it at the next present.
+    void recreate_surface() {
+        if (++surfaces_lost > 5) die("the window's Vulkan surface is lost again and again: the display driver may have stopped");
+        vkDeviceWaitIdle(gpu.device);
+        destroy_views();
+        if (swapchain) vkDestroySwapchainKHR(gpu.device, swapchain, nullptr);
+        swapchain = VK_NULL_HANDLE;
+        vkDestroySurfaceKHR(gpu.instance, surface, nullptr);
+        surface = make_sdl_surface(gpu.instance, window);
+        VkBool32 can = VK_FALSE;
+        vkGetPhysicalDeviceSurfaceSupportKHR(gpu.physical, gpu.family, surface, &can);
+        if (!can) die("%s can't show the window any more (it is on a display another graphics adapter drives?)", gpu.name.c_str());
+        need_rebuild = true;
+        waitable_id = 0;
+        std::fprintf(stderr, "mkdd: the window's surface was lost: made again\n");
+    }
+
+    // Minimised, nothing is shown and a present returns at once: wait as a
+    // 59.94 Hz display would, so the main loop doesn't spin (the menu, and
+    // pictures between frames, are otherwise paced by the display).
+    void wait_hidden() {
+        constexpr auto kPeriod = std::chrono::nanoseconds(16'683'350);
+        const auto now = std::chrono::steady_clock::now();
+        if (hidden_next < now - kPeriod * 4) hidden_next = now;  // the start, or after a stall
+        hidden_next += kPeriod;
+        std::this_thread::sleep_until(hidden_next);
     }
 
     void build_swapchain() {
@@ -605,7 +642,10 @@ bool Display::poll() {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) return false;
-        if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) d.need_rebuild = true;
+        // A new size, or a display with another mode or scale (moved, or changed under it): a new swapchain.
+        if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED || e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED ||
+            e.type == SDL_EVENT_WINDOW_RESTORED || e.type == SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED)
+            d.need_rebuild = true, d.suboptimal_rebuilds = 0;
         if (e.type == SDL_EVENT_JOYSTICK_ADDED && !SDL_IsGamepad(e.jdevice.which)) list_controllers();  // say why it isn't used
         if (e.type == SDL_EVENT_GAMEPAD_ADDED) d.open_pad(e.gdevice.which);
         if (e.type == SDL_EVENT_GAMEPAD_REMOVED) d.close_pad(e.gdevice.which);
@@ -750,8 +790,11 @@ void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh
     VkExtent2D dst_size;
     uint32_t index = 0;
     if (d.window) {
-        if (d.need_rebuild || d.vsync_built != d.picture.vsync) d.build_swapchain();
-        if (d.extent.width == 0) return;  // minimised
+        if (d.need_rebuild || d.vsync_built != d.picture.vsync || !d.swapchain) d.build_swapchain();
+        if (d.extent.width == 0 || !d.swapchain) {  // minimised
+            d.wait_hidden();
+            return;
+        }
         const auto waited_from = std::chrono::steady_clock::now();
         if (d.gpu.present_wait && d.vsync_built && d.picture.low_latency && d.waitable_id) {
             // Bounded: a display that stops refreshing (asleep, covered) only costs 50 ms.
@@ -760,13 +803,18 @@ void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh
                 d.need_rebuild = true;
                 return;
             }
+            if (w == VK_ERROR_SURFACE_LOST_KHR) return d.recreate_surface();
             if (w != VK_TIMEOUT && w != VK_SUBOPTIMAL_KHR) check(w, "vkWaitForPresentKHR");
         }
-        const VkResult r = vkAcquireNextImageKHR(d.gpu.device, d.swapchain, UINT64_MAX, d.acquired, VK_NULL_HANDLE, &index);
+        // Bounded too: a compositor that stops releasing images (a covered window on some
+        // Wayland ones, a display asleep) drops this picture instead of stopping the game.
+        const VkResult r = vkAcquireNextImageKHR(d.gpu.device, d.swapchain, 250'000'000, d.acquired, VK_NULL_HANDLE, &index);
         if (r == VK_ERROR_OUT_OF_DATE_KHR) {
             d.need_rebuild = true;
             return;
         }
+        if (r == VK_ERROR_SURFACE_LOST_KHR) return d.recreate_surface();
+        if (r == VK_TIMEOUT || r == VK_NOT_READY) return;  // (the semaphore wasn't signalled: nothing to undo)
         if (r != VK_SUBOPTIMAL_KHR) check(r, "vkAcquireNextImageKHR");
         ++d.present_stats.presents;
         d.present_stats.wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waited_from).count();
@@ -821,9 +869,11 @@ void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh
         pid.pPresentIds = &id;
         if (d.gpu.present_wait) pi.pNext = &pid;
         const VkResult r = vkQueuePresentKHR(d.gpu.queue, &pi);
-        if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) d.need_rebuild = true;
+        if (r == VK_ERROR_OUT_OF_DATE_KHR) d.need_rebuild = true;
+        else if (r == VK_SUBOPTIMAL_KHR) d.need_rebuild = d.suboptimal_rebuilds++ < 3;  // (see suboptimal_rebuilds)
+        else if (r == VK_ERROR_SURFACE_LOST_KHR) d.recreate_surface();
         else check(r, "vkQueuePresentKHR");
-        if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) d.waitable_id = id;
+        if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) d.waitable_id = id, d.surfaces_lost = 0;
     }
 }
 

@@ -18,6 +18,7 @@ namespace {
 
 std::atomic<std::FILE*> g_log_file{nullptr};
 thread_local Cpu* tl_cpu = nullptr;
+thread_local const char* tl_role = nullptr;  // set_thread_role
 std::string g_log_path;
 
 // One line (or more) to stderr and the log file.
@@ -245,13 +246,15 @@ void set_thread_cpu(Cpu* c) { tl_cpu = c; }
 Cpu* thread_cpu() { return tl_cpu; }
 void set_log_path(const char* path) { g_log_path = path ? path : ""; }
 
+void set_thread_role(const char* role) { tl_role = role; }
+
 void report_crash(const char* what) {
     emit("mkdd: crashed: %s\n", what);
     if (tl_cpu && g) {
         emit("  the guest's thread here:\n");
         backtrace(*tl_cpu);
     } else {
-        emit("  (not on a guest thread)\n");
+        emit("  (not on a guest thread: on %s)\n", tl_role ? tl_role : "a host thread of its own");
     }
     if (!g_log_path.empty()) emit("  this is in the log: %s\n", g_log_path.c_str());
     flush_all();
@@ -262,6 +265,7 @@ void fatal(Cpu* c, const char* format, ...) {
     va_start(args, format);
     vreport(c, format, args);
     va_end(args);
+    if (!c && tl_role) emit("  (on %s)\n", tl_role);
     if (!g_log_path.empty()) emit("  this is in the log: %s\n", g_log_path.c_str());
     std::fflush(nullptr);
     std::_Exit(70);  // EX_SOFTWARE; other guest threads may be parked: no static destructors

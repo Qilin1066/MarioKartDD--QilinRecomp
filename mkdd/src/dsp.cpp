@@ -63,6 +63,7 @@
 #include "hw.hpp"
 #include "os.hpp"
 #include "priority.hpp"
+#include "qilin/rt/report.hpp"
 
 namespace mkdd {
 namespace rt = qilin::rt;
@@ -185,6 +186,7 @@ void run_core() {
 
 void dsp_thread() {
     set_this_thread_priority(Priority::high);
+    rt::set_thread_role("the DSP worker (the sound microcode)");
     for (;;) {
         if (g_dsp_work.exchange(false)) {
             run_core();

@@ -181,6 +181,7 @@ static void start_watchdog() {
     std::thread([] {
         namespace rt = qilin::rt;
         mkdd::set_this_thread_priority(mkdd::Priority::background);
+        rt::set_thread_role("the watchdog");
         uint32_t frames = mkdd::frame_count();
         uint64_t passes = g_main_passes.load(std::memory_order_relaxed);
         unsigned game_still = 0, main_still = 0;
@@ -341,6 +342,9 @@ int main(int argc, char** argv) {
     // the run before. On Windows the console closes with the game, so after
     // a crash the file is what's left to read (or send).
     rt::install_crash_handler();
+    rt::set_thread_role("the main thread (the window, drawing, presenting)");
+    // The host layer's fatal errors (Vulkan, SDL, the sound device) go through rt::fatal: into the log too.
+    qilin::host::set_fatal_handler([](const char* message) { rt::fatal(nullptr, "%s", message); });
     if (!bench_dff && !render_dff) {  // (a benchmark or a replay leaves the game's log alone)
         const std::filesystem::path dir = qilin::host::user_folder(), log = dir / "mkdd.log";
         std::error_code ec;
@@ -599,6 +603,8 @@ int main(int argc, char** argv) {
             display->set_rumble_strength(settings.rumble_strength);
         }
         if (audio) audio->set_volume(settings.volume, settings.mute_unfocused && display && display->sdl_window() && !display->focused());
+        if (audio)  // a sound device unplugged: on to the default one
+            if (const std::string note = audio->keep_playing(); !note.empty()) rt::log("%s", note.c_str());
         if (display && (window_closed || !display->poll())) {
             rt::log("window closed");
             mkdd::before_exit();

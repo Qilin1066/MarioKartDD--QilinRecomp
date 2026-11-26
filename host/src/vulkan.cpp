@@ -1,6 +1,7 @@
 // Vulkan 1.3 device setup (vulkan.hpp).
 #include "qilin/host/vulkan.hpp"
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -8,19 +9,64 @@
 
 namespace qilin::host {
 
+namespace {
+std::atomic<void (*)(const char*)> g_fatal{nullptr};
+}  // namespace
+
+void set_fatal_handler(void (*handler)(const char* message)) { g_fatal.store(handler, std::memory_order_release); }
+
 void die(const char* format, ...) {
-    std::fputs("mkdd: ", stderr);
+    char text[2048];
     va_list args;
     va_start(args, format);
-    std::vfprintf(stderr, format, args);
+    std::vsnprintf(text, sizeof text, format, args);
     va_end(args);
-    std::fputc('\n', stderr);
+    if (const auto handler = g_fatal.load(std::memory_order_acquire)) handler(text);  // (doesn't return)
+    std::fprintf(stderr, "mkdd: %s\n", text);
     std::fflush(nullptr);
     std::_Exit(70);
 }
 
+const char* result_name(VkResult r) {
+    switch (r) {
+    case VK_SUCCESS: return "VK_SUCCESS";
+    case VK_NOT_READY: return "VK_NOT_READY";
+    case VK_TIMEOUT: return "VK_TIMEOUT";
+    case VK_INCOMPLETE: return "VK_INCOMPLETE";
+    case VK_SUBOPTIMAL_KHR: return "VK_SUBOPTIMAL_KHR";
+    case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+    case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+    case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+    case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+    case VK_ERROR_MEMORY_MAP_FAILED: return "VK_ERROR_MEMORY_MAP_FAILED";
+    case VK_ERROR_LAYER_NOT_PRESENT: return "VK_ERROR_LAYER_NOT_PRESENT";
+    case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+    case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
+    case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
+    case VK_ERROR_TOO_MANY_OBJECTS: return "VK_ERROR_TOO_MANY_OBJECTS";
+    case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+    case VK_ERROR_FRAGMENTED_POOL: return "VK_ERROR_FRAGMENTED_POOL";
+    case VK_ERROR_OUT_OF_POOL_MEMORY: return "VK_ERROR_OUT_OF_POOL_MEMORY";
+    case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
+    case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR: return "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR";
+    case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
+    case VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT: return "VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT";
+    default: return "an unknown result";
+    }
+}
+
 void check(VkResult r, const char* what) {
-    if (r != VK_SUCCESS) die("Vulkan: %s failed (VkResult %d)", what, static_cast<int>(r));
+    if (r == VK_SUCCESS) return;
+    // What a player can do about the commonest: a driver that stopped is the driver's (or the
+    // GPU's) failure, not something a restart of this program alone prevents next time.
+    const char* hint = r == VK_ERROR_DEVICE_LOST
+                           ? ": the graphics driver stopped or reset the GPU (a driver crash or timeout, the GPU removed, or "
+                             "the PC woken from sleep with a driver that loses its devices). Start the game again; if it "
+                             "happens again, update the graphics driver"
+                       : r == VK_ERROR_OUT_OF_DEVICE_MEMORY || r == VK_ERROR_OUT_OF_HOST_MEMORY
+                           ? ": out of memory (a lower render resolution in the settings, F1, needs less)"
+                           : "";
+    die("Vulkan: %s failed with %s (%d)%s", what, result_name(r), static_cast<int>(r), hint);
 }
 
 namespace {

@@ -230,8 +230,8 @@ void block(Cpu& c, bool leaving = false) {
         if (deadline == UINT64_MAX && !has_pending_interrupts())
             rt::fatal(&c, "every guest thread is waiting, and nothing is left to wake one (deadlock)");
         const uint64_t now = time_base();
-        if (deadline > now)
-            idle_sleep((deadline - now) * 1000000000 / kTimerHz);
+        if (deadline > now)  // (a second at most: no deadline, only an interrupt pending, mustn't overflow the product)
+            idle_sleep(std::min<uint64_t>(deadline - now, kTimerHz) * 1000000000 / kTimerHz);
     }
 }
 
@@ -763,6 +763,7 @@ void run_on_host_thread(void (*fn)(void*), void* arg) {
     HANDLE h = CreateThread(nullptr, kHostStack, [](LPVOID p) -> DWORD {
         std::unique_ptr<Start> st(static_cast<Start*>(p));
         set_this_thread_priority(Priority::high);  // the game's threads pace its frames
+        rt::prepare_crash_stack();                 // lifted calls nest deep: an overflow is reported too
         st->fn(st->arg);
         return 0;
     }, s, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
@@ -777,6 +778,7 @@ void run_on_host_thread(void (*fn)(void*), void* arg) {
     if (pthread_create(&id, &a, [](void* p) -> void* {
             std::unique_ptr<Start> st(static_cast<Start*>(p));
             set_this_thread_priority(Priority::high);  // the game's threads pace its frames
+            rt::prepare_crash_stack();                 // lifted calls nest deep: an overflow is reported too
             st->fn(st->arg);
             return nullptr;
         }, s) != 0)
