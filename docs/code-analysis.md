@@ -147,7 +147,7 @@ Words are 4-byte instructions in the library's functions; *fp* counts floating-p
 | game: Shiraiwa (map objects, wipes) | 1,920 | 79,779 | 15,997 | 6,688 | 0 | lift |
 | game: Yamamoto (kart physics, camera) | 597 | 65,451 | 18,361 | 4,275 | 0 | lift |
 
-Totals, in functions: **702,275 words lifted (94.8%)**, 31,609 replaced (4.3%), 6,911 dropped (0.9%).
+Totals, in functions: **702,386 words lifted (94.8%)**, 31,498 replaced (4.3%), 6,911 dropped (0.9%).
 
 ## Why each library is lifted or replaced
 
