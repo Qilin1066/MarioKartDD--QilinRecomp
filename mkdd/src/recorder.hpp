@@ -62,7 +62,9 @@ struct RecorderStats {
 RecorderStats& recorder_stats();
 // The game's thread is in JFWDisplay::endRender (vi.cpp): the frame ends at the draw done
 // it issues, with the copy to the frame buffer the next pass will make (MKDD_EARLY_END=0: not).
-void request_frame_end();
+// `vfilter`: the copy filter the next copy will use, its three weights (above, the line,
+// below) a byte each from the lowest; -1 if unknown (the one set now is foretold).
+void request_frame_end(int vfilter = -1);
 // Whether the real copy is kept after a foretold one (the main thread, each pass: true at the
 // game's own frame rate, where the picture shown must be the console's; false between frames).
 void set_copy_kept(bool on);

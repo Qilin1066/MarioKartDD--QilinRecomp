@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -187,10 +188,40 @@ bool hashing() {
     static const bool on = std::getenv("MKDD_PICTURE_HASHES") != nullptr;
     return on;
 }
+bool hashing_frames() {
+    static const bool on = [] {
+        const char* e = std::getenv("MKDD_PICTURE_HASHES");
+        return e && std::strcmp(e, "shown") != 0;
+    }();
+    return on;
+}
 void hash_picture(const std::vector<uint8_t>& rgba, double game_seconds, const char* what) {
     uint64_t h = 0xCBF29CE484222325ull;
     for (const uint8_t b : rgba) h = (h ^ b) * 0x100000001B3ull;
     static uint64_t n = 0;
     rt::log("picture %llu (%s) at %.2f s: %016llX", static_cast<unsigned long long>(++n), what, game_seconds, static_cast<unsigned long long>(h));
+    // MKDD_HASH_DUMP=<folder>:<from>:<to>: the pictures hashed between those game seconds, saved
+    // by hash (raw RGBA, as read back), to look at where two runs' hashes part.
+    static const struct Window {
+        std::string folder;
+        double from = 0, to = -1;
+    } dump = [] {
+        Window w;
+        const char* e = std::getenv("MKDD_HASH_DUMP");
+        if (!e) return w;
+        std::string s = e;
+        const size_t b = s.rfind(':'), a = b == std::string::npos || b == 0 ? std::string::npos : s.rfind(':', b - 1);
+        if (a == std::string::npos || a == 0) return w;
+        w.folder = s.substr(0, a), w.from = std::atof(s.c_str() + a + 1), w.to = std::atof(s.c_str() + b + 1);
+        return w;
+    }();
+    if (game_seconds >= dump.from && game_seconds <= dump.to) {
+        char name[32];
+        std::snprintf(name, sizeof name, "/%016llX.rgba", static_cast<unsigned long long>(h));
+        if (FILE* f = std::fopen((dump.folder + name).c_str(), "wb")) {
+            std::fwrite(rgba.data(), 1, rgba.size(), f);
+            std::fclose(f);
+        }
+    }
 }
 }  // namespace mkdd::latency

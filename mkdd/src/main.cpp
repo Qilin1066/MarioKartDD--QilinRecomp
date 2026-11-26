@@ -728,7 +728,7 @@ int main(int argc, char** argv) {
                 }
                 renderer->render(*f);
                 mkdd::latency::frame_drawn(taken);
-                if (mkdd::latency::hashing() && display && !display->sdl_window())  // MKDD_PICTURE_HASHES: each frame's own picture
+                if (mkdd::latency::hashing_frames() && display && !display->sdl_window())  // MKDD_PICTURE_HASHES: each frame's own picture
                     for (const auto& c : f->copies)
                         if (const qilin::host::Image* x = c.to_xfb && &c == &f->copies.back() ? renderer->xfb(c.dest) : nullptr) {
                             display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), x->height / renderer_scale);

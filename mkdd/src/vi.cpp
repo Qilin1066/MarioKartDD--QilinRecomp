@@ -256,7 +256,16 @@ void VIGetDTVStatus(Cpu& c) { c.r[3] = component_cable(); }
 // JFWDisplay::endRender (8007AE78, the plan's wrap): the pass's drawing ends in it, with
 // a draw done; the recorder ends its frame there (recorder.hpp's request_frame_end).
 void JFWDisplay_endRender(Cpu& c) {
-    gx::request_frame_end();
+    // The copy filter the next beginRender will set: GXSetCopyFilter(rmode->aa,
+    // rmode->sample_pattern, GX_TRUE, rmode->vfilter) at 8007AC0C, the render mode being
+    // JUTVideo::sManager's (803CAD40, +4); its seven vertical taps at +0x32.
+    int vfilter = -1;
+    if (const uint32_t video = rt::peek32(0x803CAD40u))
+        if (const uint32_t mode = rt::peek32(video + 4)) {
+            const uint8_t* t = rt::guest_ptr(mode + 0x32);
+            vfilter = (t[0] + t[1]) | ((t[2] + t[3] + t[4]) << 8) | ((t[5] + t[6]) << 16);
+        }
+    gx::request_frame_end(vfilter);
     rt::wrapped(0x8007AE78u)(c);
 }
 
