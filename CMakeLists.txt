@@ -447,6 +447,8 @@ if(QILIN_GAME_DOL)
         set_source_files_properties(${gen_sources} PROPERTIES COMPILE_OPTIONS "/w;/bigobj")
         # Lifted code calls nest as deeply as the guest's: a large host stack.
         target_link_options(mkdd PRIVATE /STACK:16777216)
+        # MSBuild compiles one project's files one at a time without this: the lifted files take long.
+        target_compile_options(mkdd PRIVATE /MP)
     else()
         if(QILIN_SANITIZE AND NOT QILIN_SANITIZE_LIFTED)
             set_source_files_properties(${gen_sources} PROPERTIES COMPILE_OPTIONS "-w;-fno-sanitize=all;-g0")
