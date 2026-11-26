@@ -266,7 +266,13 @@ about 3-5%; the dispatcher for indirect calls 1.8%; replaced-function lookup 0.6
 | Registers around a direct call cut down to the callee's (before: `--full-sync`) | 10.63 -> 10.33 ms | 9.78 -> 9.41 | 6.77 -> 6.70 |
 | Cheaper floating-point helpers (below) | 9.71 -> 7.27 ms | 6.69 -> 5.39 | 6.50 -> 5.70 |
 
-(The pairs ran at different times, so a row's "after" needn't equal the next row's "before".)
+| Tried and left out: lifted code reading the dispatcher's cache itself, a cache for replaced-function lookups | 7.31 -> 7.42 | 5.37 -> 5.14 | 5.86 -> 5.83 |
+
+(The pairs ran at different times, so a row's "after" needn't equal the next row's "before". The last row is within
+the noise either way, so the code stayed as it was.) The movie decoder (`qilin_game_difftest --thp`, above) went from
+6.63 to 4.73 ms a frame with MSVC and from 6.0 to 4.01 ms with Clang for MinGW (zig, `x86_64-windows-gnu -O2`, the
+player kit's compiler), 0 differences; that Clang build of the game difftest (10 trials a function, 68,375 runs
+compared) found 0 differences too.
 
 **The helpers.** A float's double, and `lfs`'s conversion, are the host's conversion, which is exact for every
 value (a denormal comes out normalised, as the manual has it); only a NaN takes the bitwise path, since the host
@@ -290,5 +296,19 @@ and nothing else running, and run the same two scenes headless (`mkdd --headless
 title's windows 2100-3600 and the race's from 5700, work less the GPU wait. Three runs at least, as the figures move;
 `MKDD_PROFILE=<file>` (Linux's SIGPROF sampler, `profile.cpp`) gives the split by function there.
 
+**What is left** (the demo race after this round): `PSMTXConcat` is still the hottest function (6.8% of busy
+time), then the pipe's handling (about 5%, `gpu.cpp`), `J3DJoint::recursiveCalc`, and functions single mode
+can't take: the game's own vector code uses `frsqrte` (an inlined square root: `checkPosition`, `MakeSusMatrix`,
+`DoTireAction`, `NeckCtrl::update`, `PSVECMag`) or loads double constants with `lfd` (`searchBase`,
+`J3DGetKeyFrameInterpolation`), about 8% between them, in double mode. In single-mode code the
+ordinary-result checks are still half the time of a function like `PSMTXConcat` (with them removed, which would be
+wrong, it takes 46 ns instead of 77), and writing the FPR halves back on the way out is another 10-25%.
+
 ## Cheap wins noted, not taken
+- Single mode with a few halves kept as doubles: `frsqrte`'s estimate (not a single) and the double constants an
+  `lfd` loads would let the double-mode functions above run in single mode.
+- A function's FPR halves written back on the way out only if some caller can read them. That needs every
+  caller known, including the ones that reach it through pointers, or an assumption that the code follows the EABI
+  (f0-f13 dead after a call but for f1). The game difftest compares every register, so it would need to know the
+  rule too.
 - `ps1` of an FPR is carried through functions that only use scalar singles; a per-function "ps1 never read" would drop half the FP write-backs there.
