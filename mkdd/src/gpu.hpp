@@ -49,6 +49,10 @@ void decode_commands(const uint8_t* bytes, size_t size);
 // log). For measuring the recorder, the CPU's part of drawing. Returns the
 // exit code.
 int bench_recording(const char* dff_path, unsigned times);
+// The same frame's FIFO commands stored to the write-gather pipe a word at a time, as GX stores them,
+// with the GPU thread decoding them (init_gpu first): what the guest's thread spends on the pipe and
+// the hand-over, and how long until the GPU thread has the whole frame. For mkdd_render_test --bench-pipe.
+int bench_handover(const char* dff_path, unsigned times);
 // --render-dff <file.dff> <out.ppm>: replay a captured frame `loops` times through the recorder,
 // giving each frame made to `draw` (main.cpp renders them and writes the last).
 void replay_dff(const char* dff_path, unsigned loops, const std::function<void(gx::Frame&)>& draw);

@@ -1045,4 +1045,50 @@ Stats gpu_stats() {
     return g_gpu_threaded ? g_stats_seen : g_stats;
 }
 
+int bench_handover(const char* dff_path, unsigned times) {
+    if (!g_gpu_threaded) rt::fatal(nullptr, "--bench-pipe: the GPU thread is off (MKDD_GPU_THREAD=0)");
+    const LoadedDff dff = load_dff(dff_path);
+    const std::vector<uint8_t>& commands = dff.commands;
+    Cpu c = rt::new_cpu();
+    gx::set_rendering(true);
+    // The game's own FIFO, as the log has it, linked to the GPU.
+    const uint64_t frame_at = [&] { uint64_t v = 0; std::memcpy(&v, dff.file.data() + 60, 8); return v; }();
+    const uint32_t base = dff.u32(frame_at + 12) & kFifoAddress, end = dff.u32(frame_at + 16) & kFifoAddress;
+    if (!(end > base) || !gx::in_memory(base, end - base + 32)) rt::fatal(nullptr, "--bench-pipe: %s has no FIFO", dff_path);
+    g_pi[kPiFifoBase] = base, g_pi[kPiFifoEnd] = end, g_pi[kPiFifoWrite] = base;
+    g_cp[kCpControl] |= 0x10;
+    // Until the GPU thread has decoded everything handed over (taking the frames it makes).
+    const auto drained = [] {
+        for (;;) {
+            while (auto f = gx::next_frame(0)) gx::recycle_frame(std::move(f));
+            std::unique_lock l(g_gpu_lock);
+            if (g_incoming.empty() && !g_gpu_busy) return;
+            l.unlock();
+            std::this_thread::yield();
+        }
+    };
+    std::vector<double> guest_ms, all_ms, decode_ms;
+    for (unsigned i = 0; i < times + 5; ++i) {
+        drained();
+        dff.registers();
+        gx::state_changed();
+        const uint64_t t0 = gx::now_ns(), r0 = gx::recorder_stats().record_ns.load();
+        size_t k = 0;
+        for (; k + 4 <= commands.size(); k += 4) pipe_write(c, be32(commands.data() + k), 4);
+        for (; k < commands.size(); ++k) pipe_write(c, commands[k], 1);
+        while (g_gathered) pipe_write(c, 0, 1);  // (the last burst out, as GXFlush pads it)
+        hand_over();
+        const uint64_t t1 = gx::now_ns();
+        drained();
+        const uint64_t t2 = gx::now_ns();
+        if (i >= 5) guest_ms.push_back(double(t1 - t0) / 1e6), all_ms.push_back(double(t2 - t0) / 1e6), decode_ms.push_back(double(gx::recorder_stats().record_ns.load() - r0) / 1e6);
+    }
+    std::sort(guest_ms.begin(), guest_ms.end()), std::sort(all_ms.begin(), all_ms.end()), std::sort(decode_ms.begin(), decode_ms.end());
+    std::printf("pipe %s, %u times, %llu bytes: the guest's stores and hand-over median %.3f ms (fastest %.3f); "
+                "until decoded median %.3f ms (fastest %.3f); the GPU thread decoding median %.3f ms\n",
+                dff_path, times, static_cast<unsigned long long>(commands.size()), guest_ms[guest_ms.size() / 2], guest_ms.front(),
+                all_ms[all_ms.size() / 2], all_ms.front(), decode_ms[decode_ms.size() / 2]);
+    return 0;
+}
+
 }  // namespace mkdd

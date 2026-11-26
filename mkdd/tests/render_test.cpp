@@ -1653,6 +1653,12 @@ int main(int argc, char** argv) {
         gx::set_rendering(true);
         return bench_dff(argv[2], argc >= 4 ? unsigned(std::atoi(argv[3])) : 200);
     }
+    if (argc >= 3 && std::strcmp(argv[1], "--bench-pipe") == 0) {  // gpu.hpp's bench_handover, the GPU thread running
+        mkdd::init_gpu();
+        const int code = mkdd::bench_handover(argv[2], argc >= 4 ? unsigned(std::atoi(argv[3])) : 200);
+        std::fflush(nullptr);
+        std::_Exit(code);  // (the GPU thread is detached and waiting)
+    }
     if (argc >= 4 && std::strcmp(argv[1], "--render-dff") == 0)
         return render_dff(argv[2], argv[3], argc >= 5 ? unsigned(std::max(1, std::atoi(argv[4]))) : 1);
     host::Gpu gpu = host::Gpu::create({}, false);
