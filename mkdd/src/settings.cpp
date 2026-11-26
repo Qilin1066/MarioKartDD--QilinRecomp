@@ -241,7 +241,28 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
             return false;
         };
         if (n == 1 && line.starts_with("\xEF\xBB\xBF")) line.erase(0, 3);
-        if (const size_t hash = line.find('#'); hash != std::string::npos) line.erase(hash);
+        // A # starts a comment, except inside a value written in double quotes (a display or a
+        // sound device can be called "Speakers #2"); there, "" is a quote.
+        std::string value;
+        if (const size_t hash = line.find('#'), eq = line.find('='); eq != std::string::npos && (hash == std::string::npos || eq < hash)) {
+            const std::string rest = trim(line.substr(eq + 1));
+            if (!rest.empty() && rest.front() == '"') {
+                size_t at = 1;
+                for (;; ++at) {
+                    if (at >= rest.size()) return fail("a value that opens with a quote needs its closing quote");
+                    if (rest[at] != '"') value += rest[at];
+                    else if (at + 1 < rest.size() && rest[at + 1] == '"') value += '"', ++at;
+                    else break;
+                }
+                const std::string after = trim(rest.substr(at + 1));
+                if (!after.empty() && after.front() != '#') return fail("unexpected text after the closing quote");
+            } else {
+                value = trim(rest.substr(0, rest.find('#')));
+            }
+            line.erase(eq + 1);
+        } else if (hash != std::string::npos) {
+            line.erase(hash);
+        }
         line = trim(line);
         if (line.empty()) continue;
         if (line.front() == '[') {
@@ -254,7 +275,7 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
         }
         const size_t eq = line.find('=');
         if (eq == std::string::npos) return fail("expected name = value");
-        const std::string name = lower(trim(line.substr(0, eq))), value = trim(line.substr(eq + 1));
+        const std::string name = lower(trim(line.substr(0, eq)));
         if (section.empty()) return fail("'" + name + "' comes before any [section]");
         if (!seen.insert(section + "." + name).second) return fail("'" + name + "' is set twice");
         const std::string v = lower(value);
@@ -452,10 +473,19 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
 
 std::string settings_text(const Settings& s) {
     const auto b = [](bool v) { return v ? "true" : "false"; };
+    // A value as the file holds it: in quotes where it has a # (else a comment), opens with a
+    // quote, or begins or ends with a space.
+    const auto q = [](const std::string& v) {
+        if (v.find('#') == std::string::npos && (v.empty() || (v.front() != '"' && v.front() != ' ' && v.back() != ' '))) return v;
+        std::string out = "\"";
+        for (char ch : v) out += ch == '"' ? std::string("\"\"") : std::string(1, ch);
+        return out + "\"";
+    };
     std::string t =
         "# Mario Kart: Double Dash!! QilinRecomp settings. The settings menu (F1 or Esc in the game) changes these and saves\n"
         "# them here; any text editor works too. Delete the file to get the defaults back.\n"
-        "# Each line is name = value; # starts a comment.\n"
+        "# Each line is name = value; # starts a comment. A value with a # in it is written in double\n"
+        "# quotes (device = \"Speakers #2\"), and a quote inside those twice.\n"
         "\n"
         "[display]\n"
         "# A preset sets the enhancements below it: original (the console's picture), low-end (a Raspberry Pi\n"
@@ -463,7 +493,7 @@ std::string settings_text(const Settings& s) {
         "preset = " + s.preset + "\n"
         "# Borderless full screen (F11 or Alt+Enter switch it), and on which display (its name; empty: the main one).\n"
         "fullscreen = " + b(s.fullscreen) + "\n"
-        "monitor = " + s.monitor + "\n"
+        "monitor = " + q(s.monitor) + "\n"
         "# The picture's shape, width:height: 4:3 is the original; a wider one (16:10, 16:9, 21:9, 32:9, any up to\n"
         "# 4:1) shows more at the sides; auto is the screen's own. hud: where the game's HUD goes on a wider\n"
         "# picture: edges, middle (the middle 4:3) or stretched. Not yet: both need the game's cameras and HUD\n"
@@ -485,7 +515,7 @@ std::string settings_text(const Settings& s) {
         "scanlines = " + std::to_string(s.scanlines) + "\n"
         "mask = " + std::to_string(s.mask) + "\n"
         "# The resolution the game is drawn at, as a multiple of the GameCube's 640x480: 1 to 8, or auto (the\n"
-        "# smallest that fills the window line for line, taken when the game starts). Higher is sharper and\n"
+        "# smallest that fills the window line for line, following the window's size). Higher is sharper and\n"
         "# needs a faster GPU: the work grows with the square (8x is 64 times 1x's pixels). MKDD_SCALE in the\n"
         "# environment overrides it.\n"
         "render_resolution = " + (s.scale ? std::to_string(s.scale) : std::string("auto")) + "\n"
@@ -498,12 +528,12 @@ std::string settings_text(const Settings& s) {
         "# waiting for the display.\n"
         "vsync = " + b(s.vsync) + "\n"
         "low_latency = " + b(s.low_latency) + "\n"
-        "# Frames a second: original (the game's own: 60 with one or two players, 30 with three or four), 60,\n"
-        "# display (the display's refresh rate) or unlimited. Not yet: above the game's own needs the game\n"
-        "# patched, and until that is done it runs as original whatever is set here.\n"
+        "# Frames a second: original (the game's own 60), 60 (the same, with every frame drawn in LAN play\n"
+        "# too), display (the display's refresh rate) or unlimited. Not yet: the game computes 60 a second\n"
+        "# and no more, so more need pictures drawn in between; until that is done it runs as original.\n"
         "frame_rate = " + kFrameRates[unsigned(s.frame_rate)] + "\n"
         "# The graphics device, by name (empty: the best one).\n"
-        "gpu = " + s.gpu + "\n"
+        "gpu = " + q(s.gpu) + "\n"
         "# Frame rate, 1% and 0.1% lows and recent frame times in a corner (F3 switches it).\n"
         "performance_overlay = " + b(s.performance_overlay) + "\n"
         "# Fullscreen on a display whose refresh isn't a multiple of 60 Hz (75, 144, 165 Hz): switch to the\n"
@@ -522,7 +552,7 @@ std::string settings_text(const Settings& s) {
         "# speakers or more, else stereo). device: the playback device by its name (empty: the system's\n"
         "# default, followed when it changes).\n"
         "output = " + kOutputs[unsigned(s.sound_output)] + "\n"
-        "device = " + s.sound_device + "\n"
+        "device = " + q(s.sound_device) + "\n"
         "\n"
         "[controls]\n"
         "# stick_deadzone: how much of a stick's travel from its centre reads as the centre, 0-50 percent.\n"
@@ -551,12 +581,13 @@ std::string settings_text(const Settings& s) {
     for (unsigned p = 0; p < kPlayers; ++p) {
         const Player& pl = s.players[p];
         t += "\n[player" + std::to_string(p + 1) + "]\n";
-        t += "controller = " + pl.controller + "\n";
+        t += "controller = " + q(pl.controller) + "\n";
         t += std::string("rumble = ") + b(pl.rumble) + "\n";
         for (unsigned c = 0; c < kControlCount; ++c) {
+            std::string list;
+            for (size_t i = 0; i < pl.controls[c].size(); ++i) list += (i ? ", " : "") + binding_text(pl.controls[c][i]);
             t += kControlNames[c];
-            t += " =";
-            for (size_t i = 0; i < pl.controls[c].size(); ++i) t += (i ? ", " : " ") + binding_text(pl.controls[c][i]);
+            t += list.empty() ? " =" : " = " + q(list);  // (a key can be called #)
             t += "\n";
         }
     }

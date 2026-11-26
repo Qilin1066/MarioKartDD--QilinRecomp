@@ -229,7 +229,16 @@ int main() {
         std::string e;
         check(mkdd::parse_settings("[sound]\nvolume = 65\nmute_unfocused = true\noutput = surround\ndevice = Speakers (USB Audio #2)\n", s, e) &&
                   s.volume == 65 && s.mute_unfocused && s.sound_output == host::SoundOutput::surround && s.sound_device == "Speakers (USB Audio",
-              "volume, muting, output; a device's name ends at a #, which starts a comment");
+              "volume, muting, output; without quotes a # starts a comment, in a value too");
+        check(mkdd::parse_settings("[sound]\ndevice = \"Speakers (USB Audio #2)\"   # the second one\n[display]\nmonitor = \"  LG \"\"27\"\" #1 \"\n", s, e) &&
+                  s.sound_device == "Speakers (USB Audio #2)" && s.monitor == "  LG \"27\" #1 ",
+              "in double quotes a value keeps its #, its spaces, and a quote written twice");
+        check(mkdd::parse_settings("[display]\ngpu = \"\"\nmonitor = \"plain\"\nvsync = \"false\" # quoted anything\n[player2]\na = \"key:#, pad:B\"\n", s, e) &&
+                  s.gpu.empty() && s.monitor == "plain" && !s.vsync && s.players[1].controls[mkdd::kCtlA].size() == 2 &&
+                  s.players[1].controls[mkdd::kCtlA][0].key == "#",
+              "any value may be quoted: an empty one, a switch, a list with the # key");
+        check(mkdd::parse_settings("# device = \"x\n[sound] # volume = 3\n  # [display]\nvolume = 7 # = \"\n", s, e) && s.volume == 7,
+              "comments with quotes and equals signs in them are comments");
         check(mkdd::parse_settings("[sound]\noutput = device\n", s, e) && s.sound_output == host::SoundOutput::device &&
                   mkdd::parse_settings("[sound]\noutput = stereo\n", s, e) && s.sound_output == host::SoundOutput::stereo,
               "the other outputs");
@@ -238,6 +247,10 @@ int main() {
     check(error_has("[sound]\noutput = 7.1\n", "output is stereo, surround or device"), "an unknown output");
     check(error_has("[sound]\nmute_unfocused = sometimes\n", "true or false"), "muting is a switch");
     check(error_has("[sound]\nbass = 3\n", "[sound] has no 'bass'"), "an unknown sound setting");
+    check(error_of("[sound]\ndevice = \"Speakers #2\n").rfind("line 2: a value that opens with a quote needs its closing quote", 0) == 0 &&
+              error_has("[sound]\ndevice = \"a\"\"\n", "closing quote"),
+          "a quote left open is an error, not a guess");
+    check(error_has("[sound]\ndevice = \"Speakers\" 2\n", "unexpected text after the closing quote"), "text after a closing quote");
 
     // [controls]
     check(error_has("[controls]\nstick_threshold = 0\n", "from 5 to 95") && error_has("[controls]\ntrigger_threshold = 96\n", "from 5 to 95"),
@@ -273,17 +286,18 @@ int main() {
     check(error_has("[display]\nfullscreen\n", "expected name = value"), "a line that isn't a setting");
     {
         mkdd::Settings s = d;
-        s.preset = "desktop", s.fullscreen = true, s.monitor = "DELL U2720Q", s.aspect_w = 64, s.aspect_h = 27, s.hud = mkdd::Hud::stretched;
+        s.preset = "desktop", s.fullscreen = true, s.monitor = "\"Odd\" #1 monitor ", s.aspect_w = 64, s.aspect_h = 27, s.hud = mkdd::Hud::stretched;
         s.scaling = host::Scaling::integer, s.smooth = false, s.smaa = true, s.fsr = true, s.sharpness = 35, s.look = host::Look::crt;
         s.scanlines = 80, s.mask = 0, s.scale = 5, s.anisotropy = 8, s.true_color = false, s.vsync = false;
         s.frame_rate = mkdd::FrameRate::unlimited, s.low_latency = false, s.gpu = "AMD Radeon RX 6600", s.performance_overlay = true;
         s.match_refresh = false, s.variable_refresh = true;
-        s.volume = 65, s.mute_unfocused = true, s.sound_output = host::SoundOutput::device, s.sound_device = "Speakers (Realtek Audio)";
+        s.volume = 65, s.mute_unfocused = true, s.sound_output = host::SoundOutput::device, s.sound_device = "Speakers (Realtek Audio) #2";
         s.stick_deadzone = 5, s.stick_threshold = 20, s.trigger_threshold = 30, s.rumble_strength = 45;
         s.players[0].controller = "guid:n:70616431:0", s.players[1].controller = "guid:n:70616432:0", s.players[3].controller = "none";
         s.players[2].rumble = false;
         s.players[0].controls[mkdd::kCtlR] = {{Binding::kPad, host::kPadRB, {}}, {Binding::kKey, 0, "Left Shift"}};
-        s.players[3].controls[mkdd::kCtlCUp] = {{Binding::kMouse, 0, {}}, {Binding::kPad, host::kPadRSDown, {}}};
+        s.players[3].controls[mkdd::kCtlCUp] = {{Binding::kMouse, 0, {}}, {Binding::kPad, host::kPadRSDown, {}}, {Binding::kKey, 0, "#"}};
+        s.players[3].controller = "guid:n:23#:0", s.gpu = " #GPU";
         s.players[2].controls[mkdd::kCtlStart].clear();
         s.sound = 0, s.progressive = false;
         mkdd::Settings back;
