@@ -407,7 +407,7 @@ if(Python3_FOUND)
 endif()
 
 # The game's runtime: everything in mkdd but the code lifted from main.dol.
-set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
+set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/pilot.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
 list(APPEND mkdd_runtime_sources mkdd/src/input.cpp)  # the controller ports (input.hpp)
 list(APPEND mkdd_runtime_sources mkdd/src/enhance.cpp mkdd/src/hud.cpp)  # the widened picture (enhance.hpp)
 
@@ -448,7 +448,7 @@ if(QILIN_GAME_DOL)
     endif()
     target_compile_definitions(mkdd PRIVATE MKDD_VERSION="${PROJECT_VERSION}")
     # Our own sources get the warning set; the lifter's output doesn't (unused labels and locals).
-    set_source_files_properties(mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/settings.cpp
+    set_source_files_properties(mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/pilot.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/settings.cpp
         PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/W4;/permissive-,-Wall;-Wextra;-Wpedantic;-Wshadow>")
     # The renderer writes Vulkan structures {sType} with the rest zeroed, as the host layer does.
     set_source_files_properties(mkdd/src/renderer.cpp mkdd/src/menu.cpp
