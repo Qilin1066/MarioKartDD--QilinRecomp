@@ -56,6 +56,10 @@ public:
     // The latest external frame buffer copied to `address` (in
     // TRANSFER_SRC_OPTIMAL layout, sampled usage), or null if there's none.
     const qilin::host::Image* xfb(uint32_t address) const;
+    // The CPU has written the frame buffer at ddress since the last copy to it, and no copy
+    // has come for a tenth of a second (JUTException's crash screen, JUTDirectPrint): show the
+    // frame buffer in guest memory (video.hpp's take_frame), not xfb()'s picture.
+    bool cpu_wrote_xfb(uint32_t address);
     // EFB copies the CPU reads (the small ones: gx::Copy::to_memory) reach
     // guest memory when a later render() finds their frame drawn; this waits
     // for the GPU and writes them now (the tests; the end of a replay).
