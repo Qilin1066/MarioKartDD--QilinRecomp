@@ -1415,6 +1415,47 @@ int bench_dff(const char* path, unsigned times) {
 #endif
 }
 
+// mkdd_render_test --pipe [bench]: stores of every size to the write-gather pipe, at any address
+// in its block, through the stores lifted code makes (cpu.hpp), reach the CPU's FIFO in memory as
+// their bytes in order, bursts crossed or not. With bench, what a word store costs.
+int pipe_bytes(bool bench) {
+    constexpr uint32_t kFifo = 0x00700000u;
+    mkdd::init_gpu();
+    rt::Cpu c = rt::new_cpu();
+    const auto reg = [&](uint32_t address, uint32_t value) {
+        for (const mkdd::MmioRange& r : mkdd::g_mapped)
+            if (address >= r.begin && address < r.end) return r.write(c, address, value, 4);
+        rt::fatal(nullptr, "render_test: register %08X isn't mapped", address);
+    };
+    reg(0xCC00300Cu, kFifo), reg(0xCC003010u, kFifo + 0xFFE0u), reg(0xCC003014u, kFifo);  // the CPU's FIFO, not linked to the GPU
+    std::vector<uint8_t> want;
+    uint32_t seed = 12345;
+    const auto next = [&] { return seed = seed * 1664525u + 1013904223u; };
+    for (int i = 0; i < 2000 || want.size() % 32 != 0; ++i) {
+        const uint32_t r = next(), v = next(), a = 0xCC008000u + ((r >> 8) & 31);
+        const unsigned size = i >= 2000 ? 1 : (r >> 16) % 4 == 0 ? 1 : (r >> 16) % 4 == 1 ? 2 : 4;  // (words most, as GX)
+        if (size == 1) rt::write8(c, a, v);
+        else if (size == 2) rt::write16(c, a, v);
+        else rt::write32(c, a, v);
+        for (unsigned k = 0; k < size; ++k) want.push_back(uint8_t(v >> (8 * (size - 1 - k))));
+    }
+    const bool same = std::memcmp(rt::guest_ptr(0x80000000u + kFifo), want.data(), want.size()) == 0;
+    check(same, "pipe: " + std::to_string(want.size()) + " bytes of byte, half-word and word stores reach the FIFO in order");
+    if (bench) {  // as lifted code stores, and the slow branch called directly
+        constexpr uint32_t kStores = 20'000'000;
+        for (int round = 0; round < 3; ++round) {
+            uint64_t t0 = gx::now_ns();
+            for (uint32_t i = 0; i < kStores; ++i) rt::write32(c, 0xCC008000u, i);
+            uint64_t t1 = gx::now_ns();
+            for (uint32_t i = 0; i < kStores; ++i) rt::write_slow(c, 0xCC008000u, i, 4);
+            uint64_t t2 = gx::now_ns();
+            std::printf("pipe: a word store %.2f ns as lifted code makes it, %.2f ns by the slow branch (bursts to memory included)\n",
+                        double(t1 - t0) / kStores, double(t2 - t1) / kStores);
+        }
+    }
+    return g_failures ? 1 : 0;
+}
+
 const rt::FunctionEntry kNoFunctions[] = {{0x80004000u, [](rt::Cpu&) {}}};
 
 }  // namespace
@@ -1426,6 +1467,7 @@ int main(int argc, char** argv) {
     }
     rt::init({kNoFunctions, {}});  // guest memory, for textures
     if (argc >= 2 && std::strcmp(argv[1], "--mtxtag") == 0) return mtxtag_bytes();
+    if (argc >= 2 && std::strcmp(argv[1], "--pipe") == 0) return pipe_bytes(argc >= 3 && std::strcmp(argv[2], "bench") == 0);
     if (argc >= 3 && std::strcmp(argv[1], "--bench-dff") == 0) {
         gx::set_rendering(true);
         return bench_dff(argv[2], argc >= 4 ? unsigned(std::atoi(argv[3])) : 200);

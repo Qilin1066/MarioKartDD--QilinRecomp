@@ -284,6 +284,9 @@ if(QILIN_HOST)
     # And with every vertex in the full layout (the compact one is the default).
     add_test(NAME mkdd_render_test_full_vertices COMMAND mkdd_render_test)
     set_tests_properties(mkdd_render_test_full_vertices PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 ENVIRONMENT "MKDD_FULL_VERTICES=1")
+    # The write-gather pipe: stores of every size reach the FIFO as their bytes (cpu.hpp's inline gathering).
+    add_test(NAME mkdd_pipe_test COMMAND mkdd_render_test --pipe)
+    set_tests_properties(mkdd_pipe_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 endif()
 
 # ---- Tests (no game files needed) ----
