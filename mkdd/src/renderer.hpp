@@ -31,6 +31,10 @@ public:
     // frame, a frame that doesn't start from a cleared EFB, a change of scene): show xfb()'s.
     // At 1 it draws the frame again as it is, the same picture as xfb()'s: callers show that.
     const qilin::host::Image* render_between(float phase);
+    // Between frames, a foretold copy that was wrong (recorder.hpp's real_copy): once the real one
+    // has come, the held frame's own picture (xfb()) and its pictures between are drawn with it.
+    // Each pass (render_between does it too); nothing waits for it.
+    void take_real_copy();
     // The frame held (the newer), what the pairing of its matrices with the frame before's
     // found, and the GPU's time for a picture between, averaged over those timed so far.
     const gx::Frame* held() const;

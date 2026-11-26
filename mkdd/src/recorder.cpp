@@ -1622,6 +1622,7 @@ void survey(const Frame& f, uint64_t frame_number) {
 static void end_frame(Frame& f) {
     f.captured = g_capture_next;
     g_capture_next = false;
+    f.serial = g_stats.frames.load(std::memory_order_relaxed) + 1;
     if (g_survey) [[unlikely]] survey(f, g_stats.frames.load(std::memory_order_relaxed));
     textures_end_frame(f);
     hud::place(f);  // (a widened picture: the flat parts back in proportion)
@@ -1671,6 +1672,9 @@ Copy g_foretold_copy{};
 uint64_t g_early_ends = 0, g_wrong = 0, g_drawn_after = 0;
 
 uint32_t g_last_xfb_command = 0;
+uint64_t g_foretold_serial = 0;  // the frame the last foretold copy ended (Frame::serial)
+std::mutex g_real_lock;
+RealCopy g_real;
 
 // What differs between two copies, named (for the log): "" if nothing.
 std::string copy_difference(const Copy& real, const Copy& told) {
@@ -1715,6 +1719,10 @@ bool next_dest(uint32_t& dest) {
 }  // namespace
 
 void set_copy_kept(bool on) { g_keep_real.store(on, std::memory_order_relaxed); }
+RealCopy real_copy() {
+    std::lock_guard l(g_real_lock);
+    return g_real;
+}
 bool early_frame_end() { return g_early_on; }
 void request_frame_end(int vfilter) {
     if (!g_early_on) return;
@@ -1765,6 +1773,7 @@ static void draw_done() {
     f.packets.push_back({Packet::kCopy, uint32_t(f.copies.size())});
     f.copies.push_back(c);
     f.foretold = true;
+    g_foretold_serial = g_stats.frames.load(std::memory_order_relaxed) + 1;  // (end_frame gives the frame this serial)
     log_copy("foretold", c);
     if (++g_early_ends == 1 || g_early_ends % 3600 == 0)
         qilin::rt::log("render: early frame ends %llu, foretold wrong %llu, drawing between %llu", static_cast<unsigned long long>(g_early_ends),
@@ -1795,6 +1804,10 @@ static bool early_copy_made(const Copy& c, Frame& f) {
     if (right) {
         g_wrong_in_a_row = 0;
         return true;
+    }
+    {  // (the renderer shows that frame with it from now on: real_copy)
+        std::lock_guard l(g_real_lock);
+        g_real = {g_foretold_serial, c};
     }
     if (++g_wrong_in_a_row == 3) {
         g_early_stopped = true;

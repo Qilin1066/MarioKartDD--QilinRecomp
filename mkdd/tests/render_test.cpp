@@ -1181,6 +1181,41 @@ void between_four_views(Target& t, Stream& st) {
                                                     "(145.9 139.8 60.8 158.1)");
 }
 
+// Between frames, a frame ended early whose foretold copy was wrong (a movie's start or end
+// changes the copy filter after endRender): once the real copy comes, the held frame's own
+// picture and its pictures between are drawn with the real one. White over black, the edge at
+// line 264; the real copy filters it 16/32/16 (copy_filter: 255 191 63 0), the foretold didn't.
+void between_real_copy(Target& t, Stream& st) {
+    gx::set_copy_kept(false);  // (as main.cpp has it between frames)
+    const auto scene = [&](float camera) {
+        stream_begin(st);
+        stream_quad(st, 0, 0, 640, 264, -0.5f, 0xFFFFFFFFu);
+        perspective(st);
+        object(st, camera_at(camera), model_at(-4.0f, -3.0f), 0x80400000u);  // something that pairs
+    };
+    for (int i = 0; i < 4; ++i) scene(0.0f), st.end_frame(), st.send(), t.shown(true);  // (the frame buffers' rotation: one)
+    scene(0.1f);
+    gx::request_frame_end(64 << 8);  // JFWDisplay::endRender: the filter foretold, none
+    st.bp(0x45, 2);                  // its draw done: the frame ends, its copy foretold
+    st.send();
+    const auto foretold = t.shown(true);
+    st.bp(0x53, 8u | (8u << 6) | (10u << 12) | (12u << 18)), st.bp(0x54, 10u | (8u << 6) | (8u << 12));
+    st.end_frame();                  // the real copy, filtered: not the one foretold
+    st.send();
+    t.renderer.take_real_copy();
+    const auto own = t.read(t.renderer.xfb(kXfb)), half = t.between(0.5f);
+    st.bp(0x53, 0x595000), st.bp(0x54, 0x15), st.send();
+    const auto lines = [](const std::vector<uint8_t>& px) {
+        return px.empty() ? std::string("none") : std::to_string(at(px, 320, 263)[1]) + " " + std::to_string(at(px, 320, 264)[1]);
+    };
+    const auto filtered = [](const std::vector<uint8_t>& px) {
+        return !px.empty() && std::abs(at(px, 320, 263)[1] - 191) <= 1 && std::abs(at(px, 320, 264)[1] - 63) <= 1;
+    };
+    check(at(foretold, 320, 263)[1] == 255 && at(foretold, 320, 264)[1] == 0 && filtered(own) && filtered(half),
+          "a wrong foretold copy: once the real one comes, the frame's picture and those between have its filter (191 63): " + lines(own) +
+              " | between " + lines(half) + " | as foretold " + lines(foretold));
+}
+
 // A scrolling texture between frames (water, conveyor arrows): its texture matrix (row 30,
 // GX_TEXMTX0) is blended like the model's position matrix, so the texture moves part of the way
 // too; one whose scroll wrapped (0.9 to 0.05) is drawn as the newer frame has it. A model 256
@@ -1752,6 +1787,7 @@ int main(int argc, char** argv) {
         between_frames(t, st);
         between_four_views(t, st);
         between_textures(t, st);
+        between_real_copy(t, st);
         widened(t, st);
         marks_follow(t, st);
         clip_off(t, st, gpu.depth_clamp);
