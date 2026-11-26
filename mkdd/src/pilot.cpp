@@ -4,8 +4,12 @@
 // itself.
 //   MKDD_PILOT_RECORD=<file>[:kart]  writes the kart's position (x z, a line every 10 frames) while a
 //                                    race runs: kart 1 in a Grand Prix is one of the game's own drivers
-//   MKDD_PILOT=<file>                steers port 1's kart (kart 0) along such a path, closed into a lap;
-//                                    the script still holds A
+//   MKDD_PILOT=<file>[,<file>...]    steers port 1's kart (kart 0) along such a path, closed into a lap;
+//                                    the script still holds A. A file whose first line is `# course <hex>`
+//                                    (the ECourseID the recording's `# race` line names) is taken for that
+//                                    course; one without, for the race whose start it passes near. A race
+//                                    with neither follows kart 1 live, along the trail it leaves (`follow`
+//                                    in place of the files: always)
 //   MKDD_PILOT_STEPS=<steps>         plays port 1 by the game's state instead of the clock (menus come up
 //                                    seconds earlier or later from run to run, and a race ends when it
 //                                    ends); MKDD_INPUT is then ignored for that port. Steps are separated
@@ -37,6 +41,7 @@ namespace rt = qilin::rt;
 
 namespace {
 constexpr uint32_t kRaceManager = 0x803CB7E8u, kKartCtrl = 0x803CC588u, kBodies = 0xA0, kBodyPosition = 0x23C;
+constexpr uint32_t kRaceCourse = 0x803CB6A8u;  // GameAudio::Parameters::sRaceCourse: the race's ECourseID
 
 bool kart_position(uint32_t kart, float& x, float& z) {
     const uint32_t ctrl = rt::peek32(kKartCtrl);
@@ -167,7 +172,7 @@ void pilot_frame() {
     float x, z;
     static bool racing = false;
     const bool now = kart_position(kart, x, z);
-    if (now && !racing) std::fprintf(out, "# race\n"), frame = 0;  // (line n of a race is its frame 10 n)
+    if (now && !racing) std::fprintf(out, "# race course %X\n", rt::peek32(kRaceCourse)), frame = 0;  // (line n of a race is its frame 10 n)
     racing = now;
     if (!now || ++frame % 10) return;
     std::fprintf(out, "%.1f %.1f\n", x, z);
@@ -180,23 +185,34 @@ void pilot_status(uint32_t status) {
     struct Point {
         float x, z;
     };
-    // (Several files, comma-separated: one per course. A race takes the one that passes nearest its start.)
-    static const std::vector<std::vector<Point>> paths = [] {
-        std::vector<std::vector<Point>> all;
+    struct Path {
+        std::vector<Point> points;
+        uint32_t course = 0;  // its ECourseID, from a first line `# course <hex>`; 0: not said
+    };
+    // (Several files, comma-separated: one per course. A race takes the one for its course, or else the one
+    // that passes nearest its start; with none for the course and none near, it follows a computer driver.)
+    static const std::vector<Path> paths = [] {
+        std::vector<Path> all;
         for (std::string names = name; !names.empty();) {
             const size_t comma = names.find(',');
             const std::string one = names.substr(0, comma);
             names = comma == std::string::npos ? "" : names.substr(comma + 1);
-            std::vector<Point> out;
+            if (one == "follow") continue;  // (no file: follow kart 1 on every course)
+            Path out;
             FILE* f = std::fopen(one.c_str(), "r");
             if (!f) rt::fatal(nullptr, "MKDD_PILOT: can't read %s", one.c_str());
-            for (Point p; std::fscanf(f, "%f %f", &p.x, &p.z) == 2;) out.push_back(p);
+            if (std::fscanf(f, " # course %x", &out.course) != 1) out.course = 0, std::rewind(f);
+            for (Point p; std::fscanf(f, "%f %f", &p.x, &p.z) == 2;) out.points.push_back(p);
             std::fclose(f);
-            if (out.size() < 8) rt::fatal(nullptr, "MKDD_PILOT: %s holds no path", one.c_str());
+            if (out.points.size() < 8) rt::fatal(nullptr, "MKDD_PILOT: %s holds no path", one.c_str());
             all.push_back(std::move(out));
         }
         return all;
     }();
+    // Following: the positions the computer driver in kart 1 passed through this race, every 10 frames.
+    static std::vector<Point> trail;
+    static bool following = false;
+    static uint32_t trail_frames = 0;
     static size_t course = 0;
     static const float sign = [] { const char* e = std::getenv("MKDD_PILOT_SIGN"); return e && *e == '-' ? -1.0f : 1.0f; }();
     static float last_x = 0, last_z = 0, heading_x = 0, heading_z = 0;
@@ -209,22 +225,40 @@ void pilot_status(uint32_t status) {
         return;
     }
     if (racing && (x - last_x) * (x - last_x) + (z - last_z) * (z - last_z) > 2000.0f * 2000.0f) racing = false;  // put somewhere else: a restart
-    if (!racing) {  // a new race: the course whose path passes nearest
+    if (!racing) {  // a new race: the path for its course, else the one passing nearest, else follow kart 1
+        const uint32_t id = rt::peek32(kRaceCourse);
         float best = 1e30f;
+        following = true;
         for (size_t c = 0; c < paths.size(); ++c)
-            for (const Point& p : paths[c])
-                if (const float d = (p.x - x) * (p.x - x) + (p.z - z) * (p.z - z); d < best) best = d, course = c;
+            if (paths[c].course && paths[c].course == id) course = c, following = false, best = 0;
+        for (size_t c = 0; c < paths.size() && best > 0; ++c)
+            for (const Point& p : paths[c].points)
+                if (const float d = (p.x - x) * (p.x - x) + (p.z - z) * (p.z - z); !paths[c].course && d < best) best = d, course = c;
+        if (best > 0 && best < 800.0f * 800.0f) following = false;
+        trail.clear();
+        trail_frames = 0;
+        rt::log("pilot: a race on course %X: %s", id, following ? "no path for it, following kart 1" : "along a recorded path");
     }
-    const std::vector<Point>& path = paths[course];
+    if (following && trail_frames++ % 10 == 0) {
+        float fx, fz;
+        if (kart_position(1, fx, fz) &&
+            (trail.empty() || (fx - trail.back().x) * (fx - trail.back().x) + (fz - trail.back().z) * (fz - trail.back().z) > 50.0f * 50.0f))
+            trail.push_back({fx, fz});
+    }
+    if (following && trail.empty()) return;
+    const std::vector<Point>& path = following ? trail : paths[course].points;
+    const size_t size = path.size();
     const auto distance2 = [&](size_t i) { return (path[i].x - x) * (path[i].x - x) + (path[i].z - z) * (path[i].z - z); };
-    if (!racing) {  // a new race: wherever the kart is on the path
+    // (A recorded path is a closed lap; the trail is open, ending where kart 1 is now.)
+    const auto ahead = [&](size_t n) { return following ? std::min(nearest + n, size - 1) : (nearest + n) % size; };
+    if (!racing) {  // a new race: wherever the kart is on the path (following: the trail's start)
         nearest = 0;
-        for (size_t i = 1; i < path.size(); ++i)
+        for (size_t i = 1; i < size && !following; ++i)
             if (distance2(i) < distance2(nearest)) nearest = i;
         heading_x = heading_z = 0;
     } else {  // along from where it was, never back
         for (size_t step = 1; step <= 6; ++step)
-            if (distance2((nearest + step) % path.size()) < distance2(nearest)) nearest = (nearest + step) % path.size(), step = 0;
+            if (distance2(ahead(step)) < distance2(nearest)) nearest = ahead(step), step = 0;
         const float dx = x - last_x, dz = z - last_z;
         if (dx * dx + dz * dz > 1.0f && !reversing) heading_x = dx, heading_z = dz;  // (not while backing out)
     }
@@ -247,7 +281,7 @@ void pilot_status(uint32_t status) {
             reversing = 90;
         mark_x = x, mark_z = z, since_mark = 0;
     }
-    const Point& target = path[(nearest + 4) % path.size()];
+    const Point& target = path[ahead(4)];
     const float tx = target.x - x, tz = target.z - z;
     if (heading_x == 0 && heading_z == 0) return;  // not moving yet: straight on
     const float angle = std::atan2(heading_x * tz - heading_z * tx, heading_x * tx + heading_z * tz);

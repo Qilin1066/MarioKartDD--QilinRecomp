@@ -91,10 +91,16 @@ addresses are the supported build's.
 - `MKDD_PILOT_STEPS=<steps>`: plays port 1 by those values instead of the clock, since menus come up seconds
   earlier or later from run to run and a race ends when it ends (`MKDD_INPUT` is then ignored for port 1; ports 2
   to 4 keep their scripts). `value=n:presses;...`, taken in order; `pilot.cpp` has the whole syntax.
-- `MKDD_PILOT=<file>[,<file>...]` steers port 1's kart along a path of positions (one file per course; a race
-  takes the one that passes its start), backing out when stuck; with steps, only during a step that drives (`~`).
-  `MKDD_PILOT_RECORD=<file>:<kart>` writes a kart's positions every 10 frames: kart 1 in a Grand Prix is one of the
-  game's own drivers (a path to follow), kart 2 in a time trial is a loaded ghost.
+- `MKDD_PILOT=<file>[,<file>...]` steers port 1's kart along a path of positions (one file per course: one whose
+  first line is `# course <hex>` is taken for that ECourseID, read at `803CB6A8`; one without, for the race whose
+  start it passes near), backing out when stuck; with steps, only during a step that drives (`~`). A race with no
+  path for its course follows the computer driver in kart 1 live, along the trail it leaves (`follow` instead of
+  the files: on every course), so a cup never met before is driven in one run while it is recorded.
+  `MKDD_PILOT_RECORD=<file>:<kart>` writes a kart's positions every 10 frames, each race headed `# race course
+  <hex>`: kart 1 in a Grand Prix is one of the game's own drivers (a path to follow), kart 2 in a time trial is a
+  loaded ghost.
+- `MKDD_CARD_PULL_AT=<n>[:<seconds>]` (`card.cpp`): the card is pulled out halfway through the run's nth
+  `CARDWrite` (its folder renamed to `card-a.pulled`), and put back that many seconds later if given.
 
 With these a run goes from boot through the title and menus into a Grand Prix (one player, two in one kart, two
 or four on a split screen), a two-player Balloon Battle, through a whole cup, and through a whole time trial to
