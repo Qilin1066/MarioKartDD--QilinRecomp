@@ -30,6 +30,7 @@ struct State {
     // page from lo, then one per page of the low range).
     uint32_t lo = 0, hi = 0;  // hi == 0: unchecked
     uint32_t low = 0;
+    uint32_t extra = 0, extra_size = 0;  // one more range (the locked cache), not tracked in `dirty`
     bool fault = false;
     uint32_t fault_at = 0;
     uint8_t* dirty = nullptr;

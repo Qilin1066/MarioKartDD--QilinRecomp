@@ -13,8 +13,12 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#if defined(_MSC_VER) && !defined(__clang__) && defined(__AVX2__)
+#if defined(_MSC_VER) && !defined(__clang__) && (defined(__AVX2__) || defined(_M_X64))
 #include <immintrin.h>  // fused(): MSVC's std::fma is a call even with /arch:AVX2
+#include <intrin.h>     // __cpuid
+#endif
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__) && !defined(__FMA__)
+#include <cpuid.h>      // fused(): is the FMA instruction there?
 #endif
 
 // The lifted code's hottest helpers are forced inline: in a large lifted
@@ -229,20 +233,21 @@ constexpr uint64_t kQuiet = 0x0008000000000000ull, kDefaultNan = 0x7FF8000000000
 
 inline uint64_t bits(double d) { return std::bit_cast<uint64_t>(d); }
 inline double from_bits(uint64_t b) { return std::bit_cast<double>(b); }
-inline bool is_nan(double d) { return (bits(d) & ~kSign) > kExp; }
+// (Compares, not bit tests, wherever the two say the same: MSVC takes a double's bits through memory.)
+QILIN_INLINE bool is_nan(double d) { return d != d; }
 inline double quiet(double d) { return from_bits(bits(d) | kQuiet); }
 
 // A NaN result: the first NaN operand, made quiet, else the default NaN.
 inline double nan2(double a, double b) { return is_nan(a) ? quiet(a) : is_nan(b) ? quiet(b) : from_bits(kDefaultNan); }
 inline double nan3(double a, double b, double c) { return is_nan(a) || is_nan(b) ? nan2(a, b) : is_nan(c) ? quiet(c) : from_bits(kDefaultNan); }
 
-// FPSCR[NI]: a subnormal double result is a signed zero.
-inline double flush(double d) { return (bits(d) & kExp) ? d : from_bits(bits(d) & kSign); }
+// FPSCR[NI]: a subnormal double result is a signed zero (d * 0.0: a zero of d's sign).
+QILIN_INLINE double flush(double d) { return std::fabs(d) < 0x1p-1022 ? d * 0.0 : d; }
 
 // Rounding to single precision under NI: anything below the smallest normal
 // single before rounding becomes a signed zero.
-inline double single(double v) {
-    if ((bits(v) & ~kSign) < 0x3810000000000000ull) return from_bits(bits(v) & kSign);
+QILIN_INLINE double single(double v) {
+    if (std::fabs(v) < 0x1p-126) return v * 0.0;  // (a zero of v's sign)
     return static_cast<double>(static_cast<float>(v));
 }
 
@@ -260,28 +265,54 @@ inline double round25(double d) {
 }
 
 // a * b + c with one rounding: the FMA instruction where the build has it
-// (GCC and Clang inline std::fma then; MSVC needs the intrinsic).
+// (GCC and Clang inline std::fma then; MSVC needs the intrinsic). An x86-64
+// build for every CPU asks the CPU once instead and uses the instruction where
+// it is there: the library's fma is a call at best, and software in MinGW's
+// (80 ns against 5, measured), which is what a Windows player's build has.
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(__FMA__) && !(defined(_MSC_VER) && !defined(__clang__) && defined(__AVX2__))
+#define QILIN_FMA_AT_RUN_TIME 1
+#if defined(_MSC_VER) && !defined(__clang__)
+inline bool detect_fma() {
+    int r[4];
+    __cpuid(r, 1);
+    if (!(r[2] & (1 << 12)) || !(r[2] & (1 << 27)) || !(r[2] & (1 << 28))) return false;  // FMA, OSXSAVE, AVX
+    return (_xgetbv(0) & 6) == 6;                                                         // the OS keeps the registers
+}
+inline double fma_instruction(double a, double b, double c) { return _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(a), _mm_set_sd(b), _mm_set_sd(c))); }
+#else
+inline bool detect_fma() {  // (cpuid itself: not every runtime library fills in __builtin_cpu_supports)
+    unsigned a, b, c, d;
+    if (!__get_cpuid(1, &a, &b, &c, &d) || !(c & (1u << 12)) || !(c & (1u << 27)) || !(c & (1u << 28))) return false;  // FMA, OSXSAVE, AVX
+    __asm__("xgetbv" : "=a"(a), "=d"(d) : "c"(0));
+    return (a & 6) == 6;  // the OS keeps the registers
+}
+[[gnu::target("fma")]] inline double fma_instruction(double a, double b, double c) { return __builtin_fma(a, b, c); }
+#endif
+inline const bool g_fma = detect_fma();
+#endif
 QILIN_INLINE double fused(double a, double b, double c) {
-#if defined(_MSC_VER) && !defined(__clang__) && defined(__AVX2__)
+#if defined(QILIN_FMA_AT_RUN_TIME)
+    return g_fma ? fma_instruction(a, b, c) : std::fma(a, b, c);
+#elif defined(_MSC_VER) && !defined(__clang__) && defined(__AVX2__)
     return _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(a), _mm_set_sd(b), _mm_set_sd(c)));
 #else
     return std::fma(a, b, c);
 #endif
 }
 
-inline double add(double a, double b) {
+QILIN_INLINE double add(double a, double b) {
     const double r = a + b;
     return is_nan(r) ? nan2(a, b) : r;
 }
-inline double sub(double a, double b) {
+QILIN_INLINE double sub(double a, double b) {
     const double r = a - b;
     return is_nan(r) ? nan2(a, b) : r;
 }
-inline double mul(double a, double b) {
+QILIN_INLINE double mul(double a, double b) {
     const double r = a * b;
     return is_nan(r) ? nan2(a, b) : r;
 }
-inline double div(double a, double b) {
+QILIN_INLINE double div(double a, double b) {
     const double r = a / b;
     return is_nan(r) ? nan2(a, b) : r;
 }
@@ -434,7 +465,8 @@ inline double estimate_rsqrt(double v) {
 enum class Quant : unsigned { kFloat = 0, kU8 = 4, kU16 = 5, kS8 = 6, kS16 = 7 };
 inline bool quant_valid(unsigned type) { return type == 0 || type >= 4; }
 inline unsigned quant_size(unsigned type) { return type == 0 ? 4 : (type == 4 || type == 6) ? 1 : 2; }
-inline float pow2f(int e) { return std::ldexp(1.0f, e); }
+// 2^e as a float, for a scale's -32..32: the exponent field, no library call.
+inline float pow2f(int e) { return std::bit_cast<float>(static_cast<uint32_t>(127 + e) << 23); }
 inline int signed_scale(unsigned s) { return s < 32 ? static_cast<int>(s) : static_cast<int>(s) - 64; }
 
 // One loaded element (raw is the big-endian value read, zero-extended) to its double.
@@ -506,8 +538,8 @@ QILIN_INLINE bool to_f_exact(double d, float& f) {
 // number above the smallest normal single (at it, the value before rounding
 // may have been below it: a zero in NI mode).
 QILIN_INLINE bool ordinary(float r) {
-    const uint32_t m = fbits(r) & 0x7FFFFFFFu;
-    return m == 0 || m - 0x00800001u < 0x7F800000u - 0x00800001u;
+    const float m = std::fabs(r);
+    return m == 0.0f || (m > 0x1p-126f && m <= 0x1.fffffep127f);
 }
 QILIN_COLD_OUTLINE float add_s_rare(float a, float b) { return to_f(single(add(to_d(a), to_d(b)))); }
 QILIN_COLD_OUTLINE float sub_s_rare(float a, float b) { return to_f(single(sub(to_d(a), to_d(b)))); }
@@ -631,6 +663,41 @@ QILIN_INLINE void psq_store(Cpu& c, uint32_t ea, unsigned i, bool w, double ps0,
 }
 
 // Single mode's psq_l and psq_st (fp's single mode, above): floats move as their bits.
+// The quantised types in floats throughout: an integer times a power of two is
+// the same float whichever way it's reached (never a denormal: the scale stops
+// at 2^-32), and a float's own value is what the double helpers scale too. A
+// movie's decoder loads every DCT coefficient this way.
+QILIN_OUTLINE void psq_load_quantized_s(Cpu& c, uint32_t ea, unsigned i, bool w, float& ps0, float& ps1) {
+    const uint32_t g = c.gqr[i];
+    const unsigned type = (g >> 16) & 7;
+    const float k = fp::pow2f(-fp::signed_scale((g >> 24) & 63));
+    float v0, v1 = 1.0f;
+    switch (type) {
+    case 4:
+        v0 = static_cast<float>(read8(c, ea)) * k;
+        if (!w) v1 = static_cast<float>(read8(c, ea + 1)) * k;
+        break;
+    case 5:
+        v0 = static_cast<float>(read16(c, ea)) * k;
+        if (!w) v1 = static_cast<float>(read16(c, ea + 2)) * k;
+        break;
+    case 6:
+        v0 = static_cast<float>(static_cast<int8_t>(read8(c, ea))) * k;
+        if (!w) v1 = static_cast<float>(static_cast<int8_t>(read8(c, ea + 1))) * k;
+        break;
+    case 7:
+        v0 = static_cast<float>(static_cast<int16_t>(read16(c, ea))) * k;
+        if (!w) v1 = static_cast<float>(static_cast<int16_t>(read16(c, ea + 2))) * k;
+        break;
+    default: {  // an invalid type: traps, as the double version does
+        double d0, d1;
+        psq_load_quantized(c, ea, i, w, d0, d1);
+        v0 = fp::to_f(d0), v1 = fp::to_f(d1);
+    }
+    }
+    ps0 = v0;
+    ps1 = v1;
+}
 QILIN_INLINE void psq_load_s(Cpu& c, uint32_t ea, unsigned i, bool w, float& ps0, float& ps1) {
     if (((c.gqr[i] >> 16) & 7) == 0) [[likely]] {
         const float v0 = fp::ffrom(read32(c, ea));
@@ -639,10 +706,45 @@ QILIN_INLINE void psq_load_s(Cpu& c, uint32_t ea, unsigned i, bool w, float& ps0
         ps1 = v1;
         return;
     }
-    double d0, d1;
-    psq_load_quantized(c, ea, i, w, d0, d1);
-    ps0 = fp::to_f(d0);
-    ps1 = fp::to_f(d1);
+    if (((c.gqr[i] >> 16) & 7) == 7) {  // s16: the SDK's "fast cast" of a short, and a movie's DCT coefficients
+        const float k = fp::pow2f(-fp::signed_scale((c.gqr[i] >> 24) & 63));
+        const float v0 = static_cast<float>(static_cast<int16_t>(read16(c, ea))) * k;
+        const float v1 = w ? 1.0f : static_cast<float>(static_cast<int16_t>(read16(c, ea + 2))) * k;
+        ps0 = v0;
+        ps1 = v1;
+        return;
+    }
+    psq_load_quantized_s(c, ea, i, w, ps0, ps1);
+}
+// One float to store as a quantised integer: scaled, clamped, truncated (fp::quantize's rule).
+QILIN_INLINE uint32_t quantize_s(float value, float k, float lo, float hi) {
+    const float v = value * k;
+    if (v != v) return 0;
+    return static_cast<uint32_t>(static_cast<int32_t>(v < lo ? lo : v > hi ? hi : v));
+}
+QILIN_OUTLINE void psq_store_quantized_s(Cpu& c, uint32_t ea, unsigned i, bool w, float ps0, float ps1) {
+    const uint32_t g = c.gqr[i];
+    const unsigned type = g & 7;
+    const float k = fp::pow2f(fp::signed_scale((g >> 8) & 63));
+    switch (type) {
+    case 4:
+        write8(c, ea, quantize_s(ps0, k, 0.0f, 255.0f));
+        if (!w) write8(c, ea + 1, quantize_s(ps1, k, 0.0f, 255.0f));
+        break;
+    case 5:
+        write16(c, ea, quantize_s(ps0, k, 0.0f, 65535.0f));
+        if (!w) write16(c, ea + 2, quantize_s(ps1, k, 0.0f, 65535.0f));
+        break;
+    case 6:
+        write8(c, ea, quantize_s(ps0, k, -128.0f, 127.0f));
+        if (!w) write8(c, ea + 1, quantize_s(ps1, k, -128.0f, 127.0f));
+        break;
+    case 7:
+        write16(c, ea, quantize_s(ps0, k, -32768.0f, 32767.0f));
+        if (!w) write16(c, ea + 2, quantize_s(ps1, k, -32768.0f, 32767.0f));
+        break;
+    default: psq_store_quantized(c, ea, i, w, fp::to_d(ps0), w ? 0.0 : fp::to_d(ps1));  // an invalid type: traps
+    }
 }
 QILIN_INLINE uint32_t psq_bits_s(float f) {  // a value in the single-subnormal range is stored as a signed zero
     const uint32_t b = fp::fbits(f);
@@ -654,7 +756,7 @@ QILIN_INLINE void psq_store_s(Cpu& c, uint32_t ea, unsigned i, bool w, float ps0
         if (!w) write32(c, ea + 4, psq_bits_s(ps1));
         return;
     }
-    psq_store_quantized(c, ea, i, w, fp::to_d(ps0), w ? 0.0 : fp::to_d(ps1));
+    psq_store_quantized_s(c, ea, i, w, ps0, ps1);
 }
 
 }  // namespace qilin::rt

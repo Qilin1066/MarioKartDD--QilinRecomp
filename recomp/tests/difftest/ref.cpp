@@ -17,6 +17,7 @@ int32_t exts16(uint32_t v) { return static_cast<int32_t>(static_cast<int16_t>(st
 // Is [a, a + n) memory? (Always, unless the state has bounds: ref.hpp.)
 bool backed(State& s, uint32_t a, unsigned n) {
     if (s.hi == 0 || (a >= s.lo && a <= s.hi - n) || (a < s.low && a <= s.low - n)) return true;
+    if (a - s.extra < s.extra_size && a - s.extra <= s.extra_size - n) return true;
     s.fault = true;
     s.fault_at = a;
     return false;
@@ -30,7 +31,7 @@ uint32_t load(State& s, uint32_t a, unsigned n) {
 void store(State& s, uint32_t a, uint32_t v, unsigned n) {
     if (!backed(s, a, n)) return;
     for (unsigned k = 0; k < n; ++k) s.mem[a + k] = static_cast<uint8_t>(v >> (8 * (n - 1 - k)));
-    if (s.dirty) {
+    if (s.dirty && a - s.extra >= s.extra_size) {
         const uint32_t first = a < s.low ? ((s.hi - s.lo) >> 12) + (a >> 12) : (a - s.lo) >> 12;
         s.dirty[first] = s.dirty[first + (((a & 4095) + n - 1) >> 12)] = 1;
     }
