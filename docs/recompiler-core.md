@@ -404,8 +404,9 @@ measure for it is `qilin_game_difftest --thp` (above), not a run.
   them out of the hot code's way) and, under Clang, `minsize`. Neither profile (the race, the title) has a single
   sample in a twin, and they were a quarter of the lifted code (12.9 MB of 51 MB in `mkdd.exe`).
 - **ARM64 forms**: `ordinary()` tests the exponent field (`ubfx`, small immediates) instead of the x86 form's two
-  32-bit constants, which ARM64 rebuilt with `mov`/`movk` at every check (780 `movk` in the THP row function); it sends
-  exponent 1 (below 2^-125) the careful way too. `is_slow_n` tests the last byte only (two small immediates instead of
+  32-bit constants, which ARM64 rebuilt with `mov`/`movk` at every check (780 `movk` in the THP row function); exponent 1
+  (below 2^-125) is tested last, so the answer is the x86 form's exactly. (A first version sent all of exponent 1 the
+  careful way, which gives the same results but fails the unit test that pins `ordinary` itself: caught on ARM64 CI.) `is_slow_n` tests the last byte only (two small immediates instead of
   a constant pair); an access from the very end of the slow range into the locked cache then faults on unbacked memory
   where the hooks would have stopped the runtime.
 - **`to_f_exact`** (single mode's entry checks and fetches after calls, 2,341 sites) is the host's conversion and a
@@ -413,8 +414,7 @@ measure for it is `qilin_game_difftest --thp` (above), not a run.
   way, out of line.
 
 **Checked:**
-- exhaustively: ARM64's `ordinary` against the x86 form on all 2^32 floats (it never accepts what the x86 form
-  rejects; it rejects 16,777,214 more, exponent 1); both `is_slow_n` forms for 8 bytes against the definition on all
+- exhaustively: ARM64's `ordinary` against the x86 form on all 2^32 floats (the same answer for every one); both `is_slow_n` forms for 8 bytes against the definition on all
   2^32 addresses (x86 exact; ARM64 differs only at `DFFFFFF9`-`DFFFFFFF`); `to_f_exact` against the bitwise form on
   17.2 billion doubles (every single's double, its neighbours either side, 2^32 random ones): 0 differences;
 - the unit tests (`qilin_tests`, the sync texts' expectations updated: r3 and r4 aren't stored around the leaf call
@@ -425,11 +425,25 @@ measure for it is `qilin_game_difftest --thp` (above), not a run.
 - zig's Clang for `x86_64-linux-gnu` and `aarch64-linux-gnu`, `-Wall -Wextra -Wpedantic -Wshadow -Werror`: the changed
   sources and lifted files (`lifted_023.cpp`, the THP functions); MSVC `/W4 /permissive-` on `lifted_012.cpp`: no warning.
 
+**What is left in the movie:** the row function is 81% of a decoded frame (the difftest's own sampler, `--reps
+100`), and in it the ordinary-result checks and 38 float locals for 16 x86 vector registers (spilled). The next lever
+is keeping a paired single's two halves in one 2-lane vector (one operation and one check for both); a larger change
+to the lifter, not started. Also untried here: GCC on ARM64 (none on this PC), and whether a CPU without FMA should
+keep the run-time choice, which emits both forms of every single multiply-add.
+
+MSVC gains less on the movie than Clang does: it has no `preserve_all`, and its Windows convention keeps
+xmm6-xmm15 anyway, so its floats spilled less to begin with. The attract runs compared the core build of the same
+lift (`e4b5d52`) with this one (`work/cpu2/bench.sh`); the race varies more between runs than the title does.
+
 **Measured** (Ryzen 7 5800X; Clang is zig's for `x86_64-windows-gnu -O2`, the player kit's compiler):
 
 | | Before | After |
 |---|---|---|
 | THP decode, Clang (`--thp play1.thp --frames 3 --reps 30`) | 3.99 ms a frame | **3.38 ms** (-15%) |
+| THP decode, MSVC 19.44 (two runs each) | 4.63, 4.74 ms | **4.45, 4.43 ms** (-5%) |
+| `mkdd.exe`, MSVC | 58.5 MB | **43.8 MB** (-25%) |
+| Attract run, title (work less GPU wait; two runs each, one at a time) | 7.46, 7.49 ms | **7.29, 7.28 ms** |
+| Attract run, demo race | 4.44, 5.24 ms | **4.10, 4.21 ms** |
 | `qilin_game_difftest.exe`, Clang (nearly all lifted code) | 58.8 MB | **44.5 MB** (-24%) |
 | THP row function (`800F4E50`), x86-64 / ARM64 (Linux targets) | 367 / 215 KB | **303 / 169 KB** |
 | `PSMTXConcat`, x86-64 / ARM64 | 22.9 / 9.9 KB | **13.6 / 6.1 KB** |
