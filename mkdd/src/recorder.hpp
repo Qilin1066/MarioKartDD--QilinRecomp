@@ -27,6 +27,11 @@ void cp_changed();
 // XF memory or registers [address, address + count) changed: the next draw
 // snapshots what that affects.
 void xf_changed(uint32_t address, uint32_t count);
+// A position matrix was loaded: twelve words at XF `address` (now in `words`),
+// by `tag` (gx.hpp's Load; 0 unknown) under the view matrix `view` (twelve
+// floats; null: the one last given, as for an indexed load, which comes from
+// the model whose shapes were just tagged). Besides xf_changed.
+void matrix_loaded(uint32_t address, const uint32_t* words, uint32_t tag, const float* view);
 // A BP register was written (the TEV colour registers latch by which half is written).
 // `changed`: the value differs from before (else only commands it triggers matter).
 void bp_written(uint32_t reg, uint32_t value, bool changed = true);

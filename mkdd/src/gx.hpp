@@ -149,6 +149,37 @@ struct Sampler {
     bool operator==(const Sampler&) const = default;
 };
 
+// ---- for pictures between two frames (interp.hpp, docs/graphics.md)
+//
+// Position matrices are loaded into ten slots (XF rows 0, 3, ... 27: GX_PNMTX0-9).
+// Every load of one in a frame is recorded with who loaded it (its tag: the J3D
+// shape packet, or GXLoadPosMtxImm's caller with bit 1 set, or for an indexed
+// load the matrix's own address with bit 0 set; 0: unknown) and the camera's
+// view matrix as it was then, so the same load can be found in the frame before
+// and the two blended.
+constexpr unsigned kMatrixSlots = 10;
+constexpr uint32_t kNoLoad = 0xFFFFFFFFu;
+constexpr uint16_t kNoView = 0xFFFFu;
+struct Load {
+    uint32_t tag;
+    uint16_t slot, view;  // view: index into the frame's views (kNoView: not known)
+    float mv[12];         // the matrix loaded (model and view), three rows of four
+};
+// A camera's view matrix (j3dSys's when a tagged matrix was loaded), and the
+// perspective projection first drawn with under it (XF 0x1020-0x1025).
+struct View {
+    float m[12];
+    float projection[6];
+    bool has_projection;
+};
+// Beside each State: the load each matrix slot holds (index into the frame's
+// loads; kNoLoad: loaded in an earlier frame or never) and the view current when
+// the state was made.
+struct StateInfo {
+    uint32_t load[kMatrixSlots];
+    uint16_t view;
+};
+
 struct Draw {
     uint32_t state;        // index into the frame's states
     uint32_t has;          // Has bits
@@ -164,7 +195,13 @@ struct Draw {
     int32_t textures[8];   // texture ids (-1: none)
     Sampler samplers[8];
     uint32_t primitive = 0;  // the decoder's serial number of the primitive it came from (MKDD_DFF's .prims)
+    uint32_t tag = 0;        // who loaded the position matrix it draws with (Load::tag; of a joined draw, its first primitive's)
 };
+// Who loaded a draw's position matrix: a J3D shape packet's address, the
+// address GXLoadPosMtxImm was called from with bit 1 set (0x800C....2), an
+// indexed load's source address with bit 0 set, or 0 when not known (no tagged
+// loader in the build, or a matrix left from an earlier frame).
+inline uint32_t draw_tag(const Draw& d) { return d.tag; }
 
 // An EFB copy: to a texture in guest memory, or to an external frame buffer.
 struct Copy {
@@ -229,6 +266,9 @@ struct Frame {
     std::vector<SmallVertex, Unfilled<SmallVertex>> small;  // draws with PipelineKey::small_vertices index these
     std::vector<uint32_t, Unfilled<uint32_t>> indices;
     std::vector<State> states;
+    std::vector<StateInfo> state_info;  // one for each state
+    std::vector<Load> loads;
+    std::vector<View> views;
     std::vector<Draw> draws;
     std::vector<Copy> copies;
     std::vector<Packet> packets;
@@ -240,6 +280,7 @@ struct Frame {
     // member must be reset here too.
     void clear() {
         vertices.clear(), small.clear(), indices.clear(), states.clear(), draws.clear(), copies.clear(), packets.clear();
+        state_info.clear(), loads.clear(), views.clear();
         textures.clear(), released.clear();
         alpha_target = true;
         captured = false;

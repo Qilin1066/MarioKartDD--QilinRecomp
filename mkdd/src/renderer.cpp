@@ -15,6 +15,7 @@
 //
 // Runtime code: no std::format (macOS 10.15).
 #include "renderer.hpp"
+#include "interp.hpp"
 #include "recorder.hpp"
 #include "priority.hpp"
 
@@ -207,6 +208,24 @@ struct Renderer::Impl {
     Image efb_other;  // made at the first change of pixel format: convert() draws into it, and the two swap
     Slot slots[2];
     unsigned slot = 0;
+    // Pictures between frames (render_held, render_between): the two frames
+    // held, how the newer one's draws were drawn (to draw them again), an EFB
+    // of their own, command buffers and state buffers of their own, and three
+    // pictures in turn (one may be on screen while the next is drawn).
+    struct Replay {
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkDescriptorSet textures = VK_NULL_HANDLE;
+    };
+    std::unique_ptr<gx::Frame> held, held_prev;
+    std::vector<Replay> replay;  // one for each of the held frame's draws
+    bool keep_replay = false, can_blend = false;
+    interp::Blender blender;
+    gx::Copy between_clear{};    // the clearing copy the frame before ended with
+    Slot between[2];
+    unsigned between_slot = 0, between_next = 0;
+    Image efb_between, efb_depth_between, between_xfb[3];
+    bool between_timed[2] = {};
+    uint64_t between_gpu_ns = 0, between_gpu_timed = 0;
     // GPU time per frame: two timestamps a slot, where the queue has them.
     VkQueryPool timestamps = VK_NULL_HANDLE;
     double ns_per_tick = 0;
@@ -363,13 +382,14 @@ struct Renderer::Impl {
             if (bits && gpu.properties.limits.timestampPeriod > 0) {
                 VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-                qi.queryCount = 4;
+                qi.queryCount = 8;  // two a slot, and two for each of the slots pictures between frames use
                 check(vkCreateQueryPool(gpu.device, &qi, nullptr, &timestamps), "vkCreateQueryPool");
                 ns_per_tick = gpu.properties.limits.timestampPeriod;
                 tick_mask = bits >= 64 ? ~uint64_t{0} : (uint64_t{1} << bits) - 1;
             }
         }
-        for (Slot& s : slots) {
+        for (Slot* each : {&slots[0], &slots[1], &between[0], &between[1]}) {
+            Slot& s = *each;
             VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
             pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
             pci.queueFamilyIndex = gpu.family;
@@ -1180,13 +1200,16 @@ struct Renderer::Impl {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, copy_layout, 0, 1, &set, 0, nullptr);
     }
 
-    void copy(VkCommandBuffer cmd, Slot& s, const gx::Copy& c) {
+    // `picture`: for a picture between frames (render_between): a texture copy only
+    // clears, and the copy to the frame buffer goes to that picture.
+    void copy(VkCommandBuffer cmd, Slot& s, const gx::Copy& c, Image* picture = nullptr) {
+        if (picture && !c.to_xfb) return clear_after(cmd, c);
         vkCmdEndRendering(cmd);
         barrier(cmd);
         const uint32_t w = std::max(1u, c.dest_width * scale), h = std::max(1u, c.dest_height * scale);
         Image* target;
         if (c.to_xfb) {
-            Image& x = xfbs[c.dest & 0x1FFFFFFFu];
+            Image& x = picture ? *picture : xfbs[c.dest & 0x1FFFFFFFu];
             if (x.width != w || x.height != h) {
                 if (x.image) s.garbage.push_back({x, kXfb, 0});
                 x = obtain(w, h, 1, kXfb);
@@ -1247,6 +1270,10 @@ struct Renderer::Impl {
         if (c.to_memory && !c.to_xfb) read_back(cmd, s, c, *target);
         barrier(cmd);
         begin_efb(cmd);
+        clear_after(cmd, c);
+    }
+    // What a copy clears of the EFB once it is made (inside the EFB's rendering).
+    void clear_after(VkCommandBuffer cmd, const gx::Copy& c) {
         if (c.clear && (c.clear_color || c.clear_alpha || c.clear_depth)) {
             const unsigned mask = (c.clear_color ? 7u : 0u) | (c.clear_alpha ? 8u : 0u);
             if (mask == 15u || mask == 0u) {
@@ -1415,6 +1442,12 @@ struct Renderer::Impl {
     void render(gx::Frame& f) {
         collect_specialized();
         poll_readbacks();  // the last frame's, if the GPU is done with it
+        // Pictures between frames read the slots' buffers, sets and images: none may be left drawing.
+        if (held) {
+            const VkFence fences[2] = {between[0].fence, between[1].fence};
+            check(vkWaitForFences(gpu.device, 2, fences, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+        }
+        if (keep_replay) replay.assign(f.draws.size(), Replay{});
         slot = (slot + 1) % 2;
         Slot& s = slots[slot];
         const uint64_t w0 = gx::now_ns();  // the GPU finishing the frame before last
@@ -1604,6 +1637,7 @@ struct Renderer::Impl {
                 std::memcpy(last_textures, d.textures, sizeof last_textures);
                 std::memcpy(last_samplers, d.samplers, sizeof last_samplers);
             }
+            if (keep_replay) replay[pk.index] = {p, bound_textures};
             const float sc = float(scale);
             VkViewport vp{d.viewport[0] * sc, d.viewport[1] * sc, d.viewport[2] * sc, d.viewport[3] * sc,
                           std::clamp(d.viewport[4], 0.0f, 1.0f), std::clamp(d.viewport[5], 0.0f, 1.0f)};
@@ -1702,9 +1736,166 @@ struct Renderer::Impl {
         ++frames;
     }
 
+    // ---- pictures between frames (interp.hpp)
+
+    // The frame just drawn is kept, with the one before it, for render_between.
+    void render_held(std::unique_ptr<gx::Frame> f) {
+        keep_replay = true;
+        render(*f);
+        keep_replay = false;
+        if (held_prev) gx::recycle_frame(std::move(held_prev));
+        held_prev = std::move(held);
+        held = std::move(f);
+        can_blend = false;
+        if (!held_prev || held_prev->copies.empty() || held->copies.empty()) return;
+        // A picture between starts from what the frame started from. That is known
+        // without keeping a copy of the EFB when the frame before ended by clearing
+        // it (this game's always do); otherwise, and where the picture changes its
+        // pixel format in mid-frame, there are no pictures between for this frame.
+        const gx::Copy& last = held_prev->copies.back();
+        if (!last.to_xfb || !last.clear || !last.clear_color || !last.clear_depth || !held->copies.back().to_xfb) return;
+        for (const gx::Packet& pk : held->packets)
+            if (pk.kind == gx::Packet::kConvert) return;
+        between_clear = last;
+        can_blend = blender.pair(*held_prev, *held);
+    }
+
+    // The held frame's picture at `phase` between the frame before (0) and itself
+    // (1): its draws again, into an EFB of their own, with the blended states.
+    // Texture copies aren't made again (the frame's own, made when it was drawn,
+    // are what its draws sample, and what the next frame finds): only what they
+    // clear is cleared. Null when this frame can't be blended; the caller then
+    // shows the frame's own picture.
+    const Image* render_between(float phase) {
+        if (!held || !can_blend) return nullptr;
+        const gx::Frame& f = *held;
+        between_slot ^= 1u;
+        Slot& s = between[between_slot];
+        check(vkWaitForFences(gpu.device, 1, &s.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+        const unsigned q = 4 + 2 * between_slot;
+        if (between_timed[between_slot]) {
+            uint64_t t[2];
+            if (vkGetQueryPoolResults(gpu.device, timestamps, q, 2, sizeof t, t, sizeof t[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+                between_gpu_ns += uint64_t(double((t[1] - t[0]) & tick_mask) * ns_per_tick), ++between_gpu_timed;
+            between_timed[between_slot] = false;
+        }
+        check(vkResetDescriptorPool(gpu.device, s.descriptors, 0), "vkResetDescriptorPool");
+        ensure(s.states, std::max<size_t>(1, f.states.size()) * sizeof(gx::State), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        blender.states(f, phase, static_cast<gx::State*>(s.states.mapped));
+        if (!efb_between.image) {
+            efb_between = Image::create(gpu, efb.width, efb.height, kColor, kEfbUsage);
+            efb_depth_between = Image::create(gpu, efb.width, efb.height, depth_format,
+                                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            one_time([&](VkCommandBuffer c) {
+                host::transition(c, efb_between.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+                host::transition(c, efb_depth_between.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            });
+        }
+        check(vkResetFences(gpu.device, 1, &s.fence), "vkResetFences");
+        check(vkResetCommandBuffer(s.cmd, 0), "vkResetCommandBuffer");
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VkCommandBuffer cmd = s.cmd;
+        check(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer");
+        if (timestamps) {
+            vkCmdResetQueryPool(cmd, timestamps, q, 2);
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, timestamps, q);
+        }
+        VkDescriptorSet states_set = allocate(s, states_layout);
+        VkDescriptorBufferInfo bufi{s.states.buffer, 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wr.dstSet = states_set;
+        wr.descriptorCount = 1;
+        wr.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        wr.pBufferInfo = &bufi;
+        vkUpdateDescriptorSets(gpu.device, 1, &wr, 0, nullptr);
+        // The frame's vertices and indices are where its own drawing left them.
+        const Slot& drawn = slots[slot];
+        between_next = (between_next + 1) % 3;
+        Image& picture = between_xfb[between_next];
+        std::swap(efb, efb_between), std::swap(efb_depth, efb_depth_between);  // (copies and clears go by these)
+        barrier(cmd);
+        begin_efb(cmd);
+        {
+            VkClearAttachment a[2] = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, {}}, {VK_IMAGE_ASPECT_DEPTH_BIT, 0, {}}};
+            for (int i = 0; i < 4; ++i) a[0].clearValue.color.float32[i] = float(between_clear.clear_rgba[i]) / 255.0f;
+            a[1].clearValue.depthStencil = {float(between_clear.clear_z) / 16777216.0f, 0};
+            const VkClearRect r{{{0, 0}, {efb.width, efb.height}}, 0, 1};
+            vkCmdClearAttachments(cmd, 2, a, 1, &r);
+        }
+        VkPipeline bound = VK_NULL_HANDLE;
+        VkDescriptorSet bound_textures = VK_NULL_HANDLE;
+        bool fresh = true;  // nothing set since the pass began or a copy
+        gx::PipelineKey blend_key{};
+        uint8_t bound_small = 0;
+        const float sc = float(scale);
+        for (const gx::Packet& pk : f.packets) {
+            if (pk.kind == gx::Packet::kCopy) {
+                copy(cmd, s, f.copies[pk.index], &picture);
+                bound = VK_NULL_HANDLE, bound_textures = VK_NULL_HANDLE, fresh = true;
+                continue;
+            }
+            const Replay& rp = replay[pk.index];
+            if (!rp.pipeline) continue;  // not drawn in the frame either (an empty viewport or scissor)
+            const gx::Draw& d = f.draws[pk.index];
+            VkRect2D r{{d.scissor[0] * int(scale), d.scissor[1] * int(scale)}, {uint32_t(d.scissor[2]) * scale, uint32_t(d.scissor[3]) * scale}};
+            clamp_rect(r);
+            if (r.extent.width == 0 || r.extent.height == 0) continue;
+            if (rp.pipeline != bound) vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rp.pipeline), bound = rp.pipeline;
+            if (gpu.dynamic_blend && (fresh || std::memcmp(&d.pipeline, &blend_key, sizeof blend_key) != 0))
+                set_dynamic_blend(cmd, d.pipeline), blend_key = d.pipeline;
+            if (fresh || d.pipeline.small_vertices != bound_small) {
+                const VkBuffer buffers[2] = {drawn.vertices.buffer, drawn.vertices.buffer};
+                const VkDeviceSize offsets[2] = {d.pipeline.small_vertices ? small_at : 0, zeros_at};
+                vkCmdBindVertexBuffers(cmd, 0, 2, buffers, offsets);
+                bound_small = d.pipeline.small_vertices;
+            }
+            if (fresh) {
+                vkCmdBindIndexBuffer(cmd, drawn.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gx_layout, 0, 1, &states_set, 0, nullptr);
+            }
+            if (rp.textures != bound_textures)
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gx_layout, 1, 1, &rp.textures, 0, nullptr), bound_textures = rp.textures;
+            // (The dynamic state is set for every draw here: a few hundred a picture once primitives are joined.)
+            const VkViewport vp{d.viewport[0] * sc, d.viewport[1] * sc, d.viewport[2] * sc, d.viewport[3] * sc,
+                                std::clamp(d.viewport[4], 0.0f, 1.0f), std::clamp(d.viewport[5], 0.0f, 1.0f)};
+            vkCmdSetViewport(cmd, 0, 1, &vp);
+            vkCmdSetScissor(cmd, 0, 1, &r);
+            vkCmdSetCullMode(cmd, VkCullModeFlags(d.cull));
+            vkCmdSetDepthTestEnable(cmd, d.depth_test);
+            vkCmdSetDepthWriteEnable(cmd, d.depth_write);
+            vkCmdSetDepthCompareOp(cmd, VkCompareOp(d.depth_func));
+            float point = 1.0f;
+            if (d.pipeline.topology == 1 && gpu.wide_lines) vkCmdSetLineWidth(cmd, std::clamp(float(d.line_width) / 6.0f * sc, 1.0f, gpu.max_line_width));
+            else if (d.pipeline.topology == 2) point = std::clamp(float(d.point_size) / 6.0f * sc, 1.0f, gpu.max_point_size);
+            Push push{d.state, d.has, 0u, sc, point};
+            const auto reads_src_alpha = [](uint8_t factor) { return factor == VK_BLEND_FACTOR_SRC_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; };
+            if (d.pipeline.blend && (reads_src_alpha(d.pipeline.src) || reads_src_alpha(d.pipeline.dst))) push.flags |= 1u;
+            if (d.pipeline.logic && !gpu.logic_op) push.flags |= kLogicBlend[d.pipeline.logic - 1u].help << 4;
+            if (true_color) push.flags |= 0x100u;
+            vkCmdPushConstants(cmd, gx_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
+            static constexpr VkPrimitiveTopology kStrip[3] = {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
+                                                              VK_PRIMITIVE_TOPOLOGY_POINT_LIST};
+            vkCmdSetPrimitiveTopology(cmd, d.direct == 2 ? kStrip[d.pipeline.topology] : kTopologyLists[d.pipeline.topology]);
+            if (d.direct) vkCmdDraw(cmd, d.index_count, 1, d.first_index, 0);
+            else vkCmdDrawIndexed(cmd, d.index_count, 1, d.first_index, 0, 0);
+            fresh = false;
+        }
+        vkCmdEndRendering(cmd);
+        std::swap(efb, efb_between), std::swap(efb_depth, efb_depth_between);
+        if (timestamps) {
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, timestamps, q + 1);
+            between_timed[between_slot] = true;
+        }
+        check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
+        submit(s);
+        return picture.image ? &picture : nullptr;
+    }
+
     void destroy() {
         vkDeviceWaitIdle(gpu.device);
-        for (Slot& s : slots) {
+        for (Slot* each : {&slots[0], &slots[1], &between[0], &between[1]}) {
+            Slot& s = *each;
             for (Spare& g : s.garbage) g.image.destroy(gpu);
             s.vertices.destroy(gpu);
             s.indices.destroy(gpu);
@@ -1733,6 +1924,9 @@ struct Renderer::Impl {
         for (VkShaderModule m : gx_frag_stages_early) vkDestroyShaderModule(gpu.device, m, nullptr);
         if (timestamps) vkDestroyQueryPool(gpu.device, timestamps, nullptr);
         efb.destroy(gpu);
+        if (efb_between.image) efb_between.destroy(gpu), efb_depth_between.destroy(gpu);
+        for (Image& x : between_xfb)
+            if (x.image) x.destroy(gpu);
         if (efb_other.image) efb_other.destroy(gpu);
         efb_depth.destroy(gpu);
         white.destroy(gpu);
@@ -1755,6 +1949,19 @@ void Renderer::save_now() {
     impl_->save_now(keys);
 }
 Renderer::~Renderer() { impl_->destroy(); }
+void Renderer::render_held(std::unique_ptr<gx::Frame> frame) {
+    const uint64_t t0 = gx::now_ns();
+    impl_->render_held(std::move(frame));
+    gx::RecorderStats& st = gx::recorder_stats();
+    st.render_ns.fetch_add(gx::now_ns() - t0, std::memory_order_relaxed);
+    st.rendered.fetch_add(1, std::memory_order_relaxed);
+}
+const host::Image* Renderer::render_between(float phase) { return impl_->render_between(phase); }
+const gx::Frame* Renderer::held() const { return impl_->held.get(); }
+const interp::Blender::Counts& Renderer::pairing() const { return impl_->blender.counts(); }
+double Renderer::between_gpu_ms() const {
+    return impl_->between_gpu_timed ? double(impl_->between_gpu_ns) / 1e6 / double(impl_->between_gpu_timed) : 0.0;
+}
 void Renderer::finish_copies() {
     vkDeviceWaitIdle(impl_->gpu.device);
     impl_->poll_readbacks();

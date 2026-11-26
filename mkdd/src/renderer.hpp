@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "gx.hpp"
+#include "interp.hpp"
 #include "qilin/host/vulkan.hpp"
 
 namespace mkdd {
@@ -20,6 +21,21 @@ public:
 
     // Draw a frame's work (submitted to the GPU on return).
     void render(gx::Frame& frame);
+    // For pictures between frames (interp.hpp; docs/graphics.md, "Pictures between frames").
+    // render_held: render(), and the frame is kept (with the one before it; the one before
+    // that goes back to the recorder). Its own picture is xfb()'s as ever.
+    void render_held(std::unique_ptr<gx::Frame> frame);
+    // The held frame's picture at `phase`, above 0 (the frame before it) and up to 1 (itself),
+    // submitted to the GPU on return; in TRANSFER_SRC_OPTIMAL layout like xfb()'s, and good
+    // until the third call after this one. Null when this frame can't be blended (the first
+    // frame, a frame that doesn't start from a cleared EFB, a change of scene): show xfb()'s.
+    // At 1 it draws the frame again as it is, the same picture as xfb()'s: callers show that.
+    const qilin::host::Image* render_between(float phase);
+    // The frame held (the newer), what the pairing of its matrices with the frame before's
+    // found, and the GPU's time for a picture between, averaged over those timed so far.
+    const gx::Frame* held() const;
+    const interp::Blender::Counts& pairing() const;
+    double between_gpu_ms() const;
     // The latest external frame buffer copied to `address` (in
     // TRANSFER_SRC_OPTIMAL layout, sampled usage), or null if there's none.
     const qilin::host::Image* xfb(uint32_t address) const;

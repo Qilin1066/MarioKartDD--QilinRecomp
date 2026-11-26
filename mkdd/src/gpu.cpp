@@ -78,6 +78,44 @@ size_t g_dl_call_at = 0;          // MKDD_DFF: where in the commands the call to
 std::vector<uint8_t> g_fifo;  // bytes written to the pipe, not yet a whole command
 size_t g_fifo_at = 0;
 
+// Tags for position-matrix loads (gpu.hpp's load_position_matrix, tag_matrix_at):
+// the guest's side says where in the stream of bytes sent to the decoder a load
+// begins, who makes it and under which view matrix; the decoder, reaching an XF
+// load at that place, hands them to the recorder with it. A ring between the two
+// threads (one writer, one reader); when it is full a load goes untagged, which
+// only means its draws aren't blended between frames.
+struct MatrixTag {
+    uint64_t at;  // the load command's offset in the stream
+    uint32_t tag;
+    float view[12];
+};
+constexpr size_t kTagRing = 1u << 14;
+MatrixTag g_tag_ring[kTagRing];
+std::atomic<uint64_t> g_tags_written{0}, g_tags_read{0};
+std::atomic<uint64_t> g_forwarded{0};  // bytes sent on to the decoder (the guest's side; whole bursts)
+uint64_t g_stream_base = 0;           // the stream offset of g_fifo's first byte (the decoder's side)
+
+void push_tag(uint64_t at, uint32_t tag, const float* view) {
+    const uint64_t w = g_tags_written.load(std::memory_order_relaxed);
+    if (w - g_tags_read.load(std::memory_order_acquire) >= kTagRing) return;
+    MatrixTag& t = g_tag_ring[w % kTagRing];
+    t.at = at, t.tag = tag;
+    std::memcpy(t.view, view, sizeof t.view);
+    g_tags_written.store(w + 1, std::memory_order_release);
+}
+// The tag for the load at stream offset `at`, if there is one (tags for places already passed are dropped).
+const MatrixTag* take_tag(uint64_t at) {
+    uint64_t r = g_tags_read.load(std::memory_order_relaxed);
+    const uint64_t w = g_tags_written.load(std::memory_order_acquire);
+    const MatrixTag* found = nullptr;
+    while (r != w && g_tag_ring[r % kTagRing].at <= at) {
+        if (g_tag_ring[r % kTagRing].at == at) found = &g_tag_ring[r % kTagRing];
+        ++r;
+    }
+    g_tags_read.store(r, std::memory_order_release);
+    return found;  // (the writer can't reuse the entry before the next take_tag frees more)
+}
+
 unsigned component_size(unsigned fmt) { return fmt <= 1 ? 1 : fmt <= 3 ? 2 : 4; }  // u8/s8, u16/s16, float
 unsigned index_size(unsigned how) { return how == 2 ? 1 : 2; }                  // 2 index8, 3 index16
 
@@ -551,6 +589,10 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
                     g_xf[addr + i] = v;
                 }
             if (changed) gx::xf_changed(addr, count);  // the same values again change nothing
+            if (addr < 120 && count == 12) {  // a position matrix: with its tag, if the loader gave one
+                const MatrixTag* t = in_display_list || data != g_fifo.data() ? nullptr : take_tag(g_stream_base + used);
+                gx::matrix_loaded(addr, &g_xf[addr], t ? t->tag : 0, t ? t->view : nullptr);
+            }
             n = 5 + 4 * count;
         } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) {  // LOAD_INDX_A-D
             if (left < 5) return;
@@ -570,6 +612,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
                     g_xf[addr + i] = word;
                 }
             if (changed) gx::xf_changed(addr, words);
+            if (addr < 120 && words == 12) gx::matrix_loaded(addr, &g_xf[addr], src | 1u, nullptr);  // tagged by where it comes from
             n = 5;
         } else if (op == 0x40) {  // CALL_DL: address, size
             if (left < 9) return;
@@ -720,6 +763,7 @@ void send_burst(Cpu& c) {
     g_cp[kCpWriteLo] = static_cast<uint16_t>(cp_write);
     g_cp[kCpWriteHi] = static_cast<uint16_t>(cp_write >> 16);
     g_gp_fifo_base.store(base, std::memory_order_relaxed), g_gp_fifo_end.store(end, std::memory_order_relaxed);
+    g_forwarded.store(g_forwarded.load(std::memory_order_relaxed) + 32, std::memory_order_relaxed);
     if (!g_gpu_threaded) return consume(c, g_gather, 32);
     // To the GPU thread, a few bursts at a time: a fight's frame is 13,000 of
     // them, and each trip takes the queue's lock and may wake the thread.
@@ -759,9 +803,11 @@ void consume(Cpu& c, const uint8_t* bytes, size_t n) {
         st.record_ns.fetch_add(gx::now_ns() - t0 - (st.wait_ns.load(std::memory_order_relaxed) - w0), std::memory_order_relaxed);
     }
     if (g_fifo_at == g_fifo.size()) {
+        g_stream_base += g_fifo.size();
         g_fifo.clear();
         g_fifo_at = 0;
     } else if (g_fifo_at > 65536) {
+        g_stream_base += g_fifo_at;
         g_fifo.erase(g_fifo.begin(), g_fifo.begin() + static_cast<long>(g_fifo_at));
         g_fifo_at = 0;
     }
@@ -805,6 +851,7 @@ void abort_fifo() {
     }
     dropped += g_fifo.size() - g_fifo_at;
     g_fifo.clear(), g_fifo_at = 0;
+    g_stream_base = g_forwarded.load(std::memory_order_relaxed);  // what was sent is decoded or dropped
     rt::log("GPU: the FIFO is reset (GXAbortFrame), %llu bytes of commands dropped", static_cast<unsigned long long>(dropped));
 }
 
@@ -894,6 +941,21 @@ void init_gpu() {
     if (g_gpu_threaded) std::thread(gpu_thread).detach();  // runs until the process exits
 }
 uint64_t fifo_wait_ns() { return g_fifo_wait_ns.load(std::memory_order_relaxed); }
+
+void load_position_matrix(Cpu& c, uint32_t matrix, uint32_t xf_address, uint32_t tag, uint32_t view) {
+    // Where the command will start in the decoder's stream: the bursts sent on so far and the
+    // bytes gathered since. (Unlinked, nothing reaches the decoder and there is nothing to tag.)
+    if (linked()) {
+        float v[12];
+        for (unsigned i = 0; i < 12; ++i) v[i] = std::bit_cast<float>(rt::peek32(view + 4 * i));
+        push_tag(g_forwarded.load(std::memory_order_relaxed) + g_gathered, tag, v);
+    }
+    pipe_write(c, 0x10, 1);
+    pipe_write(c, (11u << 16) | (xf_address & 0xFFFFu), 4);
+    for (unsigned i = 0; i < 12; ++i) pipe_write(c, rt::peek32(matrix + 4 * i), 4);
+}
+
+void tag_matrix_at(uint64_t stream_offset, uint32_t tag, const float view[12]) { push_tag(stream_offset, tag, view); }
 
 void decode_commands(const uint8_t* bytes, size_t size) {
     static Cpu c = rt::new_cpu();
