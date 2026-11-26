@@ -49,7 +49,7 @@ constexpr uint32_t kCreateThread = 0x800EB780u, kResumeThread = 0x800EBCA8u, kSu
 // Guest memory the tests use (MEM1, clear of the addresses the OS fixes).
 constexpr uint32_t kThreadC = 0x80100800u, kStackC = 0x80128000u;
 constexpr uint32_t kThreadA = 0x80100000u, kThreadB = 0x80100400u, kStackA = 0x80110000u, kStackB = 0x80120000u,
-                   kStackSize = 0x8000u, kMutex = 0x80130000u, kCond = 0x80130100u, kQueue = 0x80130200u,
+                   kStackSize = 0x8000u, kMutex = 0x80130000u, kQueue = 0x80130200u,
                    kQueueArray = 0x80130300u, kAlarm = 0x80130400u, kOut = 0x80130500u, kCalendar = 0x80130600u,
                    kSleepQueue = 0x80130700u, kResetInfo = 0x80130800u, kBi2 = 0x80140000u;
 

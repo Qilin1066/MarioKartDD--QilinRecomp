@@ -150,7 +150,6 @@ uint32_t fprs_named(const Insn& in, bool sources_only = false) {
     }
     return m;
 }
-uint64_t both_halves(uint32_t regs) { return uint64_t{regs} << 32 | regs; }
 
 // What single mode needs to know of a function: whether it can be lifted so,
 // the halves it reads before writing them (they must hold single-precision

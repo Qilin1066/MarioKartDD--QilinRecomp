@@ -279,8 +279,8 @@ struct Outcome {
     bool transfer = false;
     std::function<int32_t()> commit;
 };
-Outcome refuse(int32_t result) { return {result}; }
-Outcome after(uint64_t ticks, int32_t result = kReady) { return {result, ticks, true}; }
+Outcome refuse(int32_t result) { return {result, 0, false, {}}; }
+Outcome after(uint64_t ticks, int32_t result = kReady) { return {result, ticks, true, {}}; }
 Outcome after(uint64_t ticks, std::function<int32_t()> commit) { return {kReady, ticks, true, std::move(commit)}; }
 // The file a change was asked of, if its card has stayed in since.
 Entry* entry_at(uint32_t slot, uint32_t no) {
@@ -680,6 +680,7 @@ Outcome do_rename(Cpu& c, uint32_t slot, uint32_t old_at, uint32_t new_at) {
 // A transfer's result once the card's time is over: NOCARD if it was pulled out
 // meanwhile (and the detach callback told), else the change made.
 int32_t settle(uint32_t slot, const Outcome& o) {
+    if (slot >= kSlots) return kFatal;  // (callers pass a valid slot; this tells GCC's bounds check so)
     Card& k = g_cards[slot];
     const bool present = card_present(slot);
     if (k.mounted && !present) detach(slot);

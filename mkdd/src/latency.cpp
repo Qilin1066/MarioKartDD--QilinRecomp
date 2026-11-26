@@ -33,18 +33,18 @@ struct Config {
 };
 const Config& config() {
     static const Config c = [] {
-        Config c;
+        Config cfg;
         const char* e = std::getenv("MKDD_LATENCY");
-        if (!e) return c;
-        c.on = true;
-        c.start = std::atof(e);
+        if (!e) return cfg;
+        cfg.on = true;
+        cfg.start = std::atof(e);
         if (const char* colon = std::strchr(e, ':')) {
             const std::string b = colon + 1;
-            c.fixed = b == "Stick" ? kStick : b == "A" ? kGcA : b == "B" ? kGcB : b == "Start" ? kGcStart : b == "Left" ? kGcLeft : b == "Right" ? kGcRight
-                    : b == "Up" ? kGcUp : kGcDown;
+            cfg.fixed = b == "Stick" ? kStick : b == "A" ? uint16_t{kGcA} : b == "B" ? uint16_t{kGcB} : b == "Start" ? uint16_t{kGcStart}
+                      : b == "Left" ? uint16_t{kGcLeft} : b == "Right" ? uint16_t{kGcRight} : b == "Up" ? uint16_t{kGcUp} : uint16_t{kGcDown};
         }
-        if (const char* k = std::getenv("MKDD_LATENCY_AHEAD")) c.ahead = unsigned(std::atoi(k));
-        return c;
+        if (const char* k = std::getenv("MKDD_LATENCY_AHEAD")) cfg.ahead = unsigned(std::atoi(k));
+        return cfg;
     }();
     return c;
 }
@@ -114,7 +114,10 @@ void sample(GcPad& pad, double game_seconds) {
     if (!g_press.at && !g_following.load(std::memory_order_relaxed) && now >= g_next) {
         // A moment the input changed, anywhere in the time since the last look: as a thumb's would.
         g_press = {};
-        g_press.bit = c.fixed == kStick ? (g_down_next ? kStickDown : kStickUp) : c.fixed ? c.fixed : g_down_next ? kGcDown : kGcUp;
+        g_press.bit = c.fixed == kStick ? (g_down_next ? kStickDown : kStickUp)
+                    : c.fixed           ? c.fixed
+                    : g_down_next       ? uint16_t{kGcDown}
+                                        : uint16_t{kGcUp};
         g_down_next = !g_down_next;
         g_press.at = g_next;
         g_press.sampled = now;
