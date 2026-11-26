@@ -713,8 +713,9 @@ void wake_idle() {
 }
 #else
 namespace {
-std::mutex g_idle_lock;
-std::condition_variable g_idle_cv;
+// Never destroyed: a guest thread idling at exit waits on them (see gpu.cpp).
+std::mutex& g_idle_lock = *new std::mutex;
+std::condition_variable& g_idle_cv = *new std::condition_variable;
 std::atomic<bool> g_idle_woken{false};  // written under g_idle_lock; read without it while yielding
 // How early an OS sleep may end up late: within ~100 us.
 constexpr auto kSleepSlack = std::chrono::microseconds(250);
