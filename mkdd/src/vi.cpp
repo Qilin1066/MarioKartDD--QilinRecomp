@@ -35,6 +35,7 @@ constexpr uint32_t kRetraceQueue = 0x00000100u;  // threads in VIWaitForRetrace 
 uint32_t g_pre_cb = 0, g_post_cb = 0;
 uint32_t g_retraces = 0;       // VIGetRetraceCount
 uint64_t g_next_retrace = 0;   // time base of the next retrace
+std::atomic<uint64_t> g_next_retrace_seen{0};  // the same, for the main thread (next_retrace_ns)
 // What the game has set, what VIFlush has passed on for the next retrace, and
 // what is on the screen: the hardware's registers change only at a retrace,
 // and only after a flush.
@@ -146,8 +147,10 @@ void poll_retrace() {
         if (late >= period) {  // a whole frame behind: start again from now
             ++g_late.resyncs;
             g_next_retrace = now + period;
+            g_next_retrace_seen.store(g_next_retrace, std::memory_order_relaxed);
         } else {
             g_next_retrace += period;
+            g_next_retrace_seen.store(g_next_retrace, std::memory_order_relaxed);
         }
         post_interrupt([](Cpu& c) {
             park_if_requested();  // the settings menu's pause: here, between frames
@@ -250,7 +253,15 @@ void VIGetCurrentLine(Cpu& c) {
 void VIGetTvFormat(Cpu& c) { c.r[3] = 0; }  // VI_NTSC
 void VIGetDTVStatus(Cpu& c) { c.r[3] = component_cable(); }
 
+// JFWDisplay::endRender (8007AE78, the plan's wrap): the pass's drawing ends in it, with
+// a draw done; the recorder ends its frame there (recorder.hpp's request_frame_end).
+void JFWDisplay_endRender(Cpu& c) {
+    gx::request_frame_end();
+    rt::wrapped(0x8007AE78u)(c);
+}
+
 const rt::Provided kReplacements[] = {
+    {0x8007AE78u, "JFWDisplay::endRender (wrapped: the early frame end)", JFWDisplay_endRender},
     {0x800AEEB0u, "VISetPreRetraceCallback", VISetPreRetraceCallback},
     {0x800AEEF4u, "VISetPostRetraceCallback", VISetPostRetraceCallback},
     {0x800AF1D8u, "VIInit", VIInit},
@@ -287,6 +298,10 @@ void set_retrace_rate(uint32_t num, uint32_t den) {
     if (num == 0 || den == 0) num = 60000, den = 1001;  // the console's own
     g_base_period.store(double(kTimerHz) * double(den) / double(num), std::memory_order_relaxed);
     apply_period();
+}
+uint64_t next_retrace_ns() {
+    const uint64_t t = g_next_retrace_seen.load(std::memory_order_relaxed);
+    return t ? steady_ns_at(t) : 0;
 }
 void set_retrace_speed(double speed) {
     g_speed.store(std::clamp(speed, 0.99, 1.01), std::memory_order_relaxed);

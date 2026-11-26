@@ -619,6 +619,11 @@ uint64_t time_base() {
     return g_epoch + static_cast<uint64_t>(ns) * 81u / 2000u;  // 40.5 MHz
 }
 
+uint64_t steady_ns_at(uint64_t t) {
+    const int64_t since_boot = static_cast<int64_t>((t - g_epoch) * 2000u / 81u) + g_paused_ns.load(std::memory_order_relaxed);
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(g_boot.time_since_epoch()).count() + since_boot);
+}
+
 void request_pause(bool on) {
     {
         std::lock_guard l(g_pause_lock);

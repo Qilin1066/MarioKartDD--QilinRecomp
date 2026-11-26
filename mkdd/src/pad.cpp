@@ -23,6 +23,7 @@
 #include "boot.hpp"
 #include "input.hpp"
 #include "later.hpp"
+#include "latency.hpp"
 #include "os.hpp"
 #include "pilot.hpp"
 
@@ -144,7 +145,8 @@ void PADRead(Cpu& c) {  // (PADStatus[4]) -> the ports whose controllers can rum
             disable(port);
             write_error(s, kErrNoController);
         } else {
-            if (port == 0) pilot_pad(p);
+            if (port == 0 && pilot_pad(p)) latency::probe_apply(p);  // (MKDD_LATENCY's press, through the pilot's)
+            if (port == 0) latency::pad_read(p);
             write_status(s, p);
             if (port == 0) pilot_status(s);
             motor |= bit(port);

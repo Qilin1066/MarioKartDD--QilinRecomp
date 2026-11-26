@@ -106,7 +106,7 @@ The menu's four settings, for this game:
 Hooks, in the order to build them:
 
 1. `draw_every_tick()` once per pass (from the retrace wait's replacement, or wherever the os/threads side sees the game's thread enter `beginRender`), when the setting isn't original. Done in `enhance.cpp`.
-2. Early frame end: the recorder closes the frame when `JFWDisplay::endRender` returns rather than at the XFB copy. Needs a way to run native code after a lifted function (see Requests).
+2. Early frame end: the recorder closes the frame at `JFWDisplay::endRender`'s draw done rather than at the XFB copy, with the copy foretold. Done (2026-11-26): `wrap` in the plan, `vi.cpp`'s wrapper, `recorder.cpp`; measured in `runtime.md`, "Response time".
 3. Tags: native `J3DFifoLoadPosMtxImm` (`80067A64`) and `GXLoadPosMtxImm` (`800C20D8`), each writing the original's bytes to the FIFO and calling `gx::tag_matrix(slot, identity, view matrix)`; the recorder stores the tag and the view with the draw's state. The decoder tags indexed loads with the source address itself.
 4. Renderer: keep frames N−1 and N; `render(frame, previous, alpha)` blends as above; the presenter picks alpha from the clock (fixed k/n steps when the refresh is a multiple of the tick rate).
 5. Guards: cuts, teleports, persistent copies.

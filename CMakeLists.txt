@@ -264,7 +264,7 @@ if(QILIN_HOST)
     set_tests_properties(qilin_padtest PROPERTIES SKIP_RETURN_CODE 77)
     # The game's renderer end to end, without the game: GX register writes through
     # the recorder and renderer, the frame read back (skipped without Vulkan 1.3).
-    add_executable(mkdd_render_test mkdd/tests/render_test.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp
+    add_executable(mkdd_render_test mkdd/tests/render_test.cpp mkdd/src/recorder.cpp mkdd/src/latency.cpp mkdd/src/texture.cpp
                    mkdd/src/renderer.cpp mkdd/src/priority.cpp mkdd/src/gpu.cpp mkdd/src/interp.cpp mkdd/src/mtxtag.cpp)
     target_include_directories(mkdd_render_test PRIVATE mkdd/src)
     target_sources(mkdd_render_test PRIVATE mkdd/src/hud.cpp)  # (the recorder places the HUD)
@@ -329,7 +329,7 @@ qilin_tool(mkdd_settings_test)
 add_test(NAME mkdd_settings_test COMMAND mkdd_settings_test)
 # The widened picture without the game: the aspect getters and the cameras over
 # guest memory, the HUD's placing through the recorder (no window, no GPU).
-add_executable(mkdd_enhance_test mkdd/tests/enhance_test.cpp mkdd/src/enhance.cpp mkdd/src/hud.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp)
+add_executable(mkdd_enhance_test mkdd/tests/enhance_test.cpp mkdd/src/enhance.cpp mkdd/src/hud.cpp mkdd/src/recorder.cpp mkdd/src/latency.cpp mkdd/src/texture.cpp)
 target_include_directories(mkdd_enhance_test PRIVATE mkdd/src host/include)
 target_link_libraries(mkdd_enhance_test PRIVATE qilin_rt qilin_warnings)
 qilin_tool(mkdd_enhance_test)
@@ -410,7 +410,7 @@ if(Python3_FOUND)
 endif()
 
 # The game's runtime: everything in mkdd but the code lifted from main.dol.
-set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/pilot.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/interp.cpp mkdd/src/mtxtag.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
+set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/latency.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/pilot.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/interp.cpp mkdd/src/mtxtag.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
 list(APPEND mkdd_runtime_sources mkdd/src/dsp_trace.cpp)  # (MKDD_AUDIO_DUMP, MKDD_AUDIO_TRACE)
 list(APPEND mkdd_runtime_sources mkdd/src/input.cpp)  # the controller ports (input.hpp)
 list(APPEND mkdd_runtime_sources mkdd/src/enhance.cpp mkdd/src/hud.cpp)  # the widened picture (enhance.hpp)
@@ -591,7 +591,7 @@ target_link_libraries(mkdd_card_test PRIVATE qilin_rt qilin_warnings)
 qilin_tool(mkdd_card_test)
 add_test(NAME mkdd_card_test COMMAND mkdd_card_test)
 
-add_executable(mkdd_pad_test mkdd/tests/pad_test.cpp mkdd/src/pad.cpp mkdd/src/later.cpp)
+add_executable(mkdd_pad_test mkdd/tests/pad_test.cpp mkdd/src/pad.cpp mkdd/src/later.cpp mkdd/src/latency.cpp)
 target_include_directories(mkdd_pad_test PRIVATE mkdd/src)
 target_link_libraries(mkdd_pad_test PRIVATE qilin_rt qilin_warnings)
 qilin_tool(mkdd_pad_test)

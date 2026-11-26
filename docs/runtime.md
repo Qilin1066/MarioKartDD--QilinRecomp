@@ -276,6 +276,24 @@ The main thread turns the pad, the keys and the mouse into the remote's buttons 
 - **Dynamic blend state** (`Gpu::dynamic_blend`, `dynamic_logic`): with VK_EXT_extended_dynamic_state3 the renderer keys pipelines on `base_key` (topology, depth output, vertex layout; the logic op only where it's static) and sets blending per draw (`set_dynamic_blend`, again after each copy, whose pipelines don't have it dynamic); the full keys are still what `pipelines.keys` remembers.
 - **Measuring**: `Display::frame_times()` keeps the intervals between new frames presented (`host/include/qilin/host/frame_times.hpp`, 1200 frames); F3 or `performance_overlay` shows them, and the log has them and the retraces' lateness every 5 s.
 
+## Response time (2026-11-26)
+
+From a press to the first picture that can show it, as `MKDD_LATENCY` measures it (`latency.hpp`): offscreen, at the title's menu, the main stick pressed down and up once a second at random moments, 40 presses a run; each press followed to the main thread's look at the input, the `PADRead` that sees it, the frame of the pass after (the game reads the pads before it draws and calculates after: its own pass of delay, left as it is), that frame handed to the main thread, drawn, and the first picture presented that holds it. `MKDD_LATENCY_CHECK=1` reads every such picture back and logs which of its 8x8 cells changed: the cursor's cells change in exactly the picture the probe names, in both ways of ending a frame.
+
+| mode (offscreen) | before | after |
+|---|---|---|
+| `original` (and 60, and `display` at 60 Hz) | 46.4 ms (37-53) | 26.4 and 29.6 ms (18-35, one press 54) |
+| `display`, 120 Hz | 56.8 ms (44-64) | 30.9 ms (20-40) |
+| `display`, 144 Hz | 54.8 ms (43-66) | 30.1 ms (18-40) |
+
+What changed, each with a switch to measure against:
+
+- **The early frame end** (`MKDD_EARLY_END=0`: not; `docs/enhancements.md`). `JFWDisplay::endRender` (`8007AE78`) is the plan's `wrap`; its wrapper (`vi.cpp`) asks the recorder to end the frame at the draw done endRender issues, with the copy to the frame buffer the next pass's `beginRender` will make: the last one's, to the next frame buffer of the game's rotation (two here, `00F84580` and `010095A0`). When that copy comes it is left out if it is the one foretold; one that differs (the copy filter changes as a movie starts or ends: 3 to 5 in a run of 3,600 frames) is still left out, as the EFB was cleared by the one made, so that one picture has the old filter; a pass that draws between the two keeps its own copy (none seen); three wrong in a row stop it. The main loop shows the newest frame's picture at each retrace rather than VI's, which is the one before it: a tick sooner, 16.4 ms. Off while `MKDD_DFF` captures (a capture ends at its copy).
+- **The input just before the retrace** (`MKDD_INPUT_LEAD_US`, 2000 by default, 0: not): the main thread's waits for frames and for a present's time end 2 ms before the guest's next retrace (`next_retrace_ns`, on the steady clock: `steady_ns_at`, os.cpp) and it looks at the input then, so a press shortly before the retrace isn't missed for a tick: sampled-to-read 13.0 to 9.5 ms on average at 60.
+- **Frames drawn as they come between pictures**: waiting for a present's time, the main thread takes a frame that arrives and draws it at once (the present stays at its time); before, the frame waited for the next pass: 4-5 ms at 120 and 144 Hz.
+
+What only a real display can show: the present's own wait to the screen (FIFO, three swapchain images, `low_latency` waiting for the previous present with `VK_KHR_present_wait`: a vblank at most), the vblank steering's margin (`steer_to_vblank`: the present at least 3 ms, or 1 ms plus four standard deviations, before the vblank), and with vsync between frames, the present blocking where the offscreen clock sleeps (a frame arriving then waits for the present to return).
+
 ## Where the game stands
 
 Checked on 2026-11-26, on Windows, with no controller and an empty memory-card folder:

@@ -55,6 +55,8 @@ void on_wpar_write(void (*reset)());
 // 1 January 2000, 00:00 local time as on the console, less the time the game
 // spent paused.
 uint64_t time_base();
+// A time-base value as the steady clock's (ns since its epoch): what the guest's timers mean on the host.
+uint64_t steady_ns_at(uint64_t time_base_value);
 // Whether a component cable is plugged in (the port's progressive setting,
 // set_console in boot.hpp): VIGetDTVStatus.
 bool component_cable();

@@ -17,7 +17,9 @@
 8004D918	80067A64	lift	JSystem/J3D
 80067A64	80067AE8	replace	JSystem J3D: J3DFifoLoadPosMtxImm (tagged matrix loads)
 80067AE8	8007A494	lift	JSystem/J3D
-8007A494	8007BE38	lift	JSystem/JFramework
+8007A494	8007AE78	lift	JSystem/JFramework
+8007AE78	8007B1D8	wrap	JSystem: JFWDisplay::endRender (the early frame end)
+8007B1D8	8007BE38	lift	JSystem/JFramework
 8007BE38	8008959C	lift	JSystem/JParticle
 8008959C	8008F938	lift	JSystem/JAudio (JAInterface)
 8008F938	800A1A60	lift	JSystem/JAudio (JASystem)
