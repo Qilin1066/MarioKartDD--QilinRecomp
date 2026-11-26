@@ -522,12 +522,12 @@ Outcome do_write(Cpu& c, uint32_t info, uint32_t buffer, uint32_t length, uint32
     rt::poke32(info + kInfoOffset, offset + length);
     if (g_pull_at && ++g_writes == g_pull_at) run_after(ticks / 2, [slot](Cpu&) { pull_card(slot); });
     return after(ticks, [slot, no, offset, time, data = std::move(data)] {
-        Entry* f = entry_at(slot, no);
-        if (!f) return kNoCard;
+        Entry* entry = entry_at(slot, no);
+        if (!entry) return kNoCard;
         Entry stamped;
-        stamped.e = f->e;
+        stamped.e = entry->e;
         put32(stamped, kTime, time);
-        return keep(*f) && rewrite(*f, stamped.e, data.data(), offset, static_cast<uint32_t>(data.size())) ? kReady : kIoError;
+        return keep(*entry) && rewrite(*entry, stamped.e, data.data(), offset, static_cast<uint32_t>(data.size())) ? kReady : kIoError;
     });
 }
 Outcome do_delete(Card& k, uint32_t no) {
@@ -640,9 +640,9 @@ Outcome do_set_status(Cpu& c, uint32_t slot, uint32_t no, uint32_t stat) {
     if (icon == 0xFFFFFFFFu) put16(next, kIconSpeed, static_cast<uint16_t>((get16(next, kIconSpeed) & ~3u) | 1));
     put32(next, kTime, now_seconds(c));
     return after(write_ticks(1), [slot, no, e = next.e] {
-        Entry* f = entry_at(slot, no);
-        if (!f) return kNoCard;
-        return keep(*f) && rewrite(*f, e) ? kReady : kIoError;
+        Entry* entry = entry_at(slot, no);
+        if (!entry) return kNoCard;
+        return keep(*entry) && rewrite(*entry, e) ? kReady : kIoError;
     });
 }
 Outcome do_rename(Cpu& c, uint32_t slot, uint32_t old_at, uint32_t new_at) {
@@ -662,15 +662,15 @@ Outcome do_rename(Cpu& c, uint32_t slot, uint32_t old_at, uint32_t new_at) {
     std::memcpy(next.e.data() + kName, new_name.data(), new_name.size());
     put32(next, kTime, now_seconds(c));
     return after(write_ticks(1), [slot, no = static_cast<uint32_t>(no), e = next.e] {
-        Entry* f = entry_at(slot, no);
-        if (!f) return kNoCard;
-        if (!rewrite(*f, e)) return kIoError;
+        Entry* entry = entry_at(slot, no);
+        if (!entry) return kNoCard;
+        if (!rewrite(*entry, e)) return kIoError;
         // The host file's name follows; it is only a label, so failing to change it loses nothing.
-        const fs::path to = card_folder(slot) / (host_name(*f) + kSuffix);
+        const fs::path to = card_folder(slot) / (host_name(*entry) + kSuffix);
         std::error_code ec;
         if (!fs::exists(to, ec)) {
-            fs::rename(f->host, to, ec);
-            if (!ec) f->host = to;
+            fs::rename(entry->host, to, ec);
+            if (!ec) entry->host = to;
         }
         return kReady;
     });

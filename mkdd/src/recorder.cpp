@@ -1260,36 +1260,36 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
         ix.resize(at + n);
         return ix.data() + at;
     };
-    // The indices that draw vertices [first, first + count) of triangle type `type` as a list.
-    const auto triangles = [&](unsigned type, uint32_t first, uint32_t count) {
-        switch (type) {
-            case 0: case 1: {  // quads (and the second quad type)
-                uint32_t* o = grow(size_t(count / 4) * 6);
-                for (uint32_t i = 0; i + 3 < count; i += 4, o += 6) {
-                    const uint32_t v = first + i;
+    // The indices that draw vertices [base, base + n) of triangle type `kind` as a list.
+    const auto triangles = [&](unsigned kind, uint32_t base, uint32_t n) {
+        switch (kind) {
+            case 0: case 1: {  // quads (and the second quad kind)
+                uint32_t* o = grow(size_t(n / 4) * 6);
+                for (uint32_t i = 0; i + 3 < n; i += 4, o += 6) {
+                    const uint32_t v = base + i;
                     o[0] = v, o[1] = v + 1, o[2] = v + 2, o[3] = v, o[4] = v + 2, o[5] = v + 3;
                 }
                 break;
             }
             case 2: {  // triangles
-                uint32_t* o = grow(size_t(count / 3) * 3);
-                for (uint32_t i = 0; i < count / 3 * 3; ++i) o[i] = first + i;
+                uint32_t* o = grow(size_t(n / 3) * 3);
+                for (uint32_t i = 0; i < n / 3 * 3; ++i) o[i] = base + i;
                 break;
             }
-            case 3: {  // strip: every other triangle's first two vertices swapped, so all wind alike
-                if (count < 3) break;
-                uint32_t* o = grow(size_t(count - 2) * 3);
-                for (uint32_t i = 0; i + 2 < count; ++i, o += 3) {
-                    const uint32_t v = first + i;
+            case 3: {  // strip: every other triangle's base two vertices swapped, so all wind alike
+                if (n < 3) break;
+                uint32_t* o = grow(size_t(n - 2) * 3);
+                for (uint32_t i = 0; i + 2 < n; ++i, o += 3) {
+                    const uint32_t v = base + i;
                     if (i & 1) o[0] = v + 1, o[1] = v, o[2] = v + 2;
                     else o[0] = v, o[1] = v + 1, o[2] = v + 2;
                 }
                 break;
             }
             default: {  // fan
-                if (count < 3) break;
-                uint32_t* o = grow(size_t(count - 2) * 3);
-                for (uint32_t i = 1; i + 1 < count; ++i, o += 3) o[0] = first, o[1] = first + i, o[2] = first + i + 1;
+                if (n < 3) break;
+                uint32_t* o = grow(size_t(n - 2) * 3);
+                for (uint32_t i = 1; i + 1 < n; ++i, o += 3) o[0] = base, o[1] = base + i, o[2] = base + i + 1;
                 break;
             }
         }

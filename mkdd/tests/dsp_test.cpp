@@ -10,6 +10,7 @@
 //    a computed jump, an interrupt handler, the idle detection and HALT. What
 //    it must leave in memory is computed here in plain C++.
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 

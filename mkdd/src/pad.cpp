@@ -45,9 +45,8 @@ constexpr uint32_t kStatusSize = 12;  // PADStatus: buttons, four stick bytes, t
 constexpr uint32_t bit(uint32_t port) { return 0x80000000u >> port; }  // PAD_CHANn_BIT
 
 uint32_t g_enabled = 0, g_resetting = 0;
-uint32_t g_spec = 5, g_analog_mode = 0;
+uint32_t g_analog_mode = 0;
 uint64_t g_reset_free = 0;  // when the reset in flight ends: the next one starts then
-uint32_t g_sampling_rate = 0;
 
 // A reset asks the port what is there and, of a controller, its origin: two
 // short transfers, about a millisecond together (an estimate, not measured).
@@ -163,7 +162,9 @@ void PADControlMotor(Cpu& c) {  // (port, command): 0 stop, 1 rumble, 2 stop har
     }
     if (g_enabled & bit(port)) gc_rumble(static_cast<int>(port), c.r[4] == 1);
 }
-void PADSetSpec(Cpu& c) { g_spec = c.r[3]; }
+// (spec): how the SDK unpacks old controllers' reports. PADRead fills the status
+// from the host's controllers in the final format whatever the spec, so it changes nothing.
+void PADSetSpec(Cpu&) {}
 void PADSetAnalogMode(Cpu& c) {  // (mode): as in the SDK, every port is disabled until its next reset
     g_analog_mode = c.r[3];
     for (uint32_t port = 0; port < kPorts; ++port)
@@ -178,7 +179,7 @@ void SIProbe(Cpu& c) {  // (port) -> its device's type
 }
 // How often the hardware samples the controllers, in milliseconds (0: once a
 // field). The host's input is sampled when PADRead asks, so it changes nothing.
-void SISetSamplingRate(Cpu& c) { g_sampling_rate = c.r[3]; }
+void SISetSamplingRate(Cpu&) {}
 void SIRefreshSamplingRate(Cpu&) {}
 
 // ---- the steering wheel. Its sampling callback runs on the serial
