@@ -23,8 +23,15 @@ Cpu* thread_cpu();
 void set_log_path(const char* path);
 // Report a crash: `what`, then this thread's guest registers and call stack.
 void report_crash(const char* what);
+// What this host thread is, for a crash or fatal error on it ("the GPU
+// thread"): a string that lives as long as the program.
+void set_thread_role(const char* role);
 // Report crashes the program didn't catch, then end it (exit code 70, as
 // fatal). Also an exception nothing caught (std::terminate).
 void install_crash_handler();
+// On POSIX, a stack of its own for the handler on this thread, so a stack
+// overflow is reported too (the handler can't run on the stack that ran out).
+// Each thread that may overflow calls it once; elsewhere it does nothing.
+void prepare_crash_stack();
 
 }  // namespace qilin::rt

@@ -83,9 +83,37 @@ void install_crash_handler() {
     struct sigaction sa;
     std::memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = on_signal;
-    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND | SA_ONSTACK;  // (on prepare_crash_stack's stack where the thread has one)
     sigemptyset(&sa.sa_mask);
     for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) sigaction(sig, &sa, nullptr);
+#endif
+    prepare_crash_stack();
+}
+
+void prepare_crash_stack() {
+#if defined(_WIN32)
+    // What is left for the handler once the stack has overflowed: without it, a
+    // report of the overflow would overflow again and end the program silently.
+    ULONG reserve = 64u << 10;
+    SetThreadStackGuarantee(&reserve);
+#else
+    struct AltStack {
+        stack_t s{};
+        AltStack() {
+            s.ss_size = 64u << 10;
+            s.ss_sp = std::malloc(s.ss_size);
+            if (s.ss_sp && sigaltstack(&s, nullptr) != 0) std::free(s.ss_sp), s.ss_sp = nullptr;
+        }
+        ~AltStack() {  // the thread ends: the stack goes with it
+            if (!s.ss_sp) return;
+            stack_t off{};
+            off.ss_flags = SS_DISABLE;
+            sigaltstack(&off, nullptr);
+            std::free(s.ss_sp);
+        }
+    };
+    thread_local AltStack stack;
+    (void)stack;
 #endif
 }
 

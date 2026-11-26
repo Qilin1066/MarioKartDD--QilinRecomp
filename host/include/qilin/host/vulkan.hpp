@@ -18,7 +18,11 @@
 namespace qilin::host {
 
 [[noreturn]] void die(const char* format, ...);
-void check(VkResult r, const char* what);  // dies with the call's name and the error
+void check(VkResult r, const char* what);  // dies with the call's name and the error, by name
+const char* result_name(VkResult r);       // "VK_ERROR_DEVICE_LOST", or "an unknown result"
+// Where die's message goes instead of only stderr: the program's own fatal
+// path (its log), which doesn't return. Unset, die writes to stderr and exits.
+void set_fatal_handler(void (*handler)(const char* message));
 
 struct Gpu {
     VkInstance instance = VK_NULL_HANDLE;

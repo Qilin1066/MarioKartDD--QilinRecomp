@@ -53,7 +53,8 @@ uint64_t idle_time_ns();
 void on_wpar_write(void (*reset)());
 // The guest's time base: 40.5 MHz (a quarter of the bus clock), counted from
 // 1 January 2000, 00:00 local time as on the console, less the time the game
-// spent paused.
+// spent paused and the stretches the host didn't run it (asleep, stopped in a
+// debugger): guest_clock.hpp.
 uint64_t time_base();
 // A time-base value as the steady clock's (ns since its epoch): what the guest's timers mean on the host.
 uint64_t steady_ns_at(uint64_t time_base_value);

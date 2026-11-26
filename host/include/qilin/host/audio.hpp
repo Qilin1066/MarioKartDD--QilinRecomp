@@ -166,6 +166,14 @@ public:
 
     void set_volume(unsigned percent, bool muted = false);
 
+    // For the main thread, every pass (cheap: it looks twice a second): a
+    // device that stopped asking for sound for a second (unplugged, lost) is
+    // left for the system's default; with no device at all, again every 3 s
+    // until one is there. Returns what changed, for the log (empty: nothing).
+    std::string keep_playing();
+    // Tests: the device stops asking for sound, as an unplugged one does.
+    void stop_device_for_test();
+
     double target_ms() const { return target_ms_; }
     // What was opened, for the log: the device's name, and whether it's given 5.1.
     const std::string& device_name() const { return device_name_; }
@@ -182,8 +190,16 @@ public:
 
 private:
     void feed(SDL_AudioStream* stream, int bytes);
+    bool open(bool fallback);
 
+    Options options_;
+    // Taken before the stream's lock by push and set_volume, and by
+    // keep_playing while it replaces the stream (null: no device for now).
+    std::mutex device_lock_;
     SDL_AudioStream* stream_ = nullptr;
+    std::atomic<uint64_t> feeds_{0};  // the device's callbacks so far
+    uint64_t feeds_seen_ = 0, checked_ns_ = 0, retry_ns_ = 0;  // keep_playing's own
+    unsigned silent_ = 0;
     unsigned rate_ = 0, channels_ = 2;
     std::string device_name_;
     SurroundDecoder surround_;       // the device thread's own

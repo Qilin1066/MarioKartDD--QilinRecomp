@@ -320,6 +320,13 @@ set_tests_properties(mkdd_threads_test_shutdown PROPERTIES TIMEOUT 30 ENVIRONMEN
 add_test(NAME mkdd_threads_test_restart COMMAND mkdd_threads_test)
 set_tests_properties(mkdd_threads_test_restart PROPERTIES TIMEOUT 30 ENVIRONMENT THREADS_TEST_LEAVE=restart
                      PASS_REGULAR_EXPRESSION "OSResetSystem started the program again(.|\n)*all passed")
+# The guest's clock: pauses and host stops (sleep, a debugger) left out of the time base.
+add_executable(mkdd_guest_clock_test mkdd/tests/guest_clock_test.cpp)
+target_include_directories(mkdd_guest_clock_test PRIVATE mkdd/src)
+target_link_libraries(mkdd_guest_clock_test PRIVATE qilin_warnings)
+qilin_tool(mkdd_guest_clock_test)
+add_test(NAME mkdd_guest_clock_test COMMAND mkdd_guest_clock_test)
+set_tests_properties(mkdd_guest_clock_test PROPERTIES TIMEOUT 30)
 
 # The settings file's reader and writer.
 add_executable(mkdd_settings_test mkdd/tests/settings_test.cpp mkdd/src/settings.cpp)
