@@ -13,7 +13,9 @@
 namespace qilin::rt {
 
 namespace {
-constexpr uint64_t kSpace = uint64_t{1} << 32;
+// 4 GB, and a page beyond it that is never backed: an access of up to 8 bytes at the top of the
+// space (lifted code reads 8 at once) faults there instead of running past the reservation.
+constexpr uint64_t kSpace = uint64_t{1} << 32, kReserved = kSpace + 65536;
 }
 
 GuestMemory::~GuestMemory() {
@@ -21,17 +23,17 @@ GuestMemory::~GuestMemory() {
 #if defined(_WIN32)
     VirtualFree(base_, 0, MEM_RELEASE);
 #else
-    munmap(base_, kSpace);
+    munmap(base_, kReserved);
 #endif
 }
 
 bool GuestMemory::reserve() {
     if (base_) return true;
 #if defined(_WIN32)
-    void* p = VirtualAlloc(nullptr, kSpace, MEM_RESERVE, PAGE_NOACCESS);
+    void* p = VirtualAlloc(nullptr, kReserved, MEM_RESERVE, PAGE_NOACCESS);
     if (!p) return false;
 #else
-    void* p = mmap(nullptr, kSpace, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    void* p = mmap(nullptr, kReserved, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (p == MAP_FAILED) return false;
 #endif
     base_ = static_cast<uint8_t*>(p);

@@ -814,7 +814,8 @@ void test_fp_single_mode() {
 #endif
     // A double that isn't a single-precision value isn't taken for one.
     float f;
-    CHECK(!fp::to_f_exact(0.1, f) && !fp::to_f_exact(fp::from_bits(1), f) && !fp::to_f_exact(1e300, f));
+    volatile double huge = 1e300;  // (not a constant: MSVC warns of the overflow its constant folding finds in the dead branch)
+    CHECK(!fp::to_f_exact(0.1, f) && !fp::to_f_exact(fp::from_bits(1), f) && !fp::to_f_exact(huge, f));
     CHECK(fp::to_f_exact(0.5, f) && f == 0.5f && fp::to_f_exact(-0.0, f) && fp::fbits(f) == 0x80000000u);
     CHECK(fp::to_f_exact(fp::from_bits(0x7FF0000020000000ull), f) && fp::fbits(f) == 0x7F800001u);  // a signalling NaN a single can hold
 
@@ -872,15 +873,15 @@ void test_fp_single_mode() {
     const Lifted saved = with_calls({0xDBE10008u, 0xC3E30000u, 0x48000101u, 0xEC3FF82Au, 0xCBE10008u, 0x4E800020u});
     CHECK(saved.ok && saved.code.contains("static void fn_80003000_d(Cpu& c, unsigned resume)"));
     CHECK(saved.code.contains("switch (resume) { case 1: goto R_1; default: break; }") && saved.code.contains("R_1:\n"));
-    CHECK(saved.code.contains("write64(c, ea, fp::bits(c.ps0[31]));"));
+    CHECK(saved.code.contains("write64(m, ea, fp::bits(c.ps0[31]));"));
     CHECK(saved.code.contains("if (!(int(fp::to_f_exact(c.ps0[31], f31)))) [[unlikely]] { ") && saved.code.contains("fn_80003000_d(c, 1); return; }"));
-    CHECK(saved.code.contains("c.ps0[31] = fp::from_bits(read64(c, ea));"));
+    CHECK(saved.code.contains("c.ps0[31] = fp::from_bits(read64(m, ea));"));
     CHECK(saved.code.contains("c.ps0[1] = fp::to_d(f1); c.ps1[1] = fp::to_d(p1);  return;") && !saved.code.contains("written"));
     // stfs f1,0(r3); lfs f2,4(r3); fadds f2,f2,f2; stfs f2,8(r3); blr: f1 is stored as the register
     // stands (the Cpu's: a prologue's save is the same), so nothing checks it on entry.
     const Lifted stored = fn({0xD0230000u, 0xC0430004u, 0xEC42102Au, 0xD0430008u, 0x4E800020u});
-    CHECK(stored.ok && stored.code.contains("write32(c, ea, fp::store_single(c.ps0[1]));") && !stored.code.contains("_d(c)"));
-    CHECK(stored.code.contains("write32(c, r3 + 8u, fp::fbits(f2));"));
+    CHECK(stored.ok && stored.code.contains("write32(m, ea, fp::store_single(c.ps0[1]));") && !stored.code.contains("_d(c)"));
+    CHECK(stored.code.contains("write32(m, r3 + 8u, fp::fbits(f2));"));
     // Doubles in the Cpu. lfs f1,0(r3); frsqrte f0,f1; fmuls f2,f0,f0; stfs f2,4(r3); blr (an inlined
     // square root's estimate): the estimate goes to the Cpu's f0 and is read from there by the double
     // helpers, the rest is floats, and the way out doesn't write f0 back over it.
@@ -890,7 +891,7 @@ void test_fp_single_mode() {
     CHECK(!rsqrt.code.contains("c.ps0[0] = fp::to_d(f0)") && !rsqrt.code.contains("_d(c)"));
     // lfs f1,0(r3); lfd f0,8(r3); fmuls f1,f1,f0; stfs f1,0(r3); blr: a double constant, read from the Cpu.
     const Lifted constant = fn({0xC0230000u, 0xC8030008u, 0xEC210032u, 0xD0230000u, 0x4E800020u});
-    CHECK(constant.ok && constant.code.contains("c.ps0[0] = fp::from_bits(read64(c, ea));"));
+    CHECK(constant.ok && constant.code.contains("c.ps0[0] = fp::from_bits(read64(m, ea));"));
     CHECK(constant.code.contains("fp::to_f(fp::single(fp::mul(fp::to_d(f1), fp::round25(c.ps0[0]))))"));
     // cmpwi r3,0; beq +8; lfd f1,0(r4); fadds f2,f1,f1; blr: f1 a double on one path and the
     // caller's (a float) on the other: no single mode.
@@ -900,7 +901,8 @@ void test_fp_single_mode() {
     CHECK(!with_calls({0xC8230000u, 0xEC21082Au, 0x4E800020u}).code.contains("float"));
     CHECK(!with_calls({0x48000101u, 0xFC200818u, 0x4E800020u}).code.contains("float"));
     // Around a call, only what the callee (with all it calls) may touch goes back and is read
-    // again, and the stack pointer. The leaf: addi r3,r3,1; blr. Its caller: stwu r1,-16(r1);
+    // again, and the stack pointer; of that, only what this function has changed since it last
+    // had it from the Cpu (r3 isn't written before the call, r4 never: neither goes back). The leaf: addi r3,r3,1; blr. Its caller: stwu r1,-16(r1);
     // addi r31,r4,0; bl leaf; add r3,r3,r31; addi r1,r1,16; blr.
     {
         auto input = [](uint32_t start, std::initializer_list<uint32_t> words) {
@@ -921,11 +923,11 @@ void test_fp_single_mode() {
         CHECK(sets.at(caller.start).gpr == (1u << 1 | 1u << 3 | 1u << 4 | 1u << 31) && (sets.at(caller.start).other & 0x100u));
         caller.callee_regs = [&sets](uint32_t a) { return sets.contains(a) ? &sets.at(a) : nullptr; };
         const Lifted l = lift(caller);
-        CHECK(l.ok && l.code.contains("lr = 0x8000300Cu; c.r[1] = r1; c.r[3] = r3;  fn_80003108(c); r3 = c.r[3]; "));
-        CHECK(l.code.contains("c.r[1] = r1; c.r[3] = r3; c.r[4] = r4; c.r[31] = r31; c.lr = lr;  return;"));
+        CHECK(l.ok && l.code.contains("lr = 0x8000300Cu; c.r[1] = r1;  fn_80003108(c); r3 = c.r[3]; "));
+        CHECK(l.code.contains("c.r[1] = r1; c.r[3] = r3; c.r[31] = r31; c.lr = lr;  return;"));
         // A callee with no summary (replaced code), or one that calls through a pointer: everything.
         caller.callee_regs = [&sets](uint32_t) { return &sets.at(0x80003200u); };
-        CHECK(lift(caller).code.contains("c.r[1] = r1; c.r[3] = r3; c.r[4] = r4; c.r[31] = r31; c.lr = lr;  fn_80003108(c); r1 = c.r[1]; r3 = c.r[3]; r4 = c.r[4]; r31 = c.r[31]; lr = c.lr; "));
+        CHECK(lift(caller).code.contains("c.r[1] = r1; c.r[31] = r31; c.lr = lr;  fn_80003108(c); r1 = c.r[1]; r3 = c.r[3]; r4 = c.r[4]; r31 = c.r[31]; lr = c.lr; "));
     }
     // lfs f1,0(r3); bcl 4,eq,elsewhere; blr: a conditional call: no single mode.
     CHECK(!with_calls({0xC0230000u, 0x40820101u, 0x4E800020u}).code.contains("float"));

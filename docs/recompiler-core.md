@@ -358,6 +358,84 @@ handling (about 5%, `gpu.cpp`, the GPU role's). In single-mode code the ordinary
 time of a function like `PSMTXConcat` (with them removed, which would be wrong, it takes 46 ns instead of 77), and
 writing the FPR halves back on the way out is another 10-25%.
 
+## Efficiency, round 5 (2026-11-26)
+
+**Why the title costs more than a race.** The attract mode's title (retraces 2100-3600) plays a movie behind the
+logo, and the game thread decodes it: sampled from outside (core's build, 18 s of the title), 80% of the game
+thread's busy time was THP (`__THPDecompressiMCURowNxN` 65%, the Huffman decoders 14%), and another 17% was
+`psq_store_quantized_s`, the out-of-line path of the decoder's `psq_st` of pixels as `u8` (GQR6: type 4, scale
+-3; 96 pairs a decoded row), with MSVC leaving `pow2f`, `signed_scale`, `compare_signed`, `std::rotl` and even
+`std::atomic::load` (`poll_due`) as calls. The race has no movie. So the title's cost is the movie decoder, and the
+measure for it is `qilin_game_difftest --thp` (above), not a run.
+
+**What changed** (all exact; each checked as below):
+- **Registers go back only if changed** (`lift.cpp`, `find_dirty`). A local is clean where it was loaded from the
+  `Cpu` (on entry, after a call reads the callee's part back) until the function assigns it; a forward dataflow over
+  the function's paths (union) gives the possibly dirty set before each instruction, and a write-back before a call
+  or a way out stores only those. Which locals an instruction assigns is read from its own emitted line (`r3 = `,
+  `cr0 = `, `ctr -= `, `f1 = `), plus the out-parameters the text doesn't show (`add_carry`'s and `sraw`'s CA,
+  double mode's `psq_load` halves), so it can't disagree with the code. GPRs, CR fields, LR, CTR, SO/OV/CA and double
+  mode's FPR halves; a register that is only read (`r2`, `r13`, a callee's argument) is never stored again. Stores of
+  GPRs to the `Cpu` in the lifted code went from 566,246 to 283,258, and the constructors that call the most
+  (`Race2D`, `Result2D`, `SceneMenu`: 1.9 MB of x64 between them and their twins) shrank by 40-45%.
+- **Guest memory through a local base** (`Mem`, `cpu.hpp`). A guest store is a byte store through `c.mem + a`, which
+  for all the compiler knows changes the `Cpu`, so every access after a store loaded `c.mem` again (501 times in the
+  THP row function). The lifted function now takes `const Mem m{c.mem, c};` on entry; the helpers take `Mem`
+  (`Cpu&` overloads remain for native code).
+- **One access for eight bytes**: `lfd`, `stfd` and a `psq_l`/`psq_st` float pair are one 8-byte load or store and
+  one swap where no byte is in the slow range (`is_slow_n`); else the two 4-byte accesses as before, out of line. The
+  guest reservation is 4 GB and 64 KB (`memory.cpp`), so an access running off the top of the space still faults.
+  `lmw`/`stmw` likewise: one check for all the words, plain loads and stores, and the slow way out of line through the
+  `Cpu`'s registers (4,166 `stmw` and 4,157 `lmw` in the lift).
+- **`psq_st` as `u8`** inline where the GQR isn't GQR0 (`i` is a constant at each site, so GQR0's sites, 5,548 of
+  them, get no extra code), both bytes as one store; `psq_l` of `s16` likewise only away from GQR0.
+- **The slow branch of a load or store** is one function per size (`read_slow<N>`, `write_slow<N>`): each of the
+  sites passes the address (and value) only, and the masking of an 8- or 16-bit value moved inside.
+- **Inlining MSVC refused**: the CR helpers (`compare_signed`, `record`, ...), the carries and shifts, `pow2f`,
+  `signed_scale`, `store_single_ftz` and the bit casts are forced inline; `poll_due` reads the flag with
+  `__iso_volatile_load8` on MSVC (what its `<atomic>` does for a relaxed load); rotates are emitted as shifts where
+  the mask allows (`rotated`, `lift.cpp`) and as `rotl32` otherwise, no `std::rotl`.
+- **Rare paths that clobber nothing** (`QILIN_RARE`): Clang's `preserve_all` on the floating-point helpers' rare
+  paths (`add_s_rare` and the rest, `round25_subnormal`, `madd_single_tie`, `load_single_nan`). With the usual
+  convention each of the hundreds of checks in a single-mode function is a call that clobbers every vector register
+  (all of them on x86-64 SysV; all but d8-d15's low halves on ARM64), so floats were kept on the stack around them.
+  Clang 17 and later on x86-64 and ARM64, not Apple's Clang (unchecked); GCC and MSVC have no such convention.
+- **Twins cold and small** (`QILIN_TWIN`): the double versions are `[[gnu::cold]]` (GCC builds them for size and puts
+  them out of the hot code's way) and, under Clang, `minsize`. Neither profile (the race, the title) has a single
+  sample in a twin, and they were a quarter of the lifted code (12.9 MB of 51 MB in `mkdd.exe`).
+- **ARM64 forms**: `ordinary()` tests the exponent field (`ubfx`, small immediates) instead of the x86 form's two
+  32-bit constants, which ARM64 rebuilt with `mov`/`movk` at every check (780 `movk` in the THP row function); it sends
+  exponent 1 (below 2^-125) the careful way too. `is_slow_n` tests the last byte only (two small immediates instead of
+  a constant pair); an access from the very end of the slow range into the locked cache then faults on unbacked memory
+  where the hooks would have stopped the runtime.
+- **`to_f_exact`** (single mode's entry checks and fetches after calls, 2,341 sites) is the host's conversion and a
+  compare where the value is within a single's range; NaNs, infinities and anything larger go the manual's bitwise
+  way, out of line.
+
+**Checked:**
+- exhaustively: ARM64's `ordinary` against the x86 form on all 2^32 floats (it never accepts what the x86 form
+  rejects; it rejects 16,777,214 more, exponent 1); both `is_slow_n` forms for 8 bytes against the definition on all
+  2^32 addresses (x86 exact; ARM64 differs only at `DFFFFFF9`-`DFFFFFFF`); `to_f_exact` against the bitwise form on
+  17.2 billion doubles (every single's double, its neighbours either side, 2^32 random ones): 0 differences;
+- the unit tests (`qilin_tests`, the sync texts' expectations updated: r3 and r4 aren't stored around the leaf call
+  any more), the instruction difftest (5,061 cases, 323,904 runs, 0 failing), `qilin_fp_check`;
+- the game difftest, 40 trials, Clang for MinGW (`work/cpu2/clangbuild.py`): 271,786 runs compared in 9,833
+  functions, 0 functions differ (after the first three changes, after the dirty registers, and on the final state);
+  the THP frames: 0 differences;
+- zig's Clang for `x86_64-linux-gnu` and `aarch64-linux-gnu`, `-Wall -Wextra -Wpedantic -Wshadow -Werror`: the changed
+  sources and lifted files (`lifted_023.cpp`, the THP functions); MSVC `/W4 /permissive-` on `lifted_012.cpp`: no warning.
+
+**Measured** (Ryzen 7 5800X; Clang is zig's for `x86_64-windows-gnu -O2`, the player kit's compiler):
+
+| | Before | After |
+|---|---|---|
+| THP decode, Clang (`--thp play1.thp --frames 3 --reps 30`) | 3.99 ms a frame | **3.38 ms** (-15%) |
+| `qilin_game_difftest.exe`, Clang (nearly all lifted code) | 58.8 MB | **44.5 MB** (-24%) |
+| THP row function (`800F4E50`), x86-64 / ARM64 (Linux targets) | 367 / 215 KB | **303 / 169 KB** |
+| `PSMTXConcat`, x86-64 / ARM64 | 22.9 / 9.9 KB | **13.6 / 6.1 KB** |
+| `Race2D` constructor and its twin, x86-64 / ARM64 | 490 / 346 KB | **287 / 181 KB** |
+| `lifted_023.cpp` (468 functions), x86-64 / ARM64 | 2,295 / 1,611 KB | **1,575 / 1,045 KB** (-31% / -35%) |
+
 ## Cheap wins noted, not taken
 - **A function's FPR halves written back on the way out only where a caller can read them: not taken, because it
   can't be made provably safe here.** It would save 10-25% of a small single-mode leaf (`PSMTXCopy` 21 -> 16 ns,
