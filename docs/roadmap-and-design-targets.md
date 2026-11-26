@@ -39,9 +39,9 @@ All enhancements live behind one settings file (`mkdd.ini`) with presets (origin
 
 ## Wider pictures and higher frame rates (open design)
 
-Both are settings and menu entries now (`aspect`, `hud`, `frame_rate`), routed to two hooks that do nothing (`mkdd/src/enhance.hpp`). Neither is implemented, and neither can be designed in detail before the game runs. What is known, and the plan:
+Both are settings and menu entries now (`aspect`, `hud`, `frame_rate`), routed to two hooks that do nothing (`mkdd/src/enhance.hpp`). Neither is implemented. `enhancements.md` has the analysis of the game's code for both, with addresses, and the design that follows from it; where it and the outline below differ, it is the later and the better informed.
 
-**The game as it is.** It draws a 4:3 picture and has no widescreen mode. It runs its logic once per frame: 60 frames a second with one or two players, 30 with three or four (split screen). Those are the console's 59.94 Hz fields, or every second one.
+**The game as it is** (from that analysis). It draws a 4:3 picture and has no widescreen mode. Its main loop takes one fixed step of the logic per retrace in every mode, whatever the number of players: 59.94 a second. The only switch is a draw skip (a picture every second step) that LAN play turns on for its fullest games. Nothing in the game is driven by a time step.
 
 **Aspect ratio: Hor+.** The vertical field of view stays and the picture gains at the sides.
 
@@ -51,12 +51,12 @@ Both are settings and menu entries now (`aspect`, `hud`, `frame_rate`), routed t
 4. *Effects in screen space* (fades, speed lines, the item roulette, lens flare, copies of the frame buffer used as textures) need checking one by one.
 5. *The renderer* then draws an EFB wider than 640 (its height unchanged), and the window shows that shape. `Display::present_image` already takes the shape as a parameter.
 
-**Frame rate above the game's own.** Two ways; which one, or which mix, is open until the game's time step is understood:
+**Frame rate above the game's own.** Two ways were considered:
 
-- *Run the game's frame more often with a scaled time step.* Where the code's motion is written against a frame duration that can be changed, this is the cheap and exact way, and it is how GBTGhoulies does it. A GameCube game of 2003 written for a fixed 60 Hz is likely to count frames instead (timers, animation steps, physics constants per frame): each such place would need finding and scaling. The three-and-four-player mode shows the game has two step sizes (1/60 and 1/30 s), which is where to look first: whatever it does to halve its rate is the mechanism to generalise.
-- *Keep the logic at its own rate and interpolate what is drawn.* The renderer keeps the transforms (positions and joint matrices, cameras) of the last two logic frames and draws frames in between at the display's rate. It never changes the game's behaviour, so times, ghosts and physics stay exactly the console's, at the cost of up to one logic frame of added latency, and of care for what must not be interpolated (camera cuts, respawns, particles being born, texture animation). It needs draws identified across frames, which the GX command stream doesn't give by itself: the hook would be in the game's own scene code (JSystem's model and joint updates), not in the renderer alone.
+- *Run the game's frame more often with a scaled time step*, as GBTGhoulies does. Ruled out by the analysis: the game has no time step to scale; everything counts steps.
+- *Keep the logic at its own rate and interpolate what is drawn* (the way chosen). The renderer keeps the transforms (positions and joint matrices, cameras) of the last two logic frames and draws frames in between at the display's rate. It never changes the game's behaviour, so times, ghosts and physics stay exactly the console's, at the cost of up to one logic frame of added latency, and of care for what must not be interpolated (camera cuts, respawns, particles being born, texture animation). It needs draws identified across frames, which the GX command stream doesn't give by itself: the hook would be in the game's own scene code (JSystem's model and joint updates), not in the renderer alone.
 
-For a racing game the second is the safer default (time trials and ghosts are compared between players); the first may be offered where it proves exact. "Unlimited" and "the display's refresh rate" are pacing choices on top of either. Until one is in, the game runs at its own rate and the display shows each frame once, twice or more (`host/include/qilin/host/pacing.hpp`).
+It also suits a racing game: time trials and ghosts are compared between players. "Unlimited" and "the display's refresh rate" are pacing choices on top of it; "60" draws every step (LAN's skip off). Until one is in, the game runs at its own rate and the display shows each frame once, twice or more (`host/include/qilin/host/pacing.hpp`).
 
 ## Roadmap
 

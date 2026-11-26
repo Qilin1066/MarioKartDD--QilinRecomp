@@ -282,6 +282,26 @@ void sanity(Target& t, Gx& g) {
     check(near(at(px, 320, 264), 200, 40, 90), "a quad's colour reaches the frame buffer (" + rgb(at(px, 320, 264)) + ")");
 }
 
+// The scale changed between two frames (Renderer::request_scale): the next frame is drawn at
+// the new size, over the picture the EFB held; and back.
+void scale_change(Target& t, Gx& g) {
+    quad(g, 0, 0, 640, 528, -0.5f, 200, 40, 90);
+    const auto one = t.finish(g, false);  // (not cleared: the next frame draws over it)
+    t.renderer.request_scale(2);
+    check(t.renderer.scale() == 1, "a scale asked for waits for the next frame");
+    quad(g, 0, 0, 320, 528, -0.5f, 10, 220, 30);
+    const auto two = t.finish(g);
+    const bool doubled = t.renderer.scale() == 2 && one.size() == size_t(640) * 528 * 4 && two.size() == one.size() * 4;
+    const auto px2 = [&](int x, int y) { return two.data() + (size_t(y) * 1280 + size_t(x)) * 4; };
+    check(doubled, "then the frame buffer is twice the size each way");
+    check(doubled && near(px2(320, 528), 10, 220, 30), "what is drawn then is drawn at the new scale");
+    check(doubled && near(px2(960, 528), 200, 40, 90) && near(px2(1270, 1050), 200, 40, 90), "and the picture the EFB held came with it");
+    t.renderer.request_scale(1);
+    quad(g, 0, 0, 640, 528, -0.5f, 30, 30, 200);
+    const auto back = t.finish(g);
+    check(back.size() == one.size() && near(at(back, 320, 264), 30, 30, 200), "and back again");
+}
+
 // The copy filter: deflicker weights 16/32/16 (above, the line, below)
 // blend the line where white meets black, as the hardware's integer maths:
 // the last white line (16*255 + 32*255) / 64 = 191, the first black one
@@ -904,6 +924,7 @@ int main(int argc, char** argv) {
         Gx g;
         g.setup();
         sanity(t, g);
+        scale_change(t, g);
         copy_filter(t, g);
         if (gpu.logic_op) logic_ops(t, g, false, "the GPU's");
         lines_and_points(t, g, gpu.wide_lines && gpu.large_points, "the GPU's");

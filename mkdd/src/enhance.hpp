@@ -4,11 +4,12 @@
 // nothing is done with it yet. The settings menu shows each such option
 // disabled, with why, until its *_supported() says otherwise.
 //
-// What is known of the game (USA, GM4E01): it draws a 4:3 picture and has no
-// widescreen mode; it runs its logic once a frame, 60 frames a second with
-// one or two players and 30 with three or four (split screen).
-// docs/roadmap-and-design-targets.md, "Wider pictures and higher frame
-// rates", has the plan for both; neither is designed in detail, let alone done.
+// What is known of the game (USA, GM4E01; docs/enhancements.md has the
+// analysis and the design): it draws a 4:3 picture and has no widescreen mode;
+// it takes one fixed step of its logic per retrace in every mode, 59.94 a
+// second, with no time step anywhere, so more pictures than that have to be
+// drawn between the game's own. enhance.cpp holds the first of the game
+// patches (the cameras' shape); it is not built or called yet.
 //
 // To implement one: replace its two functions here with declarations, define
 // them beside the game patches (they are called on the main thread, the

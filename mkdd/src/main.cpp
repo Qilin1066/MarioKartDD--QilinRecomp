@@ -341,6 +341,9 @@ int main(int argc, char** argv) {
         std::_Exit(code);
     }
     if (render_dff) {
+        // The read back's size: the largest frame buffer a GameCube has (640x528, PAL's; this game
+        // draws 608x448), so any picture fits at its own size.
+        constexpr uint32_t kReadW = 640, kReadH = 528;
         // A frame captured with MKDD_DFF, replayed through the recorder and drawn by the
         // renderer with no game running: our picture of the very commands Dolphin's FIFO player
         // draws from the same file (tools/check/picture_check.py compares the two), starting as
@@ -348,7 +351,7 @@ int main(int argc, char** argv) {
         qilin::host::Display::Options o;
         o.title = "Mario Kart: Double Dash!!";
         o.headless = true;
-        o.width = 1280, o.height = 720;
+        o.width = kReadW, o.height = kReadH;
         o.picture.scaling = qilin::host::Scaling::integer;  // a pixel for a pixel
         o.picture.smooth = false;
         qilin::host::Display display(o);
@@ -356,9 +359,9 @@ int main(int argc, char** argv) {
         if (const char* e = std::getenv("MKDD_SCALE")) scale = static_cast<unsigned>(std::clamp(std::atoi(e), 1, 8));
         mkdd::Renderer renderer(display.gpu(), scale, 1);
         renderer.set_true_color(std::getenv("MKDD_TRUE_COLOR") != nullptr);  // (the console's 18 bits unless asked)
-        // Shown at its own size, a pixel for a pixel (4:3 for a 640x480 picture, in the middle of
-        // the 1280x720 read back), and written so: Dolphin dumps the same pixels at its raw
-        // resolution, and the two compare without either being resampled.
+        // Shown at its own size, a pixel for a pixel (this game's 608x448, in the middle of the
+        // read back), and written so: Dolphin dumps the same pixels at its raw resolution, and the
+        // two compare without either being resampled.
         uint32_t shown_w = 0, shown_h = 0;
         mkdd::replay_dff(render_dff, render_loops, [&](mkdd::gx::Frame& f) {
             f.captured = true;  // (MKDD_PROBE follows a pixel through a replayed frame too)
@@ -370,14 +373,15 @@ int main(int argc, char** argv) {
                 }
         });
         if (!shown_w) rt::fatal(nullptr, "--render-dff: %s has no copy to the screen", render_dff);
-        if (shown_w > 1280 || shown_h > 720) rt::fatal(nullptr, "--render-dff: a %ux%u picture doesn't fit the 1280x720 read back", shown_w, shown_h);
+        if (shown_w > kReadW || shown_h > kReadH)
+            rt::fatal(nullptr, "--render-dff: a %ux%u picture doesn't fit the %ux%u read back", shown_w, shown_h, kReadW, kReadH);
         const std::vector<uint8_t> px = display.read_back();
         FILE* fp = std::fopen(render_out, "wb");
         if (!fp) rt::fatal(nullptr, "--render-dff: %s can't be written", render_out);
         std::fprintf(fp, "P6\n%u %u\n255\n", shown_w, shown_h);
-        const uint32_t x0 = (1280 - shown_w) / 2, y0 = (720 - shown_h) / 2;
+        const uint32_t x0 = (kReadW - shown_w) / 2, y0 = (kReadH - shown_h) / 2;
         for (uint32_t y = 0; y < shown_h; ++y)
-            for (uint32_t x = 0; x < shown_w; ++x) std::fwrite(&px[(size_t(y0 + y) * 1280 + x0 + x) * 4], 1, 3, fp);
+            for (uint32_t x = 0; x < shown_w; ++x) std::fwrite(&px[(size_t(y0 + y) * kReadW + x0 + x) * 4], 1, 3, fp);
         std::fclose(fp);
         std::fflush(nullptr);
         std::_Exit(0);
@@ -403,7 +407,7 @@ int main(int argc, char** argv) {
         qilin::host::Display::Options o;
         o.title = "Mario Kart: Double Dash!!";
         o.headless = offscreen;
-        if (offscreen) o.width = 1280, o.height = 960;  // what MKDD_DUMP saves: the picture at twice its size
+        if (offscreen) o.width = 1280, o.height = 960;  // what MKDD_DUMP saves: the picture as shown (4:3, the game's 608x448 EFB filling it), 960 lines
         o.fullscreen = settings.fullscreen;
         o.monitor = settings.monitor;
         o.picture = mkdd::picture_of(settings);
@@ -608,6 +612,19 @@ int main(int argc, char** argv) {
             if (const auto t = std::chrono::steady_clock::now(); t >= next_match) {
                 next_match = t + std::chrono::seconds(1);
                 match_retrace_to_display(*display);
+                // And the render resolution follows the settings and, on auto, the window (looked at
+                // once a second, so a window being dragged to a new size settles first).
+                if (!std::getenv("MKDD_SCALE")) {
+                    int ww = 0, wh = 0;
+                    if (auto* w = static_cast<SDL_Window*>(display->sdl_window())) SDL_GetWindowSizeInPixels(w, &ww, &wh);
+                    const unsigned want = wh > 0 || settings.scale ? mkdd::render_scale(settings, wh) : renderer->scale();
+                    if (want != renderer->scale()) {
+                        rt::log("render resolution: %ux (was %ux)", want, renderer->scale());
+                        renderer->request_scale(want);
+                        renderer_scale = want;
+                        if (menu) menu->set_running_scale(want);
+                    }
+                }
             }
         }
         // Every second: where a frame's time goes, for the F3 readout; every

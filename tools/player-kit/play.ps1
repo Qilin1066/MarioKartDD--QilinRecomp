@@ -3,7 +3,8 @@
 # The download holds everything but the game's own code: that is made here,
 # from your own disc (an image, .iso, .gcm or .ciso, as it is, or a folder
 # extracted from one), the first time (and again after an update): qilin-disc
-# reads its main.dol, qilin lifts that into C++, the bundled compiler (LLVM-MinGW) compiles it, and
+# reads its main.dol, qilin lifts that into C++ and qilin-dsp the sound
+# processor's microcode in it, the bundled compiler (LLVM-MinGW) compiles it, and
 # it's linked with the prebuilt rest into Double Dash.exe. Then, and every time
 # after, it starts the game.
 #
@@ -46,7 +47,7 @@ function Get-Sha256([string]$path) {
     finally { $stream.Dispose(); $sha.Dispose() }
 }
 # Content identity matters while changes share an Unreleased version number.
-$identityParts = @("lib/libmkdd_kit.a", "qilin.exe", "qilin-disc.exe", "plan.tsv", "kit.ninja") | ForEach-Object {
+$identityParts = @("lib/libmkdd_kit.a", "qilin.exe", "qilin-disc.exe", "qilin-dsp.exe", "include/dsp_core.hpp", "plan.tsv", "kit.ninja") | ForEach-Object {
     (Get-Sha256 (Join-Path $kit $_))
 }
 $builtFor = "$kitVersion | $cpu | $($identityParts -join ':')"
@@ -145,6 +146,13 @@ $dol = Join-Path $work "main.dol"
 if ((Invoke-Kit $discTool @("dol", $disc, $dol)) -ne 0) { throw "the disc's main.dol couldn't be read" }
 $lift = @("lift", $dol, "-o", $gen, "--plan", (Join-Path $kit "plan.tsv"), "--files", "32")
 if ((Invoke-Kit $qilin $lift) -ne 0) { throw "qilin lift failed" }
+# The DSP's microcode, beside it (after: qilin lift owns the folder). Replaced only when its
+# text differs, so it too is compiled again only when it changed.
+$ucode = Join-Path $gen "dsp_ucode.cpp"
+$ucodeNew = Join-Path $work "dsp_ucode.new"
+if ((Invoke-Kit (Join-Path $kit "qilin-dsp.exe") @("lift", $dol, "-o", $ucodeNew)) -ne 0) { throw "qilin-dsp lift failed" }
+if ((Test-Path -LiteralPath $ucode) -and ((Get-Sha256 $ucode) -eq (Get-Sha256 $ucodeNew))) { Remove-Item -LiteralPath $ucodeNew -Force }
+else { Move-Item -LiteralPath $ucodeNew -Destination $ucode -Force }
 
 # Compile and link: a ninja file over what the lift wrote, with the kit's
 # flags and libraries (kit.ninja). Paths are relative to the work folder, so
@@ -172,8 +180,9 @@ foreach ($s in $sources) {
     $objects += $object
     $lines += "build ${object}: cxx gen/$($s.Name)"
 }
-$lines += "build Double Dash.exe: link $($objects -join ' ') | ../kit/lib/libmkdd_kit.a"
-$lines += "default Double Dash.exe"
+# (Ninja splits a name at a space: the program is built as mkdd.exe and copied to its own name.)
+$lines += "build mkdd.exe: link $($objects -join ' ') | ../kit/lib/libmkdd_kit.a"
+$lines += "default mkdd.exe"
 Set-Content -Path (Join-Path $work "build.ninja") -Value $lines -Encoding ASCII
 
 Write-Host "== Compiling ($($sources.Count) files; the biggest take a few minutes each)" -ForegroundColor Cyan
@@ -184,7 +193,7 @@ else { & $ninja -C $work -j $jobs | Out-Host; $code = $LASTEXITCODE }
 if ($code -ne 0) { throw "compiling failed" }
 # Stage beside the destination; a failed copy leaves the old executable intact.
 $staged = "$game.new"
-Copy-Item -LiteralPath (Join-Path $work "Double Dash.exe") -Destination $staged -Force
+Copy-Item -LiteralPath (Join-Path $work "mkdd.exe") -Destination $staged -Force
 if (Test-Path -LiteralPath $game -PathType Leaf) {
     [System.IO.File]::Replace($staged, $game, "$game.previous", $true)
 } else {

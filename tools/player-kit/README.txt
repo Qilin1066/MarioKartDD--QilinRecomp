@@ -65,6 +65,7 @@ What's in here
 Play Double Dash.bat  builds (once) and starts the game
 kit\qilin-disc.exe  reads your disc: says what it is, takes main.dol from it
 kit\qilin.exe       the recompiler: turns the disc's main.dol into C++
+kit\qilin-dsp.exe   the same for the sound processor's program inside main.dol
 kit\lib, include    the prebuilt rest of the game: its runtime, the renderer,
                     sound, the window and controls (SDL3), the menu (Dear ImGui)
 kit\plan.tsv        which parts of the game are recompiled, and which run natively

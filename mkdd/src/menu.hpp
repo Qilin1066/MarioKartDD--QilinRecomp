@@ -6,9 +6,9 @@
 //
 // Controls are set by pressing them: Add on a control's row, then the key,
 // the pad's button, stick or trigger, or a click. The picture's settings show
-// at once (Look at the picture hides the menu until any key or button); the
-// render resolution, the graphics device and the sound's output wait for the
-// next start. What needs the game itself patched (enhance.hpp) is shown
+// at once (Look at the picture hides the menu until any key or button; the
+// render resolution once the menu is closed); the graphics device and the
+// sound's output wait for the next start. What needs the game itself patched (enhance.hpp) is shown
 // disabled, with what it's waiting for.
 //
 // F3 switches the frame times, top left. F9 captures the next frames shown
@@ -52,7 +52,7 @@ public:
     // Whether the controls changed since the last call (the main loop's
     // table of them is rebuilt).
     bool take_controls_changed();
-    // The render resolution the game runs at (a change waits for the next start).
+    // The render resolution the game is drawn at now (the main loop changes it to follow the settings).
     void set_running_scale(unsigned scale) { running_scale_ = scale; }
     // Lines under the frame-time graph (where the time goes), from the main loop.
     void set_frame_details(std::vector<std::string> lines) { frame_details_ = std::move(lines); }

@@ -476,9 +476,10 @@ endif()
 # For the Windows download (tools/player-kit), as the APB recomp's: the game's
 # runtime and every library it links (the host layer, SDL3, Dear ImGui, volk),
 # merged into one archive, with the headers the lifted code includes, qilin,
-# the library plan, and the flags and libraries to build the rest with
-# (kit.ninja). A player's own PC lifts their own main.dol and compiles only
-# that code, with the same compiler, against the kit. Needs a MinGW toolchain
+# qilin-disc and qilin-dsp, the library plan, and the flags and libraries to
+# build the rest with (kit.ninja). A player's own PC lifts their own main.dol
+# (the game's code and the DSP's microcode in it) and compiles only that code,
+# with the same compiler, against the kit. Needs a MinGW toolchain
 # (tools/player-kit/mingw-cross.cmake) and SDL3 built statically (the fetched one).
 option(QILIN_PLAYER_KIT "Build the player kit (tools/player-kit)" OFF)
 if(QILIN_PLAYER_KIT)
@@ -515,12 +516,16 @@ if(QILIN_PLAYER_KIT)
         "cxxflags = -O2 -DNDEBUG -std=c++23 -w -ffp-contract=off -I$kit/include\n"
         "ldflags = -static -O2 -Wl,--stack,16777216\n"
         "libs = $kit/lib/libmkdd_kit.a ${kit_system_text}\n")
-    # Linked with stand-ins for the lifted code: the kit is complete.
-    add_executable(mkdd_kit_link_check tools/player-kit/link_check.cpp)
+    # Linked with stand-ins for the lifted code (the game's, and the DSP microcode's empty
+    # table): the kit is complete.
+    add_executable(mkdd_kit_link_check tools/player-kit/link_check.cpp mkdd/src/dsp_no_ucode.cpp)
+    target_include_directories(mkdd_kit_link_check PRIVATE mkdd/src)
     target_link_libraries(mkdd_kit_link_check PRIVATE qilin_rt "${kit_archive}" ${kit_system_libraries})
     add_dependencies(mkdd_kit_link_check mkdd_kit)
 
-    install(TARGETS qilin qilin_disc_tool RUNTIME DESTINATION kit COMPONENT player)
+    install(TARGETS qilin qilin_disc_tool qilin-dsp RUNTIME DESTINATION kit COMPONENT player)
+    # What qilin-dsp's output includes (the lifted game code includes only the runtime's headers).
+    install(FILES mkdd/src/dsp_core.hpp DESTINATION kit/include COMPONENT player)
     install(FILES "${kit_archive}" DESTINATION kit/lib COMPONENT player)
     install(FILES "${CMAKE_BINARY_DIR}/kit.ninja" data/GM4E01/plan.tsv DESTINATION kit COMPONENT player)
     file(GLOB kit_headers runtime/include/qilin/rt/*.hpp)
