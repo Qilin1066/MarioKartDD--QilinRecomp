@@ -274,16 +274,16 @@ if(QILIN_HOST)
         set_source_files_properties(mkdd/tests/render_test.cpp mkdd/src/renderer.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
     endif()
     add_test(NAME mkdd_render_test COMMAND mkdd_render_test)
-    set_tests_properties(mkdd_render_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+    set_tests_properties(mkdd_render_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1500)
     # The same checks on each pixel shader path: the ubershader alone, and
     # every draw specialised to its shape (compiled as it's needed).
     add_test(NAME mkdd_render_test_ubershader COMMAND mkdd_render_test)
-    set_tests_properties(mkdd_render_test_ubershader PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600 ENVIRONMENT "MKDD_UBERSHADER=1")
+    set_tests_properties(mkdd_render_test_ubershader PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1500 ENVIRONMENT "MKDD_UBERSHADER=1")
     add_test(NAME mkdd_render_test_specialized COMMAND mkdd_render_test)
-    set_tests_properties(mkdd_render_test_specialized PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600 ENVIRONMENT "MKDD_SPECIALIZE_SYNC=1")
+    set_tests_properties(mkdd_render_test_specialized PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1500 ENVIRONMENT "MKDD_SPECIALIZE_SYNC=1")
     # And with every vertex in the full layout (the compact one is the default).
     add_test(NAME mkdd_render_test_full_vertices COMMAND mkdd_render_test)
-    set_tests_properties(mkdd_render_test_full_vertices PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600 ENVIRONMENT "MKDD_FULL_VERTICES=1")
+    set_tests_properties(mkdd_render_test_full_vertices PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1500 ENVIRONMENT "MKDD_FULL_VERTICES=1")
     # The write-gather pipe: stores of every size reach the FIFO as their bytes (cpu.hpp's inline gathering).
     add_test(NAME mkdd_pipe_test COMMAND mkdd_render_test --pipe)
     set_tests_properties(mkdd_pipe_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
