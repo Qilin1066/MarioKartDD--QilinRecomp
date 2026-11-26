@@ -24,6 +24,7 @@
 #include "input.hpp"
 #include "later.hpp"
 #include "os.hpp"
+#include "pilot.hpp"
 
 namespace mkdd {
 namespace rt = qilin::rt;
@@ -52,6 +53,7 @@ uint32_t g_sampling_rate = 0;
 uint64_t reset_ticks() { return ticks_from_us(1000); }
 
 void disable(uint32_t port) {
+    if (devices_log() && (g_enabled & bit(port))) rt::log("pad: port %u disabled", port);
     g_enabled &= ~bit(port);
     gc_rumble(static_cast<int>(port), false);
 }
@@ -66,7 +68,10 @@ void reset(uint32_t mask) {
         g_reset_free = std::max(g_reset_free, now) + reset_ticks();
         run_after(g_reset_free - now, [port](Cpu&) {
             g_resetting &= ~bit(port);
-            if (gc_pad(static_cast<int>(port)).connected) g_enabled |= bit(port);
+            if (gc_pad(static_cast<int>(port)).connected) {
+                if (devices_log()) rt::log("pad: port %u has a controller", port);
+                g_enabled |= bit(port);
+            }
         });
     }
 }
@@ -125,6 +130,8 @@ void PADRecalibrate(Cpu& c) {  // (mask) -> TRUE: a reset that also takes the st
     c.r[3] = 1;
 }
 void PADRead(Cpu& c) {  // (PADStatus[4]) -> the ports whose controllers can rumble
+    watch_guest_values();
+    pilot_frame();
     const uint32_t status = c.r[3];
     uint32_t motor = 0;
     for (uint32_t port = 0; port < kPorts; ++port) {
@@ -133,11 +140,13 @@ void PADRead(Cpu& c) {  // (PADStatus[4]) -> the ports whose controllers can rum
             write_error(s, kErrNotReady);
         } else if (!(g_enabled & bit(port))) {
             write_error(s, kErrNoController);
-        } else if (const GcPad p = gc_pad(static_cast<int>(port)); !p.connected) {
+        } else if (GcPad p = gc_pad(static_cast<int>(port)); !p.connected) {
             disable(port);
             write_error(s, kErrNoController);
         } else {
+            if (port == 0) pilot_pad(p);
             write_status(s, p);
+            if (port == 0) pilot_status(s);
             motor |= bit(port);
         }
     }
@@ -145,6 +154,11 @@ void PADRead(Cpu& c) {  // (PADStatus[4]) -> the ports whose controllers can rum
 }
 void PADControlMotor(Cpu& c) {  // (port, command): 0 stop, 1 rumble, 2 stop hard
     const uint32_t port = port_of(c, "PADControlMotor");
+    if (devices_log()) {
+        static uint32_t last[kPorts] = {~0u, ~0u, ~0u, ~0u};
+        if (last[port] != c.r[4]) rt::log("pad: port %u motor %u%s", port, c.r[4], g_enabled & bit(port) ? "" : " (no controller)");
+        last[port] = c.r[4];
+    }
     if (g_enabled & bit(port)) gc_rumble(static_cast<int>(port), c.r[4] == 1);
 }
 void PADSetSpec(Cpu& c) { g_spec = c.r[3]; }
@@ -187,6 +201,7 @@ uint64_t sampling_deadline() { return g_steering_sampling && g_enabled ? g_next_
 
 void SIResetSteeringAsync(Cpu& c) {  // (port, callback(port, err)) -> 0, or -2 while one is in flight
     const uint32_t port = port_of(c, "SIResetSteeringAsync"), cb = c.r[4];
+    if (devices_log()) rt::log("pad: wheel reset asked of port %u", port);
     if (g_steering_reset[port]) {
         c.r[3] = static_cast<uint32_t>(kErrNotReady);
         return;

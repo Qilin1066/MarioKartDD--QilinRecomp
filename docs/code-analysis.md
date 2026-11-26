@@ -88,7 +88,7 @@ What the data added to the function names is modest: 26 more A names, the twins 
 
 ## The libraries in the retail DOL
 
-`tools/analysis/make_plan.py` writes `data/GM4E01/plan.tsv` from the ported symbols and a decision per object file (its tables): 69 ranges that tile the code of `.init` (`80003100`-`80005544`) and `.text` (`800056C0`-`802D8518`) exactly. `qilin lift --plan` accepts it: 12,755 functions lifted, 511 replaced, 205 dropped, every instruction outside replaced and dropped code lifted.
+`tools/analysis/make_plan.py` writes `data/GM4E01/plan.tsv` from the ported symbols and a decision per object file (its tables): 70 ranges that tile the code of `.init` (`80003100`-`80005544`) and `.text` (`800056C0`-`802D8518`) exactly. `qilin lift --plan` accepts it: 12,756 functions lifted, 510 replaced, 205 dropped, every instruction outside replaced and dropped code lifted.
 
 Words are 4-byte instructions in the library's functions; *fp* counts floating-point instructions, *ps* paired singles, *priv* privileged ones (`mfmsr`, `mtmsr`, `rfi`, segment registers, and SPRs other than LR, CTR, XER).
 
@@ -147,7 +147,7 @@ Words are 4-byte instructions in the library's functions; *fp* counts floating-p
 | game: Shiraiwa (map objects, wipes) | 1,920 | 79,779 | 15,997 | 6,688 | 0 | lift |
 | game: Yamamoto (kart physics, camera) | 597 | 65,451 | 18,361 | 4,275 | 0 | lift |
 
-Totals, in functions: **702,275 words lifted (94.8%)**, 31,609 replaced (4.3%), 6,911 dropped (0.9%).
+Totals, in functions: **702,386 words lifted (94.8%)**, 31,498 replaced (4.3%), 6,911 dropped (0.9%).
 
 ## Why each library is lifted or replaced
 
@@ -167,7 +167,7 @@ Replaced:
 Lifted, where a reader might expect otherwise:
 
 - **dolphin/arq**: read (`800B2E58`-`800B31F4`): a two-priority request queue that calls `ARStartDMA` and is called back by AR's interrupt routine; the trace finds no hardware access in it.
-- **dolphin/os: OSAlloc, OSArena** (heap and arena bounds: no hardware, no privileged instruction), **`OSReport`** (formats through MSL's `vprintf`), **`__init_user`, `__init_cpp`, `_ExitProcess`** (the static constructors).
+- **dolphin/os: OSAlloc, OSArena** (heap and arena bounds: no hardware, no privileged instruction), **`OSReport`** (formats through MSL's `vprintf`), **`__init_user`, `__init_cpp`, `_ExitProcess`** (the static constructors), and **`__OSInitAudioSystem`** (the OS replacement's choice: the boot's hand-shake with the DSP runs as written against the emulated DSP).
 - **dolphin/pad: `PADClamp`** (stick maths) and **`__PADDisableRecalibration`** (a flag byte at `0x800030E3` between interrupt calls), **dolphin/exi: `EXIGetType`** (a table over `EXIGetID`): pure code, at the devices replacement's request.
 - **dolphin/ip, upnp, md5, base64**: the TCP/IP stack is software over `eth`, alarms and threads. Its only low-memory access is the bus clock at `0x800000F8` (timer arithmetic).
 - **The Logitech force-feedback library** (`allsrc.c`: `LG*`, `VDevice_*`, `Effect_*`, a simulation thread): software over `SISteering` and OS threads.
@@ -192,5 +192,7 @@ Against the devices agent's bindings: everything it binds natively is in a repla
 | `tools/analysis/port_data.py` | the data symbols, and the data each function reads as evidence |
 | `tools/analysis/make_plan.py` | `data/GM4E01/plan.tsv`; without `-o` it checks the committed plan against the symbols |
 | `tools/analysis/check_replacements.py` | replaced or dropped functions that lifted code calls or points at |
+| `tools/analysis/audit_natives.py` | the native replacement tables against the plan and the names: wrong addresses, entries in lifted ranges, and which called functions have no native yet |
+| `tools/analysis/boot_path.py` | a static trace from the constructors, `System::init` and `System::run`: the replaced functions and hardware the boot reaches, in order |
 | `tools/analysis/hardware_access.py` | hardware and low-memory access per library |
 | `tools/analysis/gcdol.py` | shared: the DOL, the map, the plan, `qilin`'s output |

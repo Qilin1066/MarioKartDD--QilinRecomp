@@ -11,13 +11,15 @@ A static recompilation of **Mario Kart: Double Dash!!** (Nintendo, GameCube, 200
 | Part | State |
 |---|---|
 | Disc reader | ✅ `.iso`, `.gcm`, `.ciso` images and extracted folders, read in place (`docs/disc.md`) |
-| Recompiler (decoder, function discovery, lifter) | 🔨 being adapted from the Wii's Broadway to the GameCube's Gekko and this DOL |
-| Library plan (`data/GM4E01/plan.tsv`) | 🔨 in development |
-| Runtime: OS, disc, video, threads | 🔨 in development |
+| Recompiler (decoder, function discovery, lifter) | ✅ for this DOL: 13,472 functions found, 12,754 lifted to C++ with no stubs, the rest replaced or dropped by the plan (`docs/recompiler-core.md`, `docs/dol-analysis.md`) |
+| Names and the library plan (`data/GM4E01/plan.tsv`) | ✅ names ported from the disc's own map of its debug build; what is lifted, replaced or dropped, library by library (`docs/code-analysis.md`) |
+| DSP microcode | ✅ the game's own sound-processor program, recompiled to C++ from the player's DOL at build time (`qilin-dsp`, `docs/audio.md`) |
 | Controllers, memory cards, audio RAM | 🔨 written and tested against the SDK's interfaces, not against the running game (`docs/input.md`, `docs/saves.md`) |
-| Renderer (GX on Vulkan) | 🔨 carried over from the Wii project; not yet run with this game |
-| Sound | 🔨 in development |
+| Renderer (GX on Vulkan) | 🔨 adapted to the GameCube and to what this game draws, tested on recorded commands, not with the game (`docs/graphics.md`) |
+| Sound | 🔨 the DSP and its microcode tested apart from the game (`docs/audio.md`) |
+| Runtime: OS, disc, video, threads, start-up | 🔨 in development (`docs/runtime.md` still describes parts of the Wii project it came from) |
 | Window, settings menu, picture, sound output | 🔨 written; tested offscreen and by unit tests only (below) |
+| Wider pictures, higher frame rates | 🔨 written from an analysis of the game's code (`docs/enhancements.md`, `docs/graphics.md`), tested apart from the game; not seen with it |
 | The game, boot to credits | ❌ not yet |
 
 ## What it is meant to be
@@ -59,7 +61,7 @@ cmake --build build-game --target qilin_disc_tool
 build-game/qilin-disc info path/to/your/disc.iso            # GM4E01, revision 0, and its main.dol's SHA-256
 build-game/qilin-disc dol  path/to/your/disc.iso build-game/main.dol
 cmake -S . -B build-game -DQILIN_GAME_DOL=$PWD/build-game/main.dol
-cmake --build build-game --parallel --target mkdd
+cmake --build build-game --parallel --target mkdd           # lifts the game's code and its DSP microcode, then compiles
 build-game/mkdd path/to/your/disc.iso
 ```
 
@@ -94,10 +96,10 @@ The pad's buttons go by where they are, not by their letters: the GameCube's B i
 The menu has three pages, as in the author's other recompilations.
 
 - **Controls:** which controller plays which port, rumble for each, every control's inputs (keys, a pad's buttons, sticks and triggers, the mouse), the sticks' dead zone, where the triggers click, rumble strength.
-- **Display:** full screen and on which display; the picture's size (whole multiples, fit, fill); render resolution (the window's, or 1x to 8x of 640x480); SMAA anti-aliasing; AMD FSR 1 upscaling with its sharpness; a plain or CRT look; vsync and low latency; presets; anisotropic filtering; true colour; the graphics device; frame times.
+- **Display:** full screen and on which display; the picture's size (whole multiples, fit, fill); render resolution (following the window, or 1x to 8x of 640x480); SMAA anti-aliasing; AMD FSR 1 upscaling with its sharpness; a plain or CRT look; vsync and low latency; presets; anisotropic filtering; true colour; the graphics device; frame times.
 - **Game:** volume, sound output (stereo, or 5.1 decoded from the game's Dolby Surround) and device; the console's own settings (sound, progressive scan); previous saves.
 
-Two groups of options are in the menu and the settings file but **do nothing yet**, and the menu says so: a picture wider than 4:3 (aspect ratio, HUD placement) and frame rates above the game's own (60, or 30 with three or four players). Both need the game's code patched, which waits for the game to run (`docs/roadmap-and-design-targets.md`).
+Two groups of options change the game itself and have not been seen working with it yet: a picture wider than 4:3 (aspect ratio, HUD placement; `docs/enhancements.md`) and frame rates above the game's own 60, which are pictures drawn between its frames (`docs/graphics.md`, `docs/runtime.md`).
 
 The settings (`mkdd.ini`, editable by hand), the saves, captures, the pipeline cache and the log live in `qilin/mkdd` in your per-user application data (Windows: `%LOCALAPPDATA%\qilin\mkdd`). Send a capture (F9), or `mkdd.log`, with any bug report.
 
@@ -124,11 +126,28 @@ Without game data the build links every runtime source into `mkdd_runtime_check`
 
 The shaders are committed as SPIR-V, so no shader compiler is needed. After changing one, run `tools/build_shaders.py`; it uses a `glslangValidator` on the PATH, or the one `-DQILIN_SHADER_COMPILER=ON` builds (target `qilin_shader_compiler`).
 
+## The tools
+
+Each reads the player's own disc or its `main.dol`; none of their output belongs in the repository.
+
+```sh
+build/qilin-disc info|list|extract|dol|verify <image or folder> ...   # the disc (docs/disc.md)
+build/qilin info     path/to/main.dol [--json info.json]   # SHA-256, supported build, entry point, sections
+build/qilin insns    path/to/main.dol [-o listing.txt]     # every word of the code, decoded
+build/qilin cfg      path/to/main.dol [--json cfg.json]    # function discovery and control flow
+build/qilin coverage path/to/main.dol [--list]             # every word: code, padding, data or unknown
+build/qilin suspects path/to/main.dol                      # functions with problems, for review
+build/qilin lift     path/to/main.dol -o generated --plan data/GM4E01/plan.tsv   # the game as C++
+build/qilin-dsp lift path/to/main.dol -o dsp_ucode.cpp     # the DSP microcode in it as C++ (docs/audio.md)
+```
+
+`tools/analysis/port_symbols.py` ports the names in the disc's map (of the debug build) to the retail DOL, and `tools/analysis/make_plan.py` writes or checks `data/GM4E01/plan.tsv` from them (`docs/code-analysis.md`); `hardware_access.py` lists the code's hardware accesses by library (`docs/runtime-analysis.md`); `tools/check/verify_decoder.py` compares the decoder with GNU objdump.
+
 ## Layout
 
 | Path | What |
 |---|---|
-| `recomp/` | The recompiler: DOL loader, decoder, function discovery, lifter, the `qilin` tool; its tests |
+| `recomp/` | The recompiler: DOL loader, decoder, function discovery, lifter, the `qilin` tool; the DSP microcode's lifter (`qilin-dsp`); their tests |
 | `disc/` | The disc reader and the `qilin-disc` tool |
 | `runtime/` | The guest CPU state, the guest address space, system and error reporting for lifted code |
 | `host/` | The platform layer: window, Vulkan presentation and the picture's passes, controllers, sound output, captures, paths |

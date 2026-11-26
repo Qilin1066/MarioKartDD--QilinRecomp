@@ -76,6 +76,27 @@ port are the OS layer's. A call that did reach it would touch the bus's
 registers, which nothing answers; the runtime stops there and names the
 register.
 
+## Runs without a player (development)
+
+For following and driving the game in `--headless` and `--offscreen` runs (`later.cpp`, `pilot.cpp`); all hexadecimal
+addresses are the supported build's.
+
+- `MKDD_DEVICES_LOG=1`: every memory card call with its result, controller resets and rumble, wheel resets asked,
+  ARAM transfers in sum.
+- `MKDD_WATCH=<address>[><offset>...][:1|2|4],...`: logs each value when it changes, with the game time. Each `>`
+  follows the pointer read so far. Useful ones: `803CBDA0` AppMgr's application (4 logo, 12 movie, 10 the menus'
+  SequenceApp, 8 a race), `803C9CE0` SequenceApp's scene (0 title, 1 menu, 3 course select, 7 ghost data),
+  `803CBDB0>C>15C` the title's state (1 PRESS START, 3 card check, 4 its menu), `803CBDB0>C>20E0` the menu's
+  (1 players, 4 VS/co-op, 7 mode, 13 characters), `803CBDDC` CardAgent's state (0 idle, 4 a YES/NO prompt).
+- `MKDD_PILOT_STEPS=<steps>`: plays port 1 by those values instead of the clock, since menus come up seconds
+  earlier or later from run to run and a race ends when it ends (`MKDD_INPUT` is then ignored for port 1; ports 2
+  to 4 keep their scripts). `value=n:presses;...`, taken in order; `pilot.cpp` has the whole syntax.
+- `MKDD_PILOT=<file>` steers port 1's kart along a path of positions, backing out when stuck;
+  `MKDD_PILOT_RECORD=<file>:1` writes such a path from one of the game's own drivers in a Grand Prix.
+
+With these a run goes from boot through the title and menus into a Grand Prix (one player, two in one kart, two
+or four on a split screen) and through a whole time trial to its saved ghost.
+
 ## Tests
 
 `mkdd_pad_test`: the reset protocol with controllers coming and going, the

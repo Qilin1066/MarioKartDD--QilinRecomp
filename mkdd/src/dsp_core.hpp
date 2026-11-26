@@ -18,8 +18,15 @@
 // the extended loads' shared bus) are Dolphin's facts. The code is ours.
 //
 // Nothing here knows the game's runtime: tests drive a Core on its own.
+//
+// A Core may be run on a thread of its own while another plays the CPU: what
+// the two share (the mailboxes, the external interrupt, halt, a request to
+// stop) is atomic, and the running microcode looks at the interrupt and the
+// stop request at every backward jump. Everything else belongs to whoever
+// calls run().
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -140,6 +147,21 @@ MKDD_DSP_INLINE int64_t asrn(int64_t a, uint16_t count) {
 }
 MKDD_DSP_INLINE int64_t lsrn(uint16_t& sr, int64_t a, uint16_t count) { return mov(sr, lsrn(a, count)); }
 MKDD_DSP_INLINE int64_t asrn(uint16_t& sr, int64_t a, uint16_t count) { return mov(sr, asrn(a, count)); }
+// LSRN and ASRN themselves (ac0 by ac1.m) go the other way: a plain count shifts right, bit 6
+// makes it a left shift by 64 minus the low six bits. (Dolphin's interpreter, and what JAudio's
+// microcode needs: it turns a byte address into a word address with LSRN by 1. The manual's text
+// gives these two the same sense as the RX and R forms above; that reads 16-bit samples from four
+// times their address.)
+MKDD_DSP_INLINE int64_t shift_right_by(int64_t a, uint16_t count, bool arithmetic) {
+    const unsigned n = count & 0x3F;
+    if (n == 0) return a;
+    if (count & 0x40) return lsl(a, 64 - n);
+    return arithmetic ? asr(a, n) : lsr(a, n);
+}
+MKDD_DSP_INLINE int64_t lsrn_ac(int64_t a, uint16_t count) { return shift_right_by(a, count, false); }
+MKDD_DSP_INLINE int64_t asrn_ac(int64_t a, uint16_t count) { return shift_right_by(a, count, true); }
+MKDD_DSP_INLINE int64_t lsrn_ac(uint16_t& sr, int64_t a, uint16_t count) { return mov(sr, shift_right_by(a, count, false)); }
+MKDD_DSP_INLINE int64_t asrn_ac(uint16_t& sr, int64_t a, uint16_t count) { return mov(sr, shift_right_by(a, count, true)); }
 
 // Accumulator parts.
 MKDD_DSP_INLINE uint16_t acl(int64_t a) { return static_cast<uint16_t>(a); }
@@ -219,8 +241,9 @@ struct Core {
     uint16_t stack[4][8] = {};  // call, data, loop address, loop counter
     uint8_t sp[4] = {0, 0, 0, 0};
     uint16_t pc = 0;
-    bool halted = true;     // the control register's halt bit
-    bool ext_int = false;   // the CPU asserted the external interrupt; taken when SR's EIE allows
+    std::atomic<bool> halted{true};    // the control register's halt bit
+    std::atomic<bool> ext_int{false};  // the CPU asserted the external interrupt; taken when SR's EIE allows
+    std::atomic<bool> stop{false};     // (another thread) leave run() at the next backward jump
     bool waiting = false;   // run() came back because only the CPU can move the DSP on
 
     // Idle detection: a taken backward jump with nothing stored since the same jump, and the same
@@ -232,8 +255,8 @@ struct Core {
     uint8_t idle_sp[4] = {0, 0, 0, 0};
 
     // Mailboxes: bit 31 is the "waiting to be read" flag of each.
-    uint32_t cpu_mail = 0;  // from the CPU
-    uint32_t dsp_mail = 0;  // to the CPU
+    std::atomic<uint32_t> cpu_mail{0};  // from the CPU
+    std::atomic<uint32_t> dsp_mail{0};  // to the CPU
 
     uint16_t ifx[0x100] = {};  // hardware registers as last written
     uint32_t acc_start = 0, acc_end = 0, acc_current = 0;
@@ -249,6 +272,8 @@ struct Core {
     uint8_t* aram = nullptr;                                        // kAramSize bytes
     uint8_t* (*memory)(void* user, uint32_t address, uint32_t bytes) = nullptr;  // main memory for a DMA
     void (*irq)(void* user) = nullptr;                              // DIRQ: the DSP interrupt at the CPU
+    // (optional) told of each DMA with data memory: DSCR, the DSP's word address, words, main memory
+    void (*dma_hook)(void* user, unsigned control, unsigned at, unsigned words, const uint8_t* main) = nullptr;
     bool (*rom)(void* user, Core&, uint16_t address) = nullptr;     // a jump into the ROM; false: stop running
     void (*fatal)(void* user, const char* message) = nullptr;       // must not return
     void* user = nullptr;
@@ -313,7 +338,12 @@ struct Core {
     uint16_t loop_start() const { return stack[0][sp[0] - 1]; }
 
     // The external interrupt, where SR may have just allowed it.
-    bool int_due(uint16_t sr) const { return ext_int && (sr & kEIE); }
+    bool int_due(uint16_t sr) const { return ext_int.load(std::memory_order_relaxed) && (sr & kEIE); }
+    // At a backward jump: has the CPU's side asked for something meanwhile? (Never, when the CPU's
+    // side and the DSP are one thread: the interrupt is then taken before the microcode runs on.)
+    MKDD_DSP_INLINE bool attention() const {
+        return ext_int.load(std::memory_order_relaxed) || stop.load(std::memory_order_relaxed);
+    }
     // Enter it: the place to come back to and SR go on the stacks; the new SR is returned.
     uint16_t take_int(uint16_t sr, uint16_t return_pc) {
         ext_int = false;

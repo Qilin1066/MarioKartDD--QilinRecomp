@@ -62,9 +62,10 @@ struct Player {
     std::vector<Binding> controls[kControlCount];
 };
 
-// Frames a second: the game's own (60 with one or two players, 30 with three
-// or four), 60 always, the display's refresh rate, or as many as the computer
-// draws. Above the game's own needs the game patched (enhance.hpp).
+// Frames a second: the game's own 59.94 (original and sixty are the same
+// for this game: each frame is shown as it comes), the display's refresh
+// rate, or as many as the computer draws. Above the game's own they are
+// pictures drawn between its frames (interp.hpp, docs/graphics.md).
 enum class FrameRate : uint8_t { original, sixty, display, unlimited };
 // The HUD where the picture is wider than 4:3: at the screen's edges, in the
 // middle 4:3, or stretched with the picture.
@@ -88,7 +89,7 @@ struct Settings {
     qilin::host::Look look = qilin::host::Look::plain;
     unsigned scanlines = 60;          // CRT: the gaps between raster lines, 0-100 (percent dark)
     unsigned mask = 30;               // CRT: the phosphor stripes, 0-100
-    unsigned scale = 0;               // render_resolution: 1-8x the console's 640x480; 0: auto (the window's size, main.cpp)
+    unsigned scale = 0;               // render_resolution: 1-8x the console's 640x480; 0: auto (follows the window's size, main.cpp)
     unsigned anisotropy = 1;          // texture filtering: 1 (the console's), 2, 4, 8 or 16
     bool true_color = true;           // 24-bit colour; false: the console's 18 bits, dithered (the "original" preset)
     bool vsync = true;                // at the display's refresh (no tearing); off: the lowest latency

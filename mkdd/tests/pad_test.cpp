@@ -17,6 +17,9 @@ bool rumble[4] = {};
 namespace mkdd {
 GcPad gc_pad(int port) { return pads[port]; }
 void gc_rumble(int port, bool on) { rumble[port] = on; }
+void pilot_frame() {}  // (pilot.hpp: no pilot here)
+bool pilot_pad(GcPad&) { return false; }
+void pilot_status(uint32_t) {}
 }
 
 int main() {

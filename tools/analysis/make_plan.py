@@ -99,11 +99,18 @@ FUNCTIONS = {
     "OSReport": ("lift", "dolphin/os: OSReport (formats through MSL's vprintf)"),
     "__PADDisableRecalibration": ("lift", "dolphin/pad: __PADDisableRecalibration (a flag in low memory)"),
     "EXIGetType": ("lift", "dolphin/exi: EXIGetType (a table over EXIGetID)"),
+    # The OS agent's choice: the boot's DSP hand-shake runs as written, against the emulated DSP.
+    "__OSInitAudioSystem": ("lift", "dolphin/os: __OSInitAudioSystem (runs its stub program on the emulated DSP)"),
     # The aspect ratio the cameras are built from: answered natively for wide screens
     # (docs/enhancements.md). Each returns one float of SystemData (lfs f1,..(r13); blr).
     "getPerspAspect__6SystemFv": ("replace", "game: aspect getters (enhancements)"),
     "getPerspAspectDiv2__6SystemFv": ("replace", "game: aspect getters (enhancements)"),
     "getPerspAspectDiv4__6SystemFv": ("replace", "game: aspect getters (enhancements)"),
+    # The two loaders of a position matrix: natively, writing the same bytes to the FIFO and
+    # saying whose matrix it is, for the pictures drawn between frames (mkdd/src/mtxtag.cpp,
+    # docs/graphics.md; tools/check/mtxtag_check.py compares the bytes with the originals').
+    "J3DFifoLoadPosMtxImm__FPA4_fUl": ("replace", "JSystem J3D: J3DFifoLoadPosMtxImm (tagged matrix loads)"),
+    "GXLoadPosMtxImm": ("replace", "dolphin/gx: GXLoadPosMtxImm (tagged matrix loads)"),
     # MSL's FILE procedures on the debugger's console: stdin/stdout/stderr point at them, and
     # exit's __close_all calls through them. With no debugger they report an I/O error.
     "__TRK_write_console": ("replace", "MetroTRK: console procedures behind MSL's FILE (no debugger)"),

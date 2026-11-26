@@ -15,4 +15,13 @@ void run_after(uint64_t ticks, std::function<void(qilin::rt::Cpu&)> work);
 // Milliseconds and microseconds of the guest's clock, in its ticks.
 uint64_t ticks_from_us(uint64_t us);
 
+// MKDD_DEVICES_LOG=1: the devices log what the game asks of them (card calls
+// and their results, controller resets and rumble, ARAM transfers in sum).
+bool devices_log();
+// Development: MKDD_WATCH=<address>[><offset>...][:1|2|4],... (hexadecimal; each
+// > follows the pointer read so far and adds the offset) logs each of these guest
+// values when it changes, looked at once a frame (at PADRead), with the game
+// time in seconds: to follow the game's state in runs without a picture.
+void watch_guest_values();
+
 }  // namespace mkdd

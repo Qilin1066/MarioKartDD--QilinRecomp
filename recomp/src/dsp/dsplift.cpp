@@ -481,8 +481,8 @@ struct Lifter {
             const std::string step = n == "ilrrd" ? ar(a) + " = " + dec(a) + "; " : n == "ilrri" ? ar(a) + " = " + inc(a) + "; "
                                    : n == "ilrrn" ? ar(a) + " = " + add_ix(a, a) + "; " : "";
             m = "{ const uint16_t i_ = s.irom(" + ar(a) + "); " + A + " = set_acm(r.sr, " + A + ", i_); " + step + "}";
-        } else if (n == "lsrn") m = "r.ac0 = lsrn(" + F + "r.ac0, acm(r.ac1));";
-        else if (n == "asrn") m = "r.ac0 = asrn(" + F + "r.ac0, acm(r.ac1));";
+        } else if (n == "lsrn") m = "r.ac0 = lsrn_ac(" + F + "r.ac0, acm(r.ac1));";
+        else if (n == "asrn") m = "r.ac0 = asrn_ac(" + F + "r.ac0, acm(r.ac1));";
         else if (n == "addis") m = A + " = add(" + F + A + ", " + imm8 + ");";
         else if (n == "cmpis") m = compare(A, imm8);
         else if (n == "lris") m = rwrite(in, 0x18 + f['d'], num(static_cast<uint16_t>(static_cast<int8_t>(f['i']))));
@@ -740,8 +740,9 @@ struct Lifter {
     // A jump as the instruction at `from` takes it: backward ones may be the DSP waiting.
     std::string jump(unsigned from, unsigned target) const {
         if (target <= from && target < 0x8000 && code.contains(static_cast<uint16_t>(target)))
-            return "{ if (s.maybe_idle(0x" + hex4(from) + ")) { s.r = r; if (s.idle_slow()) { s.pc = 0x" + hex4(target) + "; return; } } goto " +
-                   label(target) + "; }";
+            return "{ if (s.attention()) { if (s.stop.load()) { s.pc = 0x" + hex4(target) + "; s.r = r; return; } if (r.sr & 0x0800) { r.sr = s.take_int(r.sr, 0x" +
+                   hex4(target) + "); goto " + label(0x000E) + "; } } if (s.maybe_idle(0x" + hex4(from) + ")) { s.r = r; if (s.idle_slow()) { s.pc = 0x" +
+                   hex4(target) + "; return; } } goto " + label(target) + "; }";
         return go(target);
     }
 

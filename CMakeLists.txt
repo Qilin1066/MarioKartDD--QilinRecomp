@@ -265,8 +265,9 @@ if(QILIN_HOST)
     # The game's renderer end to end, without the game: GX register writes through
     # the recorder and renderer, the frame read back (skipped without Vulkan 1.3).
     add_executable(mkdd_render_test mkdd/tests/render_test.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp
-                   mkdd/src/renderer.cpp mkdd/src/priority.cpp mkdd/src/gpu.cpp)
+                   mkdd/src/renderer.cpp mkdd/src/priority.cpp mkdd/src/gpu.cpp mkdd/src/interp.cpp mkdd/src/mtxtag.cpp)
     target_include_directories(mkdd_render_test PRIVATE mkdd/src)
+    target_sources(mkdd_render_test PRIVATE mkdd/src/hud.cpp)  # (the recorder places the HUD)
     target_link_libraries(mkdd_render_test PRIVATE qilin_host qilin_rt qilin_warnings)
     qilin_tool(mkdd_render_test)
     if(NOT MSVC)  # Vulkan structures written {sType}, as in the host layer
@@ -312,10 +313,10 @@ add_test(NAME mkdd_threads_test COMMAND mkdd_threads_test)
 set_tests_properties(mkdd_threads_test PROPERTIES TIMEOUT 30)
 add_test(NAME mkdd_threads_test_shutdown COMMAND mkdd_threads_test)
 set_tests_properties(mkdd_threads_test_shutdown PROPERTIES TIMEOUT 30 ENVIRONMENT THREADS_TEST_LEAVE=shutdown
-                     PASS_REGULAR_EXPRESSION "the game chose to power off: closing")
+                     PASS_REGULAR_EXPRESSION "the game chose the console's menu: closing")
 add_test(NAME mkdd_threads_test_restart COMMAND mkdd_threads_test)
 set_tests_properties(mkdd_threads_test_restart PROPERTIES TIMEOUT 30 ENVIRONMENT THREADS_TEST_LEAVE=restart
-                     PASS_REGULAR_EXPRESSION "OSRestart started the program again(.|\n)*all passed")
+                     PASS_REGULAR_EXPRESSION "OSResetSystem started the program again(.|\n)*all passed")
 
 # The settings file's reader and writer.
 add_executable(mkdd_settings_test mkdd/tests/settings_test.cpp mkdd/src/settings.cpp)
@@ -323,6 +324,13 @@ target_include_directories(mkdd_settings_test PRIVATE mkdd/src host/include)
 target_link_libraries(mkdd_settings_test PRIVATE qilin_rt qilin_warnings)
 qilin_tool(mkdd_settings_test)
 add_test(NAME mkdd_settings_test COMMAND mkdd_settings_test)
+# The widened picture without the game: the aspect getters and the cameras over
+# guest memory, the HUD's placing through the recorder (no window, no GPU).
+add_executable(mkdd_enhance_test mkdd/tests/enhance_test.cpp mkdd/src/enhance.cpp mkdd/src/hud.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp)
+target_include_directories(mkdd_enhance_test PRIVATE mkdd/src host/include)
+target_link_libraries(mkdd_enhance_test PRIVATE qilin_rt qilin_warnings)
+qilin_tool(mkdd_enhance_test)
+add_test(NAME mkdd_enhance_test COMMAND mkdd_enhance_test)
 # The controller ports: bindings to a GameCube controller, and scripted input.
 add_executable(mkdd_input_test mkdd/tests/input_test.cpp mkdd/src/input.cpp mkdd/src/settings.cpp)
 target_include_directories(mkdd_input_test PRIVATE mkdd/src host/include)
@@ -399,8 +407,10 @@ if(Python3_FOUND)
 endif()
 
 # The game's runtime: everything in mkdd but the code lifted from main.dol.
-set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
+set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/pilot.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/interp.cpp mkdd/src/mtxtag.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
+list(APPEND mkdd_runtime_sources mkdd/src/dsp_trace.cpp)  # (MKDD_AUDIO_DUMP, MKDD_AUDIO_TRACE)
 list(APPEND mkdd_runtime_sources mkdd/src/input.cpp)  # the controller ports (input.hpp)
+list(APPEND mkdd_runtime_sources mkdd/src/enhance.cpp mkdd/src/hud.cpp)  # the widened picture (enhance.hpp)
 
 # ---- The game: built only from the player's own main.dol ----
 # cmake -DQILIN_GAME_DOL=<extracted disc>/sys/main.dol: qilin lift turns it
@@ -412,6 +422,7 @@ if(QILIN_GAME_DOL)
         message(FATAL_ERROR "the game needs the host platform layer: configure with QILIN_HOST=ON")
     endif()
     set(QILIN_LIFT_FILES 32)
+    set(QILIN_GAME_PLAN "${CMAKE_CURRENT_SOURCE_DIR}/data/GM4E01/plan.tsv" CACHE FILEPATH "The library plan qilin lift reads")
     set(gen ${CMAKE_CURRENT_BINARY_DIR}/generated)
     set(gen_sources ${gen}/table.cpp ${gen}/replaced.cpp)
     math(EXPR last "${QILIN_LIFT_FILES} - 1")
@@ -426,19 +437,19 @@ if(QILIN_GAME_DOL)
     endforeach()
     add_custom_command(
         OUTPUT ${gen}/functions.hpp ${gen_sources}
-        COMMAND qilin lift ${QILIN_GAME_DOL} -o ${gen} --plan ${CMAKE_CURRENT_SOURCE_DIR}/data/GM4E01/plan.tsv
+        COMMAND qilin lift ${QILIN_GAME_DOL} -o ${gen} --plan ${QILIN_GAME_PLAN}
                 --files ${QILIN_LIFT_FILES}
-        DEPENDS qilin ${QILIN_GAME_DOL} ${CMAKE_CURRENT_SOURCE_DIR}/data/GM4E01/plan.tsv
+        DEPENDS qilin ${QILIN_GAME_DOL} ${QILIN_GAME_PLAN}
         COMMENT "Lifting the game's main.dol to C++")
     add_executable(mkdd ${mkdd_runtime_sources} ${gen_sources})
     target_include_directories(mkdd PRIVATE mkdd/src ${gen})
-    target_link_libraries(mkdd PRIVATE qilin_rt qilin_dol qilin_host qilin_imgui SDL3::SDL3-static)
+    target_link_libraries(mkdd PRIVATE qilin_rt qilin_dol qilin_disc qilin_host qilin_imgui SDL3::SDL3-static)
     if(WIN32)
         target_link_libraries(mkdd PRIVATE winmm)  # timeBeginPeriod (main.cpp)
     endif()
     target_compile_definitions(mkdd PRIVATE MKDD_VERSION="${PROJECT_VERSION}")
     # Our own sources get the warning set; the lifter's output doesn't (unused labels and locals).
-    set_source_files_properties(mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/settings.cpp
+    set_source_files_properties(mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/pilot.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/ax.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/settings.cpp
         PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/W4;/permissive-,-Wall;-Wextra;-Wpedantic;-Wshadow>")
     # The renderer writes Vulkan structures {sType} with the rest zeroed, as the host layer does.
     set_source_files_properties(mkdd/src/renderer.cpp mkdd/src/menu.cpp
@@ -476,9 +487,10 @@ endif()
 # For the Windows download (tools/player-kit), as the APB recomp's: the game's
 # runtime and every library it links (the host layer, SDL3, Dear ImGui, volk),
 # merged into one archive, with the headers the lifted code includes, qilin,
-# the library plan, and the flags and libraries to build the rest with
-# (kit.ninja). A player's own PC lifts their own main.dol and compiles only
-# that code, with the same compiler, against the kit. Needs a MinGW toolchain
+# qilin-disc and qilin-dsp, the library plan, and the flags and libraries to
+# build the rest with (kit.ninja). A player's own PC lifts their own main.dol
+# (the game's code and the DSP's microcode in it) and compiles only that code,
+# with the same compiler, against the kit. Needs a MinGW toolchain
 # (tools/player-kit/mingw-cross.cmake) and SDL3 built statically (the fetched one).
 option(QILIN_PLAYER_KIT "Build the player kit (tools/player-kit)" OFF)
 if(QILIN_PLAYER_KIT)
@@ -487,9 +499,9 @@ if(QILIN_PLAYER_KIT)
     endif()
     add_library(mkdd_kit_main OBJECT ${mkdd_runtime_sources})
     target_include_directories(mkdd_kit_main PRIVATE mkdd/src)
-    target_link_libraries(mkdd_kit_main PRIVATE qilin_rt qilin_dol qilin_host qilin_imgui SDL3::SDL3-static qilin_warnings)
+    target_link_libraries(mkdd_kit_main PRIVATE qilin_rt qilin_dol qilin_disc qilin_host qilin_imgui SDL3::SDL3-static qilin_warnings)
     target_compile_definitions(mkdd_kit_main PRIVATE MKDD_VERSION="${PROJECT_VERSION}")
-    set(kit_libraries qilin_rt qilin_dol qilin_host qilin_imgui qilin_volk SDL3-static)
+    set(kit_libraries qilin_rt qilin_dol qilin_disc qilin_host qilin_imgui qilin_volk SDL3-static)
     set(kit_archive "${CMAKE_BINARY_DIR}/libmkdd_kit.a")
     set(mri "CREATE ${kit_archive}\n")
     foreach(library IN LISTS kit_libraries)
@@ -515,12 +527,16 @@ if(QILIN_PLAYER_KIT)
         "cxxflags = -O2 -DNDEBUG -std=c++23 -w -ffp-contract=off -I$kit/include\n"
         "ldflags = -static -O2 -Wl,--stack,16777216\n"
         "libs = $kit/lib/libmkdd_kit.a ${kit_system_text}\n")
-    # Linked with stand-ins for the lifted code: the kit is complete.
-    add_executable(mkdd_kit_link_check tools/player-kit/link_check.cpp)
+    # Linked with stand-ins for the lifted code (the game's, and the DSP microcode's empty
+    # table): the kit is complete.
+    add_executable(mkdd_kit_link_check tools/player-kit/link_check.cpp mkdd/src/dsp_no_ucode.cpp)
+    target_include_directories(mkdd_kit_link_check PRIVATE mkdd/src)
     target_link_libraries(mkdd_kit_link_check PRIVATE qilin_rt "${kit_archive}" ${kit_system_libraries})
     add_dependencies(mkdd_kit_link_check mkdd_kit)
 
-    install(TARGETS qilin qilin_disc_tool RUNTIME DESTINATION kit COMPONENT player)
+    install(TARGETS qilin qilin_disc_tool qilin-dsp RUNTIME DESTINATION kit COMPONENT player)
+    # What qilin-dsp's output includes (the lifted game code includes only the runtime's headers).
+    install(FILES mkdd/src/dsp_core.hpp DESTINATION kit/include COMPONENT player)
     install(FILES "${kit_archive}" DESTINATION kit/lib COMPONENT player)
     install(FILES "${CMAKE_BINARY_DIR}/kit.ninja" data/GM4E01/plan.tsv DESTINATION kit COMPONENT player)
     file(GLOB kit_headers runtime/include/qilin/rt/*.hpp)
@@ -532,7 +548,7 @@ if(QILIN_HOST AND NOT QILIN_GAME_DOL AND NOT QILIN_PLAYER_KIT)
     add_executable(mkdd_runtime_check ${mkdd_runtime_sources} tools/player-kit/link_check.cpp)
     target_sources(mkdd_runtime_check PRIVATE mkdd/src/dsp_no_ucode.cpp)
     target_include_directories(mkdd_runtime_check PRIVATE mkdd/src)
-    target_link_libraries(mkdd_runtime_check PRIVATE qilin_rt qilin_dol qilin_host qilin_imgui SDL3::SDL3-static qilin_warnings)
+    target_link_libraries(mkdd_runtime_check PRIVATE qilin_rt qilin_dol qilin_disc qilin_host qilin_imgui SDL3::SDL3-static qilin_warnings)
     target_compile_definitions(mkdd_runtime_check PRIVATE MKDD_VERSION="${PROJECT_VERSION}")
     # Until the host's input layer and the audio layer's ARAM are merged: pad.cpp and ar.cpp bring stand-ins.
     if(WIN32)
@@ -583,6 +599,13 @@ target_compile_definitions(mkdd_ar_test PRIVATE MKDD_DEVICES_STANDALONE)
 target_link_libraries(mkdd_ar_test PRIVATE qilin_rt qilin_warnings)
 qilin_tool(mkdd_ar_test)
 add_test(NAME mkdd_ar_test COMMAND mkdd_ar_test)
+
+# The DVD replacements over a small synthetic disc image.
+add_executable(mkdd_dvd_test mkdd/tests/dvd_test.cpp mkdd/src/dvd.cpp)
+target_include_directories(mkdd_dvd_test PRIVATE mkdd/src)
+target_link_libraries(mkdd_dvd_test PRIVATE qilin_rt qilin_disc qilin_warnings)
+qilin_tool(mkdd_dvd_test)
+add_test(NAME mkdd_dvd_test COMMAND mkdd_dvd_test)
 
 add_executable(qilin_analog_test host/tests/analog_test.cpp)
 target_include_directories(qilin_analog_test PRIVATE host/include)

@@ -14,7 +14,9 @@
 800240B4	80026880	lift	JSystem/JUtility (force feedback)
 80026880	80026F0C	lift	JSystem/JMath
 80026F0C	8004D918	lift	JSystem/J2DGraph
-8004D918	8007A494	lift	JSystem/J3D
+8004D918	80067A64	lift	JSystem/J3D
+80067A64	80067AE8	replace	JSystem J3D: J3DFifoLoadPosMtxImm (tagged matrix loads)
+80067AE8	8007A494	lift	JSystem/J3D
 8007A494	8007BE38	lift	JSystem/JFramework
 8007BE38	8008959C	lift	JSystem/JParticle
 8008959C	8008F938	lift	JSystem/JAudio (JAInterface)
@@ -30,7 +32,9 @@
 800B2E58	800B31F4	lift	dolphin/arq (request queue over AR)
 800B31F4	800B37F4	lift	dolphin/dsp (task manager; the DSP's mailboxes are emulated)
 800B37F4	800BA4FC	replace	dolphin/card
-800BA4FC	800C2E00	lift	dolphin/gx (its FIFO and registers are emulated)
+800BA4FC	800C20D8	lift	dolphin/gx (its FIFO and registers are emulated)
+800C20D8	800C2128	replace	dolphin/gx: GXLoadPosMtxImm (tagged matrix loads)
+800C2128	800C2E00	lift	dolphin/gx (its FIFO and registers are emulated)
 800C2E00	800C2E38	drop	debugger link stubs (amcstubs, odenotstub)
 800C2E38	800C38B8	drop	OdemuExi2 (debugger link over EXI2)
 800C38B8	800C5294	replace	dolphin/exi
@@ -42,7 +46,8 @@
 800E4760	800E58D8	lift	dolphin/ip: md5, base64
 800E58D8	800E6B9C	replace	dolphin/os
 800E6B9C	800E6DD0	lift	dolphin/os: OSAlloc (heaps) and OSArena (arena bounds), no hardware access
-800E6DD0	800E8078	replace	dolphin/os
+800E6DD0	800E6F8C	lift	dolphin/os: __OSInitAudioSystem (runs its stub program on the emulated DSP)
+800E6F8C	800E8078	replace	dolphin/os
 800E8078	800E80F8	lift	dolphin/os: OSReport (formats through MSL's vprintf)
 800E80F8	800EC7B8	replace	dolphin/os
 800EC7B8	800EC84C	lift	dolphin/os: __init_user, __init_cpp, _ExitProcess (the EABI's constructors)

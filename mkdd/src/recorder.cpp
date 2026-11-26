@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -26,6 +27,7 @@
 #include <unordered_map>
 
 #include "gx.hpp"
+#include "hud.hpp"
 #include "qilin/rt/system.hpp"
 #include "texture.hpp"
 
@@ -627,6 +629,9 @@ enum : uint32_t {
     kPartAll = 63,
 };
 uint32_t g_parts = kPartAll;  // changed since the last state was built
+// The load each matrix slot holds (the frame's loads), and the view last given.
+uint32_t g_slot_load[kMatrixSlots] = {kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad, kNoLoad};
+uint16_t g_view = kNoView;
 void build_lights(const uint32_t* xf, State& s);
 void build_xf_regs(const uint32_t* xf, State& s);
 void build_bp(const Registers& r, State& s);
@@ -942,6 +947,30 @@ std::unique_ptr<Frame> next_frame(unsigned timeout_ms) {
 }
 
 void state_changed() { g_dirty = true, g_parts = kPartAll, cp_changed(); }
+void matrix_loaded(uint32_t address, const uint32_t* words, uint32_t tag, const float* view, uint32_t id) {
+    Frame& f = *g_frame;
+    if (view) {
+        // The frame's views, each once: a handful (a camera a player, and whatever 2D is drawn under).
+        uint16_t found = kNoView;
+        if (g_view != kNoView && std::memcmp(f.views[g_view].m, view, 48) == 0) found = g_view;
+        for (size_t i = 0; found == kNoView && i < f.views.size(); ++i)
+            if (std::memcmp(f.views[i].m, view, 48) == 0) found = uint16_t(i);
+        if (found == kNoView && f.views.size() < 64) {
+            found = uint16_t(f.views.size());
+            View& v = f.views.emplace_back();
+            std::memcpy(v.m, view, 48);
+            v.has_projection = false;
+        }
+        g_view = found;
+    }
+    if (address % 12 != 0 || address / 12 >= kMatrixSlots) return;  // a texture matrix, or not a whole slot
+    Load& l = f.loads.emplace_back();
+    l.tag = tag, l.id = id, l.slot = uint16_t(address / 12), l.view = g_view;
+    std::memcpy(l.mv, words, 48);
+    g_slot_load[l.slot] = uint32_t(f.loads.size() - 1);
+    g_dirty = true, g_parts |= kPartPos;  // (the same matrix again is still another load: the state's info changes)
+}
+
 void xf_changed(uint32_t address, uint32_t count) {
     const uint32_t end = address + count;
     const auto overlaps = [&](uint32_t lo, uint32_t hi) { return address < hi && end > lo; };
@@ -1132,6 +1161,22 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
         }
         g_state = uint32_t(f.states.size() - 1);
         g_dirty = false, g_parts = 0;
+        // Its info: the slots' loads and the view; the view's projection, if this is the first perspective one under it.
+        StateInfo& info = f.state_info.emplace_back();
+        std::memcpy(info.load, g_slot_load, sizeof info.load);
+        info.view = g_view;
+        // (The one that reaches farthest, if several are used under it: the scene's own, not a
+        // close-up's; far = p5 / p4.)
+        if (g_view != kNoView && r.xf[0x1026] == 0) {
+            View& v = f.views[g_view];
+            const float p4 = as_float(r.xf[0x1024]), p5 = as_float(r.xf[0x1025]);
+            const float far_z = p4 != 0 ? std::fabs(p5 / p4) : 0.0f;
+            const float had = v.has_projection && v.projection[4] != 0 ? std::fabs(v.projection[5] / v.projection[4]) : -1.0f;
+            if (far_z > had) {
+                std::memcpy(v.projection, r.xf + 0x1020, 24);
+                v.has_projection = true;
+            }
+        }
     }
     Draw d{};
     d.state = g_state;
@@ -1176,6 +1221,8 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     viewport_and_scissor(r, d);
     bind_textures(r, d);
     d.primitive = g_primitive_serial;
+    if (const uint32_t row = r.cp[0x30] & 63; row % 3 == 0 && row / 3 < kMatrixSlots && g_slot_load[row / 3] != kNoLoad)
+        d.tag = f.loads[g_slot_load[row / 3]].tag;
     f.packets.push_back({Packet::kDraw, uint32_t(f.draws.size())});
     g_join = {type <= 4, uint32_t(f.draws.size()), has, small};
     f.draws.push_back(d);
@@ -1239,6 +1286,85 @@ void record_tlut_load(const Registers& r, uint32_t command) {
 }
 
 
+
+// ---- MKDD_SURVEY=<file>: where a frame's 3D drawing falls across the picture, and where its
+// cameras are. For checking that what the game culls on the CPU follows a widened picture: with
+// the cameras widened, the middle 1 / widening of the width is what a 4:3 picture showed, and
+// things culled against that would leave the bands beside it thin. Every 600 frames: of the
+// perspective draws' vertices (one in four) on screen, how many fall in each eighth of the half
+// width from the middle out; and of the draws, how many lie wholly within each eighth's outer
+// edge (by their outermost vertex) and wholly beyond each eighth's inner edge (by their
+// innermost). And every 20th frame, each view's eye and the direction it looks.
+namespace {
+struct Survey {
+    FILE* out = nullptr;
+    uint64_t frames = 0, vertices[8] = {}, within[8] = {}, beyond[8] = {}, draws = 0;
+};
+Survey* const g_survey = [] () -> Survey* {
+    const char* path = std::getenv("MKDD_SURVEY");
+    FILE* f = path && *path ? std::fopen(path, "w") : nullptr;
+    if (!f) return nullptr;
+    auto* s = new Survey;
+    s->out = f;
+    return s;
+}();
+
+void survey(const Frame& f, uint64_t frame_number) {
+    Survey& s = *g_survey;
+    for (const Draw& d : f.draws) {
+        const State& st = f.states[d.state];
+        if (st.projection[3][2] != -1.0f || d.pipeline.topology != 0) continue;
+        float lo = 2.0f, hi = -1.0f;
+        const auto vertex = [&](uint32_t i) {
+            const float* p;
+            uint32_t row;
+            if (d.pipeline.small_vertices) p = f.small[i].pos, row = f.small[i].matrices[0] & 0xFFu;
+            else p = f.vertices[i].pos, row = f.vertices[i].matrices[0] & 0xFFu;
+            if (row > 61) return;
+            float v[3];
+            for (int k = 0; k < 3; ++k) v[k] = st.posmtx[row + k][0] * p[0] + st.posmtx[row + k][1] * p[1] + st.posmtx[row + k][2] * p[2] + st.posmtx[row + k][3];
+            const float w = -v[2];
+            if (!(w > 0)) return;
+            const float x = std::fabs((st.projection[0][0] * v[0] + st.projection[0][2] * v[2]) / w);
+            const float y = std::fabs((st.projection[1][1] * v[1] + st.projection[1][2] * v[2]) / w);
+            lo = std::min(lo, x), hi = std::max(hi, x);
+            if (x < 1.0f && y < 1.0f) ++s.vertices[unsigned(x * 8.0f)];
+        };
+        if (d.direct) {
+            for (uint32_t i = 0; i < d.index_count; i += 4) vertex(d.first_index + i);
+        } else {
+            for (uint32_t i = 0; i < d.index_count; i += 4) vertex(f.indices[d.first_index + i]);
+        }
+        if (hi < 0) continue;
+        ++s.draws;
+        for (unsigned b = 0; b < 8; ++b) {
+            if (hi < float(b + 1) / 8.0f) ++s.within[b];
+            if (lo >= float(b) / 8.0f && lo < 1.0f) ++s.beyond[b];
+        }
+    }
+    if (frame_number % 20 == 0)
+        for (size_t v = 0; v < f.views.size(); ++v) {
+            const float* m = f.views[v].m;
+            const float eye[3] = {-(m[0] * m[3] + m[4] * m[7] + m[8] * m[11]), -(m[1] * m[3] + m[5] * m[7] + m[9] * m[11]),
+                                  -(m[2] * m[3] + m[6] * m[7] + m[10] * m[11])};
+            std::fprintf(s.out, "view %llu %u of %u: eye %.0f %.0f %.0f looks %.2f %.2f %.2f\n", static_cast<unsigned long long>(frame_number),
+                         unsigned(v), unsigned(f.views.size()), double(eye[0]), double(eye[1]), double(eye[2]), double(-m[8]), double(-m[9]), double(-m[10]));
+        }
+    if (++s.frames < 600) return;
+    std::fprintf(s.out, "survey to frame %llu: %llu draws;", static_cast<unsigned long long>(frame_number), static_cast<unsigned long long>(s.draws));
+    const auto row = [&](const char* name, const uint64_t* h) {
+        std::fprintf(s.out, " %s", name);
+        for (unsigned i = 0; i < 8; ++i) std::fprintf(s.out, " %llu", static_cast<unsigned long long>(h[i]));
+        std::fprintf(s.out, ";");
+    };
+    row("vertices by eighth", s.vertices), row("draws wholly within", s.within), row("draws wholly beyond", s.beyond);
+    std::fprintf(s.out, "\n");
+    std::fflush(s.out);
+    FILE* keep = s.out;
+    s = Survey{};
+    s.out = keep;
+}
+}  // namespace
 
 static void record_copy_timed(const Registers& r, uint32_t command) {
     Frame& f = *g_frame;
@@ -1307,12 +1433,16 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
     if (c.to_xfb) {
         f.captured = g_capture_next;
         g_capture_next = false;
+        if (g_survey) [[unlikely]] survey(f, g_stats.frames.load(std::memory_order_relaxed));
         textures_end_frame(f);
+        hud::place(f);  // (a widened picture: the flat parts back in proportion)
         g_stats.frames.fetch_add(1, std::memory_order_relaxed);
         submit(std::move(g_frame));
         g_frame = spare_frame();
         g_dirty = true;
         g_join.valid = false;
+        std::fill(std::begin(g_slot_load), std::end(g_slot_load), kNoLoad);  // loads don't outlive their frame
+        g_view = kNoView;
     }
 }
 

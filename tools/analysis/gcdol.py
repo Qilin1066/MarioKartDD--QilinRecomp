@@ -228,3 +228,29 @@ def read_symbols(path):
         p = line.split()
         out.append((int(p[0], 16), int(p[1], 16), p[2], p[3], p[4], p[5] if len(p) > 5 else "A"))
     return out
+
+
+def native_tables(directories):
+    """[(address, name, file name, directory)] of every `{address, "name", fn}` replacement-table
+    entry in the .cpp files. The address is a literal or a constant (`build::kOSInit`) defined
+    as `kName = 0x8...` in a .hpp or .cpp there. A later directory's file replaces an earlier
+    one's of the same name."""
+    import pathlib
+    files = {}
+    for d in directories:
+        for f in sorted(pathlib.Path(d).glob("*.[ch]pp")):
+            files[f.name] = f
+    texts = {n: f.read_text(encoding="utf-8", errors="replace") for n, f in files.items()}
+    constants = {}
+    for text in texts.values():
+        for m in re.finditer(r"\b(k[A-Z]\w*)\s*=\s*0x(8[0-9A-Fa-f]{7})u?\s*;", text):
+            constants[m.group(1)] = int(m.group(2), 16)
+    out = []
+    for n, text in sorted(texts.items()):
+        if not n.endswith(".cpp"):
+            continue
+        for m in re.finditer(r"\{\s*(?:0x(8[0-9A-Fa-f]{7})u?|(?:\w+::)*(k[A-Z]\w*))\s*,\s*\"([^\"]+)\"", text):
+            a = int(m.group(1), 16) if m.group(1) else constants.get(m.group(2))
+            if a is not None:
+                out.append((a, m.group(3), n, files[n].parent.parent.parent.name))
+    return out

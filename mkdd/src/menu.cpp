@@ -38,7 +38,7 @@ constexpr unsigned kCaptureFrames = 4; // F9: this many pictures in a row
 constexpr const char* kHint = "F1 or Esc (controller: Back + Start): settings";
 // What an option that needs the game patched says beside it (enhance.hpp).
 constexpr const char* kNeedsAspect = "(not yet: needs the game's cameras, culling and HUD patched; the picture is 4:3)";
-constexpr const char* kNeedsFrameRate = "(not yet: needs the game's frame step patched; it runs at its own 60, or 30 with three or four players)";
+constexpr const char* kNeedsFrameRate = "(not in this build: the game's two matrix loaders aren't replaced, so no pictures can be drawn between its frames)";
 
 // ImGui's Vulkan backend loads its functions through volk's loader.
 VkInstance g_instance = VK_NULL_HANDLE;
@@ -382,9 +382,8 @@ void Menu::draw_frame_times() {
         ImGui::Text("%.1f fps  %.2f ms", s.fps, s.average_ms);
         ImGui::Text("1%% low %.1f  0.1%% low %.1f", s.low1_fps, s.low01_fps);
         ImGui::Text("worst %.1f ms", s.worst_ms);
-        // The game draws 59.94 frames a second, as on the console (half that
-        // with three or four players); a faster display shows each one more
-        // than once, with less wait before it's seen.
+        // The game draws 59.94 frames a second, as on the console; a faster
+        // display shows each one more than once, with less wait before it's seen.
         const double hz = mkdd::g_display_hz.load(std::memory_order_relaxed);
         if (hz > 0) {
             const host::RetraceRate r = host::retrace_rate(uint32_t(std::lround(hz * 1000.0)), 1000, s_.vsync, s_.variable_refresh);
@@ -663,10 +662,8 @@ void Menu::display_page() {
                 if (ImGui::Selectable(name(k), s_.scale == k)) s_.scale = k;
             ImGui::EndCombo();
         }
-        if (s_.scale != 0 && s_.scale != running_scale_)
-            ImGui::TextDisabled("The game is drawn at %ux now: %ux from the next start.", running_scale_, s_.scale);
-        else if (s_.scale == 0)
-            ImGui::TextDisabled("Auto is taken from the window when the game starts. The GPU's work grows with the square.");
+        ImGui::TextDisabled(s_.scale == 0 ? "Auto follows the window's height. The GPU's work grows with the square."
+                                          : "The GPU's work grows with the square: 4x is 16 times the pixels of 1x.");
     }
     int mode = int(s_.scaling);
     ImGui::RadioButton("Whole multiples (sharpest)", &mode, int(host::Scaling::integer));
@@ -704,13 +701,19 @@ void Menu::display_page() {
     }
     ImGui::Checkbox("Vsync (off: the lowest latency, may tear)", &s_.vsync);
     {
-        static constexpr const char* kRates[] = {"Original (60; 30 with three or four players)", "60", "The display's refresh rate", "Unlimited"};
+        static constexpr const char* kRates[] = {"60 (original)", "60", "The display's refresh rate", "Unlimited"};
         const bool can = enhance::frame_rate_supported();
         int rate = int(s_.frame_rate);
         ImGui::BeginDisabled(!can);
         if (ImGui::Combo("Frame rate", &rate, kRates, 4)) s_.frame_rate = FrameRate(rate);
         ImGui::EndDisabled();
-        if (!can) ImGui::TextDisabled("%s", kNeedsFrameRate);
+        // The game computes 59.94 frames a second whatever is chosen; more are pictures drawn between them.
+        ImGui::TextDisabled("%s", !can ? kNeedsFrameRate
+                                  : s_.frame_rate == FrameRate::display
+                                      ? "(pictures drawn between the game's 60 frames, one for each refresh of a faster display; one frame, 17 ms, later)"
+                                  : s_.frame_rate == FrameRate::unlimited
+                                      ? "(pictures between the game's 60 frames as fast as they draw, without vsync; one frame, 17 ms, later)"
+                                      : "(each of the game's frames as it comes; for this game original and 60 are the same)");
     }
     ImGui::BeginDisabled(!display_.gpu().present_wait);
     ImGui::Checkbox("Low latency (with vsync: at most one frame waiting)", &s_.low_latency);
