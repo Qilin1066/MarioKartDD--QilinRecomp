@@ -413,8 +413,10 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
                 else return fail("sound is mono or stereo");
             } else if (name == "progressive") {
                 if (!boolean(s.progressive)) return false;
+            } else if (name == "component_cable") {
+                if (!boolean(s.component_cable)) return false;
             } else {
-                return fail("[console] has no '" + name + "' (language sound progressive)");
+                return fail("[console] has no '" + name + "' (language sound progressive component_cable)");
             }
             continue;
         }
@@ -599,8 +601,12 @@ std::string settings_text(const Settings& s) {
          "language = english\n"
          "# sound: mono or stereo (the game's own sound options add Surround).\n"
          "sound = " + std::string(s.sound == 0 ? "mono" : "stereo") + "\n"
-         "# progressive: true, progressive scan (480p); false, interlaced, as on a television.\n"
-         "progressive = " + b(s.progressive) + "\n";
+         "# progressive: true, progressive scan (480p); false, interlaced, as on a television. The game itself\n"
+         "# saves the player's answer here, as the console keeps it in its SRAM.\n"
+         "progressive = " + b(s.progressive) + "\n"
+         "# component_cable: whether the console has a component cable (its hardware, not a saved setting). The\n"
+         "# game asks about progressive scan only with one; without one it stays interlaced.\n"
+         "component_cable = " + b(s.component_cable) + "\n";
     return t;
 }
 

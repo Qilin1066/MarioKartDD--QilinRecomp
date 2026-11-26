@@ -111,10 +111,12 @@ struct Settings {
     unsigned rumble_strength = 100;   // 0-100
     Player players[kPlayers];         // [player1] to [player4]
     // [console]: what the game reads as the GameCube's own settings (its SRAM). The os layer
-    // answers OSGetLanguage, OSGetSoundMode, OSGetProgressiveMode and OSGetEuRgb60Mode from these.
+    // answers OSGetLanguage, OSGetSoundMode, OSGetProgressiveMode and OSGetEuRgb60Mode from these;
+    // component_cable is the console's hardware, not SRAM (VIGetDTVStatus).
     unsigned language = 0;            // OS_LANG_*: 0 English, the only one the USA disc has (files/MRAM_Locale/English)
     unsigned sound = 1;               // OSGetSoundMode: 0 mono, 1 stereo
-    bool progressive = true;          // OSGetProgressiveMode: 480p rather than 480i
+    bool progressive = true;          // OSGetProgressiveMode: 480p rather than 480i (the game saves its own choice here)
+    bool component_cable = true;      // VIGetDTVStatus: the game offers progressive scan only with one
     bool eu_rgb60 = false;            // OSGetEuRgb60Mode: PAL consoles only; never set for this disc, and not in the file
 };
 

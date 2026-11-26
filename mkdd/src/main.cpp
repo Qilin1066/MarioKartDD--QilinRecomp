@@ -428,8 +428,9 @@ int main(int argc, char** argv) {
 
     const std::filesystem::path data = qilin::host::user_folder();
     mkdd::Settings settings = mkdd::load_settings(data);
-    // SRAM's language, sound mode and progressive flag; the progressive setting also stands for the component cable.
+    // SRAM's language, sound mode and progressive flag; the component cable is the console's hardware (VIGetDTVStatus).
     mkdd::set_console(settings.language, settings.sound != 0, settings.progressive);
+    mkdd::g_component_cable.store(settings.component_cable, std::memory_order_relaxed);
     // The picture's shape in races (enhance.hpp); everything else is shown 4:3.
     float aspect = 4.0f / 3.0f;
     std::unique_ptr<qilin::host::Display> display;

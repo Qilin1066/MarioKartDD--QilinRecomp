@@ -97,7 +97,7 @@ The menu has three pages, as in the author's other recompilations.
 
 - **Controls:** which controller plays which port, rumble for each, every control's inputs (keys, a pad's buttons, sticks and triggers, the mouse), the sticks' dead zone, where the triggers click, rumble strength.
 - **Display:** full screen and on which display; the picture's size (whole multiples, fit, fill); render resolution (following the window, or 1x to 8x of 640x480); SMAA anti-aliasing; AMD FSR 1 upscaling with its sharpness; a plain or CRT look; vsync and low latency; presets; anisotropic filtering; true colour; the graphics device; frame times.
-- **Game:** volume, sound output (stereo, or 5.1 decoded from the game's Dolby Surround) and device; the console's own settings (sound, progressive scan); previous saves.
+- **Game:** volume, sound output (stereo, or 5.1 decoded from the game's Dolby Surround) and device; the console's own settings (sound, progressive scan, whether a component cable is plugged in); previous saves.
 
 Two groups of options change the game itself and have not been seen working with it yet: a picture wider than 4:3 (aspect ratio, HUD placement; `docs/enhancements.md`) and frame rates above the game's own 60, which are pictures drawn between its frames (`docs/graphics.md`, `docs/runtime.md`).
 

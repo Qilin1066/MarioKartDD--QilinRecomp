@@ -801,6 +801,10 @@ void Menu::game_page() {
     int sound = std::clamp(int(s_.sound), 0, 1);
     if (ImGui::Combo("Sound", &sound, kSound, 2)) s_.sound = unsigned(sound);
     ImGui::Checkbox("Progressive scan (480p; off: interlaced)", &s_.progressive);
+    ImGui::TextDisabled("The game saves its own choice here when it asks at start-up.");
+    ImGui::Checkbox("Component cable plugged in", &s_.component_cable);
+    ImGui::TextDisabled(s_.component_cable ? "The game asks about progressive scan at start-up while it is saved on; while off, hold B then to be asked."
+                                           : "Without one the game never offers progressive scan and stays interlaced.");
 
     ImGui::SeparatorText("Save recovery");
     ImGui::TextWrapped("The five latest previous copies of each save are kept. Restore restarts the game; the current save is backed up first.");
