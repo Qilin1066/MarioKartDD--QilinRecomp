@@ -80,6 +80,8 @@ extern const ::qilin::rt::FunctionEntry kFunctions[];
 extern const unsigned kFunctionCount;
 extern const ::qilin::rt::ReplacedEntry kReplaced[];
 extern const unsigned kReplacedCount;
+extern const ::qilin::rt::FunctionEntry kWrapped[];
+extern const unsigned kWrappedCount;
 }  // namespace qilin::gen
 
 namespace {
@@ -351,7 +353,8 @@ int main(int argc, char** argv) {
         }
     }
     rt::init({std::span(qilin::gen::kFunctions, qilin::gen::kFunctionCount),
-              std::span(qilin::gen::kReplaced, qilin::gen::kReplacedCount)});
+              std::span(qilin::gen::kReplaced, qilin::gen::kReplacedCount),
+              std::span(qilin::gen::kWrapped, qilin::gen::kWrappedCount)});
     rt::provide(mkdd::os_replacements());
     rt::provide(mkdd::dvd_replacements());
     rt::provide(mkdd::vi_replacements());

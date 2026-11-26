@@ -81,7 +81,7 @@ def main() -> int:
             continue
         for callee in (int(c, 16) for c in f.get("calls", [])):
             kind, library = decide(callee)
-            if (kind == "replace" and callee not in provided) or kind == "drop":
+            if (kind in ("replace", "wrap") and callee not in provided) or kind == "drop":
                 missing.setdefault(callee, (f"{kind}: {library}", set()))[1].add(caller)
 
     print(f"{len(provided)} replacements provided; {len(missing)} functions called by lifted code are dropped or have none")
@@ -110,7 +110,7 @@ def check_pointers(args, decide, provided):
 
     def unanswered(v):
         kind, library = decide(v)
-        return v in start_set and ((kind == "replace" and v not in provided) or kind == "drop")
+        return v in start_set and ((kind in ("replace", "wrap") and v not in provided) or kind == "drop")
 
     found = {}
     for address, size, offset, text in sections:

@@ -8,6 +8,7 @@
 // Runtime code: no std::format here (macOS 10.15, see CMakeLists.txt).
 #pragma once
 
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -53,7 +54,21 @@ struct CpuHooks {
     void (*trap)(Cpu&, uint32_t pc, const char* why);  // must not return
     void (*replaced)(Cpu&, uint32_t function);         // a function the plan replaces or drops was called
     void (*idle)(Cpu&);  // the back edge of a poll loop: a chance for interrupts to arrive (registers written back)
+    void (*poll)(Cpu&);  // the back edge of any other loop, when g_poll_due is set: likewise, with only r1 written back
 };
+
+// Safe points in long loops. Interrupts reach lifted code only where it lets
+// them (a replaced call, a poll loop); a loop that calls nothing (decompressing
+// a file, decoding a movie frame) would hold them back for as long as it runs,
+// and the sound's DMA interrupt can't wait 40 ms. So every backward branch
+// tests this flag, one load and a branch that is never taken until the
+// runtime's clock sets it (about every millisecond, and whenever something
+// is due), and then calls hooks->poll. The hook must leave the Cpu as it found
+// it (an interrupt's handler saves and restores it; a thread switch comes back
+// to the same one): the function's registers stay in its locals, and only the
+// stack pointer is written back first, for the handler's frame to go below.
+inline std::atomic<bool> g_poll_due{false};
+QILIN_INLINE bool poll_due() { return g_poll_due.load(std::memory_order_relaxed); }
 
 struct Cpu {
     uint32_t r[32] = {};

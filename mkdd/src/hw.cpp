@@ -56,6 +56,8 @@ void init_hardware() {
     init_audio();
     rt::set_mmio(read, write);
     rt::set_idle(poll_loop);
+    rt::set_poll(poll_point);  // (core: safe points on every lifted loop's back edge)
+    start_poll_clock();
 }
 
 }  // namespace mkdd

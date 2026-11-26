@@ -249,8 +249,10 @@ class Emitter {
 public:
     // With `single`, the function in single mode (the caller has checked it can be).
     // `resume`: for the double version behind a single-mode one, the points it can take over at.
-    explicit Emitter(const LiftInput& f, const SingleInfo* single = nullptr, std::string name = {}, const SingleInfo* resume = nullptr)
-        : f_(f), single_(single), resume_(resume && resume->resumes ? resume : nullptr), name_(name.empty() ? fn_name(f.start) : std::move(name)) {
+    // `twin`: this is the double version behind a single-mode function (local to its file).
+    explicit Emitter(const LiftInput& f, const SingleInfo* single = nullptr, const SingleInfo* resume = nullptr, bool twin = false)
+        : f_(f), single_(single), resume_(resume && resume->resumes ? resume : nullptr), twin_(twin),
+          name_((f.name.empty() ? fn_name(f.start) : f.name) + (twin ? "_d" : "")) {
         for (const auto& [a, in] : f.insns) present_.insert(a);
         for (const JumpTable& t : f.jtabs) tables_[t.at] = &t;
     }
@@ -308,7 +310,8 @@ public:
             for (unsigned r = 1; r <= resume_->resumes; ++r) enter += std::format(" case {0}: goto R_{0};", r);
             enter += " default: break; }\n";
         }
-        out.code = std::format("{}void {}(Cpu& c{}) {{\n{}{}{}}}\n", name_ == fn_name(f_.start) ? "" : "static ", name_,
+        body += polls_;  // (the body ends in a return or a jump: nothing falls into the safe points' blocks)
+        out.code = std::format("{}void {}(Cpu& c{}) {{\n{}{}{}}}\n", twin_ ? "static " : "", name_,
                                resume_ ? ", unsigned resume" : "", prologue(), enter, body);
         out.ok = true;
         return out;
@@ -463,7 +466,8 @@ public:
                 in_s += std::format("{0} = c.xer_{0}; ", s);
             }
         std::string r = code;
-        for (auto [ph, with] : {std::pair{std::string("@OUT@"), out_s}, std::pair{std::string("@IN@"), in_s}})
+        const std::string sp = gprs_.contains(1) ? "c.r[1] = r1; " : "";
+        for (auto [ph, with] : {std::pair{std::string("@OUT@"), out_s}, std::pair{std::string("@IN@"), in_s}, std::pair{std::string("@SP@"), sp}})
             for (size_t p; (p = r.find(ph)) != std::string::npos;) r.replace(p, ph.size(), with);
         // A function that touches no state (a lone blr) leaves its parameter unnamed.
         static constexpr std::string_view kParam = "(Cpu& c) {\n";
@@ -508,6 +512,14 @@ private:
     bool idle_loop(uint32_t pc, uint32_t target) const {
         if (!f_.pure_call) return false;
         return poll_loop(f_.insns, target, pc, f_.pure_call);
+    }
+    // Any other backward branch: a safe point when the runtime says one is due (cpu.hpp, g_poll_due).
+    // The registers stay in the locals; the stack pointer goes back first if the function has it.
+    std::string back_to(uint32_t pc, uint32_t target) {
+        if (target > pc) return std::format("goto L_{:08X};", target);
+        // (The call sits at the function's end, out of the loop's way: one block per back edge.)
+        polls_ += std::format("P_{:08X}: @SP@c.hooks->poll(c); goto L_{:08X};\n", pc, target);
+        return std::format("{{ if (poll_due()) [[unlikely]] goto P_{:08X}; goto L_{:08X}; }}", pc, target);
     }
     std::string idle_then(uint32_t target) {
         return std::format("{{ {} c.hooks->idle(c); {} goto L_{:08X}; }}", sync_out(), sync_in(), target);
@@ -888,7 +900,7 @@ private:
                 return true;
             }
             if (present_.contains(t)) {
-                line(idle_loop(pc, t) ? idle_then(t) : std::format("goto L_{:08X};", t));
+                line(idle_loop(pc, t) ? idle_then(t) : back_to(pc, t));
                 return true;
             }
             std::string s;
@@ -915,7 +927,7 @@ private:
             }
             if (present_.contains(t)) {
                 if (idle_loop(pc, t)) line(std::format("{}if ({}) {}", pre, cond, idle_then(t)));
-                else line(std::format("{}if ({}) goto L_{:08X};", pre, cond, t));
+                else line(std::format("{}if ({}) {}", pre, cond, back_to(pc, t)));
                 return true;
             }
             std::string s;
@@ -1079,6 +1091,7 @@ private:
     const LiftInput& f_;
     const SingleInfo* single_;  // single mode, with its analysis; else null
     const SingleInfo* resume_;  // the double version of a single-mode function with resume points; else null
+    bool twin_;
     std::string name_;
     size_t cur_ = 0;  // the instruction being emitted (an index into f_.insns)
     std::set<uint32_t> present_, labels_, callees_;
@@ -1086,6 +1099,7 @@ private:
     std::set<unsigned> gprs_, crs_, fprs_, ps1s_;
     std::set<std::string> specials_;
     uint64_t flags_read_ = 0;
+    std::string polls_;  // the safe points' blocks, after the body
     std::string error_;
 };
 
@@ -1113,7 +1127,7 @@ Lifted lift(const LiftInput& f) {
     if (!single.ok || single.code.contains("c.hooks->idle")) return out;  // (a poll loop reads the registers back)
     single.code = s.expand(single.code);
     if (info.live_in || info.resumes) {
-        Emitter d(f, nullptr, fn_name(f.start) + "_d", &info);
+        Emitter d(f, nullptr, &info, true);
         Lifted twin = d.run();
         if (!twin.ok) return out;
         single.code = d.expand(twin.code) + single.code;

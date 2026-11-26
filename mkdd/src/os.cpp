@@ -790,6 +790,22 @@ void poll_loop(Cpu& c) {
     if (next > now) idle_sleep((next - now) * 2000 / 81, next == timer);
 }
 
+void poll_point(Cpu& c) {
+    rt::g_poll_due.store(false, std::memory_order_relaxed);
+    deliver_interrupts(c);
+}
+
+void start_poll_clock() {
+    // MKDD_POLL=0: no safe points in loops, as before them (development: to measure against).
+    if (const char* off = std::getenv("MKDD_POLL"); off && *off == '0') return;
+    std::thread([] {
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            rt::g_poll_due.store(true, std::memory_order_relaxed);
+        }
+    }).detach();
+}
+
 bool deliver_interrupts_idle(Cpu& c) {
     const bool was = g_enabled;
     g_enabled = true;
