@@ -181,3 +181,16 @@ void check_picture(const uint8_t* rgba, uint32_t width, uint32_t height) {
     rt::log("latency check: picture %llu, cells changed %s", static_cast<unsigned long long>(g_pictures.load()), changed.c_str());
 }
 }  // namespace mkdd::latency
+
+namespace mkdd::latency {
+bool hashing() {
+    static const bool on = std::getenv("MKDD_PICTURE_HASHES") != nullptr;
+    return on;
+}
+void hash_picture(const std::vector<uint8_t>& rgba, double game_seconds, const char* what) {
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (const uint8_t b : rgba) h = (h ^ b) * 0x100000001B3ull;
+    static uint64_t n = 0;
+    rt::log("picture %llu (%s) at %.2f s: %016llX", static_cast<unsigned long long>(++n), what, game_seconds, static_cast<unsigned long long>(h));
+}
+}  // namespace mkdd::latency

@@ -556,6 +556,10 @@ int main(int argc, char** argv) {
     std::unordered_map<uint32_t, uint64_t> xfb_frame;  // the frame that last copied to each XFB (MKDD_LATENCY)
     uint32_t newest_xfb = 0;                           // the frame buffer the newest frame copied to
     std::unique_ptr<mkdd::gx::Frame> waiting_frame;    // taken while waiting to present, drawn next pass
+    bool newest_foretold = false;                      // the newest frame's copy is foretold, its real one not yet come
+    bool vi_pending = false;                           // a retrace waiting for that real copy, until confirm_by
+    uint32_t pending_xfb = 0, pending_w = 0, pending_h = 0;
+    uint64_t confirm_by = 0;
     bool window_closed = false;                        // (seen by a look at the input between passes)
     const uint64_t input_lead_ns = [] {
         const char* t = std::getenv("MKDD_INPUT_LEAD_US");
@@ -701,16 +705,19 @@ int main(int argc, char** argv) {
             was_unlimited = false;
         }
         bool frame_came = false;
+        mkdd::gx::set_copy_kept(!between);  // (the game's own rate: the picture shown is always the real copy's)
         // Draw what the guest recorded, then show what VI shows.
         for (int i = 0; i < 2; ++i)  // what's queued (two at most), then on to showing
             if (auto f = waiting_frame ? std::move(waiting_frame) : mkdd::gx::next_frame_us(between ? 0 : i == 0 ? [&]() -> uint64_t {
-                    // Up to 4 ms, ending at the input's time before the retrace if that comes first.
+                    // Up to 4 ms, ending at the input's time before the retrace if that comes first;
+                    // at a retrace waiting for a foretold copy's real one, until that wait ends.
                     const uint64_t now = clock_ns();
+                    if (vi_pending) return confirm_by > now ? (confirm_by - now) / 1000 : 0;
                     return input_due > now && input_due - now < 4'000'000 ? (input_due - now) / 1000 : 4000;
                 }() : 0)) {
-                ++taken;
+                if (!f->confirming) ++taken;  // (MKDD_LATENCY numbers the passes' frames)
                 for (const auto& c : f->copies)
-                    if (c.to_xfb) xfb_frame[c.dest] = taken, newest_xfb = c.dest;
+                    if (c.to_xfb) xfb_frame[c.dest & 0x1FFFFFFFu] = taken, newest_xfb = c.dest, newest_foretold = f->foretold;
                 if (between) {  // drawn as ever, and kept: the pictures until the next one are blended towards it
                     mkdd::gx::Frame* kept = f.get();
                     renderer->render_held(std::move(f));
@@ -721,6 +728,13 @@ int main(int argc, char** argv) {
                 }
                 renderer->render(*f);
                 mkdd::latency::frame_drawn(taken);
+                if (mkdd::latency::hashing() && display && !display->sdl_window())  // MKDD_PICTURE_HASHES: each frame's own picture
+                    for (const auto& c : f->copies)
+                        if (const qilin::host::Image* x = c.to_xfb && &c == &f->copies.back() ? renderer->xfb(c.dest) : nullptr) {
+                            display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), x->height / renderer_scale);
+                            mkdd::latency::hash_picture(display->read_back(), mkdd::frame_count() / 60.0,
+                                                        f->foretold ? "foretold" : f->confirming ? "real" : "frame");
+                        }
                 if (f->captured && display) {  // MKDD_DFF: our picture of the captured frame, beside it
                     for (const auto& c : f->copies)
                         if (const qilin::host::Image* x = c.to_xfb ? renderer->xfb(c.dest) : nullptr) {
@@ -765,8 +779,23 @@ int main(int argc, char** argv) {
         // 5 s, the log has it with how evenly frames reached the screen.
         if (display) report_timing(display.get(), menu.get(), audio.get(), renderer.get());
         uint32_t xfb, w, h;
-        const bool vi_new = mkdd::take_xfb(&sequence, 0, xfb, w, h);
+        bool vi_new = mkdd::take_xfb(&sequence, 0, xfb, w, h);
         if (vi_new) vi_xfb = xfb, vi_h = h;
+        if (!between) {
+            // The game's own rate with the early frame end: a retrace whose newest frame's copy
+            // was foretold waits (3 ms at most) for the real copy, whose picture is the one shown;
+            // without it in time, VI's picture (what the console would show).
+            if (vi_new) vi_pending = true, pending_xfb = xfb, pending_w = w, pending_h = h, confirm_by = clock_ns() + 3'000'000;
+            if (vi_pending && newest_foretold && clock_ns() < confirm_by) continue;
+            if (vi_pending) {
+                static uint64_t waited = 0, late = 0;
+                if (++waited % 3600 == 0 || newest_foretold)
+                    if ((newest_foretold && ++late <= 5) || waited % 3600 == 0)
+                        rt::log("frame end: %llu retraces, %llu without the real copy in time%s", static_cast<unsigned long long>(waited),
+                                static_cast<unsigned long long>(late), newest_foretold ? " (now)" : "");
+                vi_new = true, xfb = pending_xfb, w = pending_w, h = pending_h, vi_pending = false;
+            }
+        }
         // Pictures between frames: one a pass, each at the phase of the moment it will be seen,
         // from the frame before (just above 0) to the newest (1, a tick after it came). Not while
         // VI shows black or before a frame is held: then, and with the game's own rate, the path
@@ -814,9 +843,10 @@ int main(int argc, char** argv) {
             display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(),
                                    vi_h ? vi_h : x->height / renderer->scale());
             mkdd::latency::presented(taken);  // (blended or whole, the newest frame is in it)
-            if (mkdd::latency::checking() && !display->sdl_window()) {
+            if ((mkdd::latency::checking() || mkdd::latency::hashing()) && !display->sdl_window()) {
                 const std::vector<uint8_t> px = display->read_back();
-                mkdd::latency::check_picture(px.data(), dump_w, dump_h);
+                if (mkdd::latency::checking()) mkdd::latency::check_picture(px.data(), dump_w, dump_h);
+                if (mkdd::latency::hashing()) mkdd::latency::hash_picture(px, mkdd::frame_count() / 60.0, "shown");
             }
             g_pictures_shown.fetch_add(1, std::memory_order_relaxed);
             if (frame_came) steer_to_vblank();
@@ -827,16 +857,17 @@ int main(int argc, char** argv) {
                 continue;
             }
             shown_phase = 1.0;
-            // The newest frame's picture: with the early frame end (recorder.hpp) the frame drawn
-            // in the pass before is ended before its copy to the frame buffer, which VI would show
-            // a retrace later; it is shown now, a tick sooner. (Otherwise it is VI's own.)
-            if (xfb && newest_xfb) xfb = newest_xfb;
+            // The newest frame's picture: its copy to the frame buffer, made just after this
+            // retrace, which VI would show at the next one: a tick sooner, the frame itself drawn
+            // already (the early frame end, recorder.hpp). With that off, VI's own.
+            if (xfb && newest_xfb && !newest_foretold && mkdd::gx::early_frame_end()) xfb = newest_xfb;
             if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {
                 display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), h);
-                if (const auto it = xfb_frame.find(xfb); it != xfb_frame.end()) mkdd::latency::presented(it->second);
-                if (mkdd::latency::checking() && !display->sdl_window()) {
+                if (const auto it = xfb_frame.find(xfb & 0x1FFFFFFFu); it != xfb_frame.end()) mkdd::latency::presented(it->second);
+                if ((mkdd::latency::checking() || mkdd::latency::hashing()) && !display->sdl_window()) {
                     const std::vector<uint8_t> px = display->read_back();
-                    mkdd::latency::check_picture(px.data(), dump_w, dump_h);
+                    if (mkdd::latency::checking()) mkdd::latency::check_picture(px.data(), dump_w, dump_h);
+                    if (mkdd::latency::hashing()) mkdd::latency::hash_picture(px, mkdd::frame_count() / 60.0, "shown");
                 }
                 g_pictures_shown.fetch_add(1, std::memory_order_relaxed);
                 steer_to_vblank();

@@ -1545,9 +1545,11 @@ static void end_frame(Frame& f) {
     if (g_survey) [[unlikely]] survey(f, g_stats.frames.load(std::memory_order_relaxed));
     textures_end_frame(f);
     hud::place(f);  // (a widened picture: the flat parts back in proportion)
-    const uint64_t number = g_stats.frames.fetch_add(1, std::memory_order_relaxed) + 1;
+    g_stats.frames.fetch_add(1, std::memory_order_relaxed);
+    static uint64_t passes = 0;  // (MKDD_LATENCY numbers the passes' frames: a confirming copy isn't one)
+    const bool counted = !f.confirming;
     submit(std::move(g_frame));
-    latency::frame_handed(number);  // (MKDD_LATENCY)
+    if (counted) latency::frame_handed(++passes);
     g_frame = spare_frame();
     g_dirty = true;
     g_join.valid = false;
@@ -1559,10 +1561,18 @@ static void end_frame(Frame& f) {
 // drawing in JFWDisplay::endRender (a draw done, BP 0x45), calculates, waits for the
 // retrace and only then copies the picture to the frame buffer, in the next pass's
 // beginRender. The frame is ended at that draw done instead, with the copy the next pass
-// will make: the last one's, to the frame buffer after it in the game's rotation. When
-// that copy comes it is left out if it is the one foretold (it was made); otherwise it
-// is counted, and after three wrong in a row the early end stops.
+// will make foretold: the last one's, to the frame buffer after it in the game's rotation.
+// - Kept (set_copy_kept: the game's own frame rate): the foretold copy doesn't clear the
+//   EFB, and the real one, when it comes, ends a frame of its own (Frame::confirming), so
+//   the picture shown is always the real copy's; the main loop waits for it at the
+//   retrace. A wrong foretelling (the copy filter changes as a movie starts or ends) then
+//   costs nothing: the confirming copy is the right one.
+// - Not kept (pictures between frames, which start from a frame that cleared the EFB):
+//   the foretold copy clears, and the real one is left out; a wrong one is counted, the
+//   picture it made stays (the EFB is cleared), and after three in a row the early end stops.
 namespace {
+std::atomic<bool> g_keep_real{false};
+bool g_foretold_kept = false;
 const bool g_early_on = [] {
     const char* e = std::getenv("MKDD_EARLY_END");
     return !(e && *e == '0') && !std::getenv("MKDD_DFF");  // (a capture ends its frame at the copy)
@@ -1595,6 +1605,8 @@ bool next_dest(uint32_t& dest) {
 }
 }  // namespace
 
+void set_copy_kept(bool on) { g_keep_real.store(on, std::memory_order_relaxed); }
+bool early_frame_end() { return g_early_on; }
 void request_frame_end() {
     if (g_early_on) g_end_requests.fetch_add(1, std::memory_order_release);
 }
@@ -1626,9 +1638,12 @@ static void draw_done() {
     Frame& f = *g_frame;
     Copy c = g_last_xfb;
     c.dest = dest;
+    g_foretold_copy = c, g_foretold = true;
+    g_foretold_kept = g_keep_real.load(std::memory_order_relaxed);
+    if (g_foretold_kept) c.clear = false;  // (the real copy clears, a frame later)
     f.packets.push_back({Packet::kCopy, uint32_t(f.copies.size())});
     f.copies.push_back(c);
-    g_foretold_copy = c, g_foretold = true;
+    f.foretold = true;
     log_copy("foretold", c);
     if (++g_early_ends == 1 || g_early_ends % 3600 == 0)
         qilin::rt::log("render: early frame ends %llu, foretold wrong %llu, drawing between %llu", static_cast<unsigned long long>(g_early_ends),
@@ -1636,8 +1651,8 @@ static void draw_done() {
     end_frame(f);
 }
 
-// A copy to the frame buffer: true if the early end made it already.
-static bool early_copy_made(const Copy& c, const Frame& f) {
+// A copy to the frame buffer: true if the early end made it already (it isn't made again).
+static bool early_copy_made(const Copy& c, Frame& f) {
     if (!g_foretold) return false;
     log_copy("came", c);
     g_foretold = false;
@@ -1647,13 +1662,19 @@ static bool early_copy_made(const Copy& c, const Frame& f) {
         ++g_drawn_after;
         return false;
     }
+    const bool right = same_copy(c, g_foretold_copy);
+    if (!right && ++g_wrong <= 5)
+        qilin::rt::log("render: the early frame end foretold the wrong copy (frame buffer %08X, foretold %08X)%s", c.dest, g_foretold_copy.dest,
+                       g_foretold_kept ? ": the real one is shown" : "");
+    if (g_foretold_kept) {  // made, ending a frame of its own: the picture shown
+        f.confirming = true;
+        return false;
+    }
     note_xfb_copy(c);
-    if (same_copy(c, g_foretold_copy)) {
+    if (right) {
         g_wrong_in_a_row = 0;
         return true;
     }
-    ++g_wrong;
-    if (g_wrong <= 5) qilin::rt::log("render: the early frame end foretold the wrong copy (frame buffer %08X, foretold %08X)", c.dest, g_foretold_copy.dest);
     if (++g_wrong_in_a_row == 3) {
         g_early_stopped = true;
         qilin::rt::log("render: the early frame end stops: three wrong copies in a row");
