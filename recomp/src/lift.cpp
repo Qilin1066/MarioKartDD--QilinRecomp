@@ -230,8 +230,15 @@ SingleInfo analyse_single(const LiftInput& f) {
     for (size_t k = 0; k < n; ++k) {
         if (!kill[k]) continue;
         for (size_t t : succ[k]) info.need[k] |= live[t] & kill[k];
+        // A double loaded and then used as a single isn't one (the constants of an integer
+        // conversion, 2^52 and the like): the double version would take over every time.
+        if (info.need[k] && double_load(f.insns[k].second.op)) return info;
         if (info.need[k]) info.resume[k] = ++info.resumes;
     }
+    // Likewise frsp of a value this function didn't make: the compiler put it there because the
+    // value is a double (an argument, or what a call returned).
+    for (size_t k = 0; k < n; ++k)
+        if (f.insns[k].second.op == Op::frsp && !(info.must[k] & F0(f.insns[k].second.rb()))) return info;
     info.def = std::move(def);
     info.kill = std::move(kill);
     info.ok = true;
@@ -345,8 +352,9 @@ private:
             // first come from the registers, which must hold single-precision values for that.
             for (unsigned n : fprs_) p += std::format("    float f{0} = 0.0f;\n", n);
             for (unsigned n : ps1s_) p += std::format("    float p{0} = 0.0f;\n", n);
-            for (unsigned h = 0; h < 64; ++h)
-                if (single_->flags & (uint64_t{1} << h)) p += std::format("    bool w{} = false;\n", half(h));
+            // The halves written on some paths only: which of them this run has written, one bit
+            // each (ps0 of FPR n is bit n, ps1 bit 32 + n).
+            if (single_->flags) p += "    uint64_t written = 0;\n";
             if (single_->live_in) {
                 std::string all;
                 for (unsigned h = 0; h < 64; ++h)
@@ -379,17 +387,17 @@ private:
             (h < 32 ? fprs_ : ps1s_).insert(h & 31);
             const std::string store = std::format("c.ps{}[{}] = fp::to_d({}); ", h < 32 ? 0 : 1, h & 31, half(h));
             if (!(single_->must[cur_] & bit)) flags_read_ |= bit;
-            s += (single_->must[cur_] & bit) ? store : std::format("if (w{}) {}", half(h), store);
+            s += (single_->must[cur_] & bit) ? store : std::format("if (written & 0x{:X}ull) {}", bit, store);
         }
         return s;
     }
     static std::string half(unsigned h) { return std::format("{}{}", h < 32 ? 'f' : 'p', h & 31); }
     // Single mode: after writing these halves, their "written" flags (those that have one).
     std::string wrote(uint64_t halves, bool written = true) const {
-        std::string s;
-        for (unsigned h = 0; h < 64; ++h)
-            if (halves & single_->flags & (uint64_t{1} << h)) s += std::format(" w{} = {};", half(h), written);
-        return s;
+        const uint64_t m = halves & single_->flags;
+        if (!m) return {};
+        if (written) return std::format(" written |= 0x{:X}ull;", m);
+        return m == single_->flags ? std::string(" written = 0;") : std::format(" written &= ~0x{:X}ull;", m);
     }
     // The double version, entered at the start (0) or taking over at a resume point.
     std::string twin(unsigned resume) const {
@@ -555,7 +563,7 @@ private:
             // Ours if we wrote it (a flag says, where only some paths did), else the Cpu's.
             std::string value = std::format("c.ps0[{}]", d);
             if (single_->must[cur_] & bit) value = std::format("fp::to_d({})", F(d));
-            else if (single_->may[cur_] & bit) flags_read_ |= bit, value = std::format("(w{0} ? fp::to_d({0}) : c.ps0[{1}])", F(d), d);
+            else if (single_->may[cur_] & bit) flags_read_ |= bit, value = std::format("((written & 0x{:X}ull) ? fp::to_d({}) : c.ps0[{}])", bit, F(d), d);
             line(std::format("{{ const uint32_t ea = {}; write64(c, ea, fp::bits({}));{} }}", ea, value, update));
             return true;
         }

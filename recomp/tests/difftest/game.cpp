@@ -42,6 +42,16 @@
 #include <tuple>
 #include <vector>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <atomic>
+#include <thread>
+#endif
+
 #include "cfg.hpp"
 #include "dol.hpp"
 #include "functions.hpp"
@@ -516,6 +526,37 @@ int main(int argc, char** argv) {
             load(images[n]);
             if (!both(std::format("frame {}", n).c_str(), kThpVideoDecode, {kFile, kY, kU, kV, kWork})) return 1;
         }
+#if defined(_WIN32)
+        // Where the time goes (--reps 100 or so): this thread's program counter, sampled every
+        // millisecond and counted by the lifted function whose code is nearest below it.
+        std::vector<std::pair<uintptr_t, uint32_t>> by_host;
+        for (unsigned k = 0; k < gen::kFunctionCount; ++k) by_host.emplace_back(reinterpret_cast<uintptr_t>(gen::kFunctions[k].fn), gen::kFunctions[k].address);
+        std::ranges::sort(by_host);
+        std::map<uint32_t, unsigned> samples;
+        unsigned total_samples = 0;
+        std::atomic<bool> sampling{thp_reps >= 50};
+        HANDLE self = nullptr;
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        std::thread sampler([&] {
+            while (sampling.load()) {
+                Sleep(1);
+                CONTEXT context{};
+                context.ContextFlags = CONTEXT_CONTROL;
+                if (SuspendThread(self) == static_cast<DWORD>(-1)) continue;
+                const bool ok = GetThreadContext(self, &context);
+                ResumeThread(self);
+                if (!ok) continue;
+#if defined(_M_ARM64) || defined(__aarch64__)
+                const uintptr_t pc = context.Pc;
+#else
+                const uintptr_t pc = context.Rip;
+#endif
+                const auto it = std::ranges::upper_bound(by_host, std::pair{pc, 0xFFFFFFFFu});
+                ++samples[it == by_host.begin() || pc - std::prev(it)->first > 0x40000 ? 0 : std::prev(it)->second];
+                ++total_samples;
+            }
+        });
+#endif
         double best = 1e9;
         for (unsigned rep = 0; rep < thp_reps; ++rep) {
             double total = 0;
@@ -526,6 +567,15 @@ int main(int argc, char** argv) {
             }
             best = std::min(best, total / static_cast<double>(images.size()));
         }
+#if defined(_WIN32)
+        sampling = false;
+        sampler.join();
+        std::vector<std::pair<unsigned, uint32_t>> hot;
+        for (const auto& [fn, n] : samples) hot.emplace_back(n, fn);
+        std::ranges::sort(hot, std::greater{});
+        for (size_t k = 0; k < hot.size() && k < 12; ++k)
+            std::println("  {:5.1f}% {:08X}{}", 100.0 * hot[k].first / total_samples, hot[k].second, hot[k].second ? "" : " (not lifted code)");
+#endif
         const double blocks = (width / 16) * (height / 16) * 6.0;
         std::println("THP {}x{}: lifted decode {:.3f} ms a frame ({:.0f} ns an 8x8 block), best of {} passes over {} frames",
                      width, height, best * 1e3, best * 1e9 / blocks, thp_reps, images.size());

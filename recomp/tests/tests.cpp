@@ -817,11 +817,11 @@ void test_fp_single_mode() {
     CHECK(args.code.contains("fp::add_s(f1, f2)") && !args.code.contains("c.ps0[2] = fp::to_d(f2)"));  // f2 is only read: left alone
     // cmpwi r3,0; beqlr; lfs f1,0(r4); blr: the early way out writes nothing back, the other f1.
     const Lifted early = fn({0x2C030000u, 0x4D820020u, 0xC0240000u, 0x4E800020u});
-    CHECK(early.ok && !early.code.contains("bool w") && early.code.contains("c.ps0[1] = fp::to_d(f1); c.ps1[1] = fp::to_d(p1);"));
+    CHECK(early.ok && !early.code.contains("written") && early.code.contains("c.ps0[1] = fp::to_d(f1); c.ps1[1] = fp::to_d(p1);"));
     // cmpwi r3,0; beq +8; lfs f1,0(r4); blr: one way out, f1 written on one path to it: a flag says which.
     const Lifted maybe = fn({0x2C030000u, 0x41820008u, 0xC0240000u, 0x4E800020u});
-    CHECK(maybe.ok && maybe.code.contains("bool wf1 = false;") && maybe.code.contains("wf1 = true; wp1 = true;"));
-    CHECK(maybe.code.contains("if (wf1) c.ps0[1] = fp::to_d(f1); if (wp1) c.ps1[1] = fp::to_d(p1);"));
+    CHECK(maybe.ok && maybe.code.contains("uint64_t written = 0;") && maybe.code.contains("written |= 0x200000002ull;"));
+    CHECK(maybe.code.contains("if (written & 0x2ull) c.ps0[1] = fp::to_d(f1); if (written & 0x200000000ull) c.ps1[1] = fp::to_d(p1);"));
     // fadd f1,f1,f2 (double arithmetic); blr: no single mode.
     const Lifted dbl = fn({0xFC21102Au, 0x4E800020u});
     CHECK(dbl.ok && dbl.code.contains("double f1 = c.ps0[1];") && !dbl.code.contains("float"));
@@ -831,7 +831,7 @@ void test_fp_single_mode() {
     CHECK(!fn({0xFC200890u, 0x4E800020u}).code.contains("f1 = f1"));  // fmr f1,f1: no self-assignment
     // cmpwi r3,0; beq +8; lfs f1,0(r4); lfs f1,4(r4); blr: f1 is written on every path to the one way out.
     const Lifted every = fn({0x2C030000u, 0x41820008u, 0xC0240000u, 0xC0240004u, 0x4E800020u});
-    CHECK(every.ok && every.code.contains("float f1") && !every.code.contains("bool w"));
+    CHECK(every.ok && every.code.contains("float f1") && !every.code.contains("written"));
     // lfs f1,0(r3); bl elsewhere; blr: the call gets f1 written back, and nothing after it reads
     // a register as a single, so there is no double version to fall back on.
     auto with_calls = [](std::initializer_list<uint32_t> words) {
@@ -855,7 +855,11 @@ void test_fp_single_mode() {
     CHECK(saved.code.contains("write64(c, ea, fp::bits(c.ps0[31]));"));
     CHECK(saved.code.contains("if (!(int(fp::to_f_exact(c.ps0[31], f31)))) [[unlikely]] { fn_80003000_d(c, 1); return; }"));
     CHECK(saved.code.contains("c.ps0[31] = fp::from_bits(read64(c, ea));"));
-    CHECK(saved.code.contains("c.ps0[1] = fp::to_d(f1); c.ps1[1] = fp::to_d(p1);  return;") && !saved.code.contains("bool w"));
+    CHECK(saved.code.contains("c.ps0[1] = fp::to_d(f1); c.ps1[1] = fp::to_d(p1);  return;") && !saved.code.contains("written"));
+    // lfd f1,0(r3); fadds f1,f1,f1; blr, and bl; frsp f1,f1; blr: a double used as a single
+    // (a conversion's constant, a double a call returned): no single mode, it would never stay in it.
+    CHECK(!with_calls({0xC8230000u, 0xEC21082Au, 0x4E800020u}).code.contains("float"));
+    CHECK(!with_calls({0x48000101u, 0xFC200818u, 0x4E800020u}).code.contains("float"));
     // lfs f1,0(r3); bcl 4,eq,elsewhere; blr: a conditional call: no single mode.
     CHECK(!with_calls({0xC0230000u, 0x40820101u, 0x4E800020u}).code.contains("float"));
 }
