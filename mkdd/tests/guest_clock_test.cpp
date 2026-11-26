@@ -67,31 +67,45 @@ int main() {
         GuestClock c;
         g_gaps = 0;
         c.on_gap = [](int64_t) { ++g_gaps; };
+        // In steps: the host's clock moves, then every reader reads (racing the others) and says so
+        // before the next. Nobody spins without yielding, so a runner with fewer cores than threads
+        // (CI's) takes as long as one with many: a test of the reads, not of the scheduler.
+        constexpr int kReaders = 4;
         std::atomic<int64_t> host{0};
-        std::atomic<bool> stop{false}, backwards{false};
-        std::atomic<int64_t> reads{0};
+        std::atomic<int> stage{0};
+        std::atomic<int> done[kReaders] = {};
+        std::atomic<bool> backwards{false};
         std::vector<std::thread> readers;
-        for (int t = 0; t < 4; ++t)
-            readers.emplace_back([&] {
+        for (int t = 0; t < kReaders; ++t)
+            readers.emplace_back([&, t] {
                 int64_t last = 0;
-                while (!stop.load(std::memory_order_relaxed)) {
-                    const int64_t g = c.read([&] { return host.load(std::memory_order_relaxed); });
-                    if (g < last) backwards.store(true);
-                    last = g;
-                    reads.fetch_add(1, std::memory_order_relaxed);
+                for (int seen = 0; seen >= 0;) {
+                    const int now = stage.load(std::memory_order_acquire);
+                    if (now == seen) {
+                        std::this_thread::yield();
+                        continue;
+                    }
+                    for (int k = 0; k < 4; ++k) {  // a few reads a step, the others reading meanwhile
+                        const int64_t g = c.read([&] { return host.load(std::memory_order_relaxed); });
+                        if (g < last) backwards.store(true);
+                        last = g;
+                    }
+                    seen = now;
+                    done[t].store(now, std::memory_order_release);
                 }
             });
-        // Each step waits for a few reads, so the readers run throughout (and after the jump).
-        const auto steps = [&](int n, int64_t step) {
-            for (int i = 0; i < n; ++i) {
-                host.fetch_add(step);
-                for (const int64_t r = reads.load(); reads.load() < r + 8;) std::this_thread::yield();
-            }
+        int at = 0;
+        const auto step = [&](int64_t by, bool last_step = false) {
+            host.fetch_add(by);
+            stage.store(last_step ? -1 : ++at, std::memory_order_release);
+            if (last_step) return;
+            for (auto& d : done)
+                while (d.load(std::memory_order_acquire) != at) std::this_thread::yield();
         };
-        steps(5000, 10'000);  // 10 us steps
-        steps(1, 100 * s);    // once 100 s
-        steps(5000, 10'000);
-        stop.store(true);
+        for (int i = 0; i < 300; ++i) step(10'000);  // 10 us steps
+        step(100 * s);                              // once 100 s
+        for (int i = 0; i < 300; ++i) step(10'000);
+        step(0, true);
         for (auto& r : readers) r.join();
         check(!backwards.load(), "four threads: no reading goes backwards");
         std::printf("(gaps %lld, %.3f s left out)\n", static_cast<long long>(g_gaps), double(c.left_out_ns()) / 1e9);
