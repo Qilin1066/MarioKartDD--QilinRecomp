@@ -620,7 +620,14 @@ Outcome do_rename(Cpu& c, uint32_t slot, uint32_t old_at, uint32_t new_at) {
 
 // ---- ending a call
 void finish(Cpu& c, uint32_t slot, const Outcome& o, const char* who) {
-    if (devices_log()) rt::log("card: %s (slot %u) = %d%s", who, slot, o.result, o.transfer && o.ticks ? ", after the card's time" : "");
+    if (devices_log()) {
+        // (The game probes both slots every frame: only a change of answer is worth a line.)
+        static int32_t probed[kSlots] = {1, 1};
+        const bool probe = std::strcmp(who, "CARDProbeEx") == 0 && slot < kSlots;
+        if (!probe || probed[slot] != o.result)
+            rt::log("card: %s (slot %u) = %d%s", who, slot, o.result, o.transfer && o.ticks ? ", after the card's time" : "");
+        if (probe) probed[slot] = o.result;
+    }
     if (!o.transfer || o.ticks == 0) {
         c.r[3] = static_cast<uint32_t>(o.result);
         return;
@@ -673,7 +680,10 @@ void CARDFormat(Cpu& c) { finish(c, c.r[3], do_format(c.r[3]), "CARDFormat"); }
 void CARDFormatRegionAsync(Cpu& c) { finish_async(c, c.r[3], do_format(c.r[3]), c.r[5]); }       // (slot, encoding, cb)
 void CARDOpen(Cpu& c) { finish(c, c.r[3], do_open(c.r[3], guest_string(c.r[4]), c.r[5]), "CARDOpen"); }
 void CARDFastOpen(Cpu& c) { finish(c, c.r[3], do_fast_open(c.r[3], c.r[4], c.r[5]), "CARDFastOpen"); }
-void CARDClose(Cpu& c) { finish(c, 0, do_close(c.r[3]), "CARDClose"); }
+void CARDClose(Cpu& c) {
+    const uint32_t slot = info_slot(c.r[3]);
+    finish(c, slot, do_close(c.r[3]), "CARDClose");
+}
 // (Those that stamp the file's time call the OS's clock, which leaves its answer in r3: the slot is read first.)
 void CARDCreate(Cpu& c) {  // (slot, name, size, info)
     const uint32_t slot = c.r[3];

@@ -117,10 +117,15 @@ std::vector<Step> parse_steps(std::string text) {
 }
 }  // namespace
 
+// With steps, the path is followed only during a step that drives (`~`): the screens after a
+// race still have a kart and a held A, and backing out of "being stuck" there would press B.
+bool g_driving = true;
+
 // Port 1's pad by MKDD_PILOT_STEPS.
 bool pilot_pad(GcPad& pad) {
     static const char* text = std::getenv("MKDD_PILOT_STEPS");
     if (!text) return false;
+    g_driving = false;
     static const std::vector<Step> steps = parse_steps(text);
     static size_t next = 0;        // the step waited for; the one before it is being played
     static uint32_t frames = 0;    // since that one began
@@ -132,6 +137,7 @@ bool pilot_pad(GcPad& pad) {
     }
     if (next == 0) return true;
     const Step& s = steps[next - 1];
+    g_driving = s.mode == '~';
     const double t = frames++ / 60.0 - 0.5;
     if (s.presses.empty() || t < 0) return true;
     const double last = s.presses.back().at;
@@ -159,7 +165,11 @@ void pilot_frame() {
         return f;
     }();
     float x, z;
-    if (!kart_position(kart, x, z) || ++frame % 10) return;
+    static bool racing = false;
+    const bool now = kart_position(kart, x, z);
+    if (now && !racing) std::fprintf(out, "# race\n"), frame = 0;  // (line n of a race is its frame 10 n)
+    racing = now;
+    if (!now || ++frame % 10) return;
     std::fprintf(out, "%.1f %.1f\n", x, z);
     std::fflush(out);
 }
@@ -170,27 +180,43 @@ void pilot_status(uint32_t status) {
     struct Point {
         float x, z;
     };
-    static const std::vector<Point> path = [] {
-        std::vector<Point> out;
-        FILE* f = std::fopen(name, "r");
-        if (!f) rt::fatal(nullptr, "MKDD_PILOT: can't read %s", name);
-        for (Point p; std::fscanf(f, "%f %f", &p.x, &p.z) == 2;) out.push_back(p);
-        std::fclose(f);
-        if (out.size() < 8) rt::fatal(nullptr, "MKDD_PILOT: %s holds no path", name);
-        return out;
+    // (Several files, comma-separated: one per course. A race takes the one that passes nearest its start.)
+    static const std::vector<std::vector<Point>> paths = [] {
+        std::vector<std::vector<Point>> all;
+        for (std::string names = name; !names.empty();) {
+            const size_t comma = names.find(',');
+            const std::string one = names.substr(0, comma);
+            names = comma == std::string::npos ? "" : names.substr(comma + 1);
+            std::vector<Point> out;
+            FILE* f = std::fopen(one.c_str(), "r");
+            if (!f) rt::fatal(nullptr, "MKDD_PILOT: can't read %s", one.c_str());
+            for (Point p; std::fscanf(f, "%f %f", &p.x, &p.z) == 2;) out.push_back(p);
+            std::fclose(f);
+            if (out.size() < 8) rt::fatal(nullptr, "MKDD_PILOT: %s holds no path", one.c_str());
+            all.push_back(std::move(out));
+        }
+        return all;
     }();
+    static size_t course = 0;
     static const float sign = [] { const char* e = std::getenv("MKDD_PILOT_SIGN"); return e && *e == '-' ? -1.0f : 1.0f; }();
     static float last_x = 0, last_z = 0, heading_x = 0, heading_z = 0;
     static size_t nearest = 0;
     static uint32_t reversing = 0;  // frames left of backing out
     static bool racing = false;
     float x, z;
-    if (!kart_position(0, x, z)) {
+    if (!g_driving || !kart_position(0, x, z)) {
         racing = false;
         return;
     }
+    if (racing && (x - last_x) * (x - last_x) + (z - last_z) * (z - last_z) > 2000.0f * 2000.0f) racing = false;  // put somewhere else: a restart
+    if (!racing) {  // a new race: the course whose path passes nearest
+        float best = 1e30f;
+        for (size_t c = 0; c < paths.size(); ++c)
+            for (const Point& p : paths[c])
+                if (const float d = (p.x - x) * (p.x - x) + (p.z - z) * (p.z - z); d < best) best = d, course = c;
+    }
+    const std::vector<Point>& path = paths[course];
     const auto distance2 = [&](size_t i) { return (path[i].x - x) * (path[i].x - x) + (path[i].z - z) * (path[i].z - z); };
-    if (racing && distance2(nearest) > 4000.0f * 4000.0f) racing = false;  // put somewhere else: a restart
     if (!racing) {  // a new race: wherever the kart is on the path
         nearest = 0;
         for (size_t i = 1; i < path.size(); ++i)

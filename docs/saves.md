@@ -64,10 +64,27 @@ What the game does with the card, as seen in scripted runs:
   With the file it reads it and goes on.
 - After a time trial with a new record it writes the file ("Saving game data."); the save history takes the copy
   from before.
+- A Grand Prix cup finished in the first three: after the ceremony and the name entry the file is written, and
+  RECORDS shows the cup, time, points and name after a restart. Fourth or worse: no ceremony and no save.
 - Time Trials lists the ghosts by asking the status of all 127 entries. SAVE GHOST after a run creates the
   ghost's file (new files have no earlier copy to keep).
 - A probe (`CARDProbeEx`) comes every frame from the game's card thread; a card busy with anything but mounting
   still answers it, as the SDK's does.
+- The game's own file is only ever looked for in slot A. Ghosts are listed from both slots: LOAD GHOST DATA
+  shows each card with its ghosts and the room left (48 more on a card holding the save and one ghost, 49 on one
+  with a ghost alone), and a ghost on card B loads like one on A.
+- A loaded ghost replays exactly: its kart's positions matched those of the run that recorded it, in another
+  process, to the tenth of a unit over all 11,530 frames of a race.
+
+When things go wrong, the game's own messages appear:
+
+- The host refuses a write (a full disk, seen by accident): the call gives IOERROR, the save on the card stays as
+  it was, and the game says "An error may have occurred during saving."
+- The card in slot A is gone (its folder deleted) when the game wants it: "No Memory Card found in Slot A.
+  Continue without saving game data?", then "Insert a Memory Card into Slot A and press the A Button." Making the
+  folder again puts the card back.
+- Card B pulled while its ghosts are listed: the game returns to the slot screen with slot B empty, without a
+  message.
 
 Other games' files in the folder count against the free blocks and are
 visible as the SDK shows them: readable by number if they are public, never
