@@ -267,16 +267,15 @@ QILIN_INLINE double single(double v) {
 }
 
 // frC of single-precision multiplies, rounded to 25 significant bits.
-inline double round25(double d) {
-    uint64_t i = bits(d);
-    const uint64_t e = i & kExp, f = i & kFrac;
-    uint64_t keep = 0xFFFFFFFFF8000000ull, round = 0x8000000ull;
-    if (e == 0 && f != 0) {  // a subnormal rounds as if normalised: at a lower bit
-        const unsigned shift = static_cast<unsigned>(std::countl_zero(f)) - 11;
-        keep = static_cast<uint64_t>(static_cast<int64_t>(keep) >> shift);
-        round >>= shift;
-    }
+QILIN_COLD_OUTLINE double round25_subnormal(uint64_t i) {  // rounds as if normalised: at a lower bit
+    const unsigned shift = static_cast<unsigned>(std::countl_zero(i & kFrac)) - 11;
+    const uint64_t keep = static_cast<uint64_t>(static_cast<int64_t>(0xFFFFFFFFF8000000ull) >> shift), round = 0x8000000ull >> shift;
     return from_bits((i & keep) + (i & round));
+}
+QILIN_INLINE double round25(double d) {
+    const uint64_t i = bits(d);
+    if ((i & kExp) == 0 && (i & kFrac) != 0) [[unlikely]] return round25_subnormal(i);
+    return from_bits((i & 0xFFFFFFFFF8000000ull) + (i & 0x8000000ull));
 }
 
 // a * b + c with one rounding: the FMA instruction where the build has it
@@ -293,7 +292,8 @@ inline bool detect_fma() {
     if (!(r[2] & (1 << 12)) || !(r[2] & (1 << 27)) || !(r[2] & (1 << 28))) return false;  // FMA, OSXSAVE, AVX
     return (_xgetbv(0) & 6) == 6;                                                         // the OS keeps the registers
 }
-inline double fma_instruction(double a, double b, double c) { return _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(a), _mm_set_sd(b), _mm_set_sd(c))); }
+QILIN_INLINE double fma_instruction(double a, double b, double c) { return _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(a), _mm_set_sd(b), _mm_set_sd(c))); }
+QILIN_INLINE float fma_instruction(float a, float b, float c) { return _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(b), _mm_set_ss(c))); }
 #else
 inline bool detect_fma() {  // (cpuid itself: not every runtime library fills in __builtin_cpu_supports)
     unsigned a, b, c, d;
@@ -301,7 +301,15 @@ inline bool detect_fma() {  // (cpuid itself: not every runtime library fills in
     __asm__("xgetbv" : "=a"(a), "=d"(d) : "c"(0));
     return (a & 6) == 6;  // the OS keeps the registers
 }
-[[gnu::target("fma")]] inline double fma_instruction(double a, double b, double c) { return __builtin_fma(a, b, c); }
+// (An asm statement inlines; a function with a target attribute can't be inlined into code built without it.)
+QILIN_INLINE double fma_instruction(double a, double b, double c) {
+    __asm__("vfmadd213sd %2, %1, %0" : "+x"(a) : "x"(b), "x"(c));  // a = b * a + c
+    return a;
+}
+QILIN_INLINE float fma_instruction(float a, float b, float c) {
+    __asm__("vfmadd213ss %2, %1, %0" : "+x"(a) : "x"(b), "x"(c));
+    return a;
+}
 #endif
 inline const bool g_fma = detect_fma();
 #endif
@@ -333,7 +341,7 @@ QILIN_INLINE double div(double a, double b) {
 }
 // a * c + b (or - b) with one rounding; NaNs looked at in the order a, b, c,
 // with b as it was before any negation.
-inline double madd(double a, double c, double b, bool subtract) {
+QILIN_INLINE double madd(double a, double c, double b, bool subtract) {
     const double r = fused(a, c, subtract ? -b : b);
     return is_nan(r) ? nan3(a, b, c) : r;
 }
@@ -341,21 +349,22 @@ inline double madd(double a, double c, double b, bool subtract) {
 // that lands exactly halfway between two singles, the fma's own rounding
 // error (found with an error-free transformation) decides the direction, so
 // the result is rounded to single only once, as Broadway does.
-inline double madd_single(double a, double c, double b, bool subtract) {
+QILIN_COLD_OUTLINE double madd_single_tie(double a, double cr, double bs, double r) {
+    const uint64_t rb = bits(r);
+    const double a1 = bs - r;  // -(a*cr) plus the fma's rounding error, rounded
+    const double b1 = r + a1;
+    double err = fused(a, cr, a1) + (bs - b1);
+    // A product below the smallest subnormal leaves r == bs with an error the
+    // transformation can't see (it underflows to zero): the error is then the
+    // product itself, and its sign is the product's.
+    if (err == 0.0 && r == bs && a != 0.0 && cr != 0.0 && std::isfinite(a) && std::isfinite(cr))
+        err = std::signbit(a) != std::signbit(cr) ? -1.0 : 1.0;
+    return err != 0.0 ? from_bits((err > 0.0) == (r > 0.0) ? rb + 1 : rb - 1) : r;
+}
+QILIN_INLINE double madd_single(double a, double c, double b, bool subtract) {
     const double cr = round25(c), bs = subtract ? -b : b;
     double r = fused(a, cr, bs);
-    const uint64_t rb = bits(r);
-    if ((rb & 0x1FFFFFFFull) == 0x10000000ull) {
-        const double a1 = bs - r;   // -(a*cr) plus the fma's rounding error, rounded
-        const double b1 = r + a1;
-        double err = fused(a, cr, a1) + (bs - b1);
-        // A product below the smallest subnormal leaves r == bs with an error the
-        // transformation can't see (it underflows to zero): the error is then the
-        // product itself, and its sign is the product's.
-        if (err == 0.0 && r == bs && a != 0.0 && cr != 0.0 && std::isfinite(a) && std::isfinite(cr))
-            err = std::signbit(a) != std::signbit(cr) ? -1.0 : 1.0;
-        if (err != 0.0) r = from_bits((err > 0.0) == (r > 0.0) ? rb + 1 : rb - 1);
-    }
+    if ((bits(r) & 0x1FFFFFFFull) == 0x10000000ull) [[unlikely]] r = madd_single_tie(a, cr, bs, r);
     return is_nan(r) ? nan3(a, b, c) : r;
 }
 inline double neg_unless_nan(double d) { return is_nan(d) ? d : -d; }
@@ -381,27 +390,21 @@ inline uint32_t compare(double a, double b) {
 
 // lfs and stfs: the PowerPC manual's conversions, bit by bit (no rounding,
 // signalling NaNs kept), not the host's float/double conversions.
-// A single's denormal, normalised into the double (rare: kept out of line so
-// load_single inlines into the lifted code).
-QILIN_COLD_OUTLINE double load_single_denormal(uint32_t x) {
+// A NaN: the bits move over, the exponent's top bit filling the three new ones
+// (out of line: rare).
+QILIN_COLD_OUTLINE double load_single_nan(uint32_t x) {
     const uint64_t v = x;
-    uint64_t exp = 1023 - 126, frac = v & 0x7FFFFF;
-    do {
-        frac <<= 1;
-        exp -= 1;
-    } while (!(frac & 0x800000));
-    return from_bits(((v & 0x80000000u) << 32) | (exp << 52) | ((frac & 0x7FFFFF) << 29));
+    return from_bits(((v & 0xC0000000u) << 32) | uint64_t{7} << 59 | ((v & 0x3FFFFFFFu) << 29));
 }
+// Any other value: the host's conversion, which is exact and gives the
+// manual's double (a denormal comes out normalised, as the manual has it).
+// Only a NaN must keep its bits, where the host would quiet a signalling one.
 QILIN_INLINE double load_single(uint32_t x) {
-    const uint64_t v = x, e = (v >> 23) & 0xFF;
-    if (e == 0 && (v & 0x7FFFFF) != 0) [[unlikely]]
-        return load_single_denormal(x);
-    // Normal, zero, infinity or NaN: the bits move over; the exponent's top
-    // bit fills the three new ones (inverted for normals).
-    const uint64_t y = (e > 0 && e < 255) ? !(e >> 7) : (e >> 7), z = y << 61 | y << 60 | y << 59;
-    return from_bits(((v & 0xC0000000u) << 32) | z | ((v & 0x3FFFFFFFu) << 29));
+    const float f = std::bit_cast<float>(x);
+    if (f != f) [[unlikely]] return load_single_nan(x);
+    return static_cast<double>(f);
 }
-inline uint32_t store_single(double d) {
+QILIN_INLINE uint32_t store_single(double d) {
     const uint64_t x = bits(d);
     const uint32_t e = static_cast<uint32_t>((x >> 52) & 0x7FF);
     if (e > 896 || (x & ~kSign) == 0 || e < 874)  // below 874 the manual says undefined; this is what hardware does
@@ -541,7 +544,7 @@ inline uint32_t quantize(unsigned type, unsigned scale, double value) {
 // the reference interpreter (qilin_difftest).
 inline uint32_t fbits(float f) { return std::bit_cast<uint32_t>(f); }
 inline float ffrom(uint32_t b) { return std::bit_cast<float>(b); }
-QILIN_INLINE double to_d(float f) { return load_single(fbits(f)); }
+QILIN_INLINE double to_d(float f) { return f == f ? static_cast<double>(f) : load_single_nan(fbits(f)); }  // (load_single's rule)
 QILIN_INLINE float to_f(double d) { return ffrom(store_single(d)); }
 // A register's double as a float, and whether that loses nothing (it holds a single-precision value).
 QILIN_INLINE bool to_f_exact(double d, float& f) {
@@ -553,8 +556,9 @@ QILIN_INLINE bool to_f_exact(double d, float& f) {
 // number above the smallest normal single (at it, the value before rounding
 // may have been below it: a zero in NI mode).
 QILIN_INLINE bool ordinary(float r) {
-    const float m = std::fabs(r);
-    return m == 0.0f || (m > 0x1p-126f && m <= 0x1.fffffep127f);
+    // The bits without the sign: 0x00800001 to 0x7F7FFFFF, or 0. One compare on the common path.
+    const uint32_t u = fbits(r) << 1;
+    return u - 0x01000002u <= 0xFDFFFFFCu || u == 0;
 }
 QILIN_COLD_OUTLINE float add_s_rare(float a, float b) { return to_f(single(add(to_d(a), to_d(b)))); }
 QILIN_COLD_OUTLINE float sub_s_rare(float a, float b) { return to_f(single(sub(to_d(a), to_d(b)))); }
@@ -613,12 +617,11 @@ QILIN_INLINE float madd_s(float a, float c, float b, bool subtract) {
     bool fast;
 #if defined(QILIN_FUSED_FLOAT)
     const float r = madd_fused(a, c, b, subtract, fast);
-#elif defined(QILIN_FMA_AT_RUN_TIME) && defined(_MSC_VER) && !defined(__clang__)
-    // (MSVC emits the intrinsic in place whatever the build's instruction set: one fused
-    // operation where the CPU has it, in place of a double product, a sum and the tie's check.)
+#elif defined(QILIN_FMA_AT_RUN_TIME)
+    // (One fused operation where the CPU has it, in place of a double product, a sum and the tie's check.)
     float r;
     if (g_fma) {
-        r = _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(c), _mm_set_ss(subtract ? -b : b)));
+        r = fma_instruction(a, c, subtract ? -b : b);
         fast = ordinary(r);
     } else {
         r = madd_by_double(a, c, b, subtract, fast);

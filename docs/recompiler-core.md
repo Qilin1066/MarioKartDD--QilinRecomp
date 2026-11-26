@@ -243,5 +243,72 @@ The other 75 are in replaced or dropped code: `__ARChecksize` (35), the EXI2 deb
 ## Portability of the whole tree (2026-11-26)
 Every hand-written source of the merged tree (76 files: `runtime/`, `recomp/` with its tests and `dsp/`, `disc/`, `host/`, `mkdd/` with its tests, `tools/player-kit`) compiled one by one with zig's Clang for `x86_64-linux-gnu`, `aarch64-linux-gnu` and `aarch64-macos`, `-std=c++23 -Wall -Wextra -Wpedantic -Wshadow -Werror` (and `-Wno-missing-field-initializers` on the Vulkan files, as CMake has it): all clean but one, `mkdd/src/menu.cpp` for macOS, which is zig's macOS headers and not the code (`#include <cmath>` then `<float.h>` leaves `FLT_MIN` undefined there, in two lines of test; Dear ImGui's header needs it). The generated code compiles for all three: the lifted files (the two largest, the first, `table.cpp`, `replaced.cpp`) with the full warning set, and `dsp_ucode.cpp`, `dsp_synth.cpp` and the instruction difftest's cases with `-w`, as CMake compiles them (the DSP lifter's output has unused labels; a `tw rA,rA` case compares a register with itself). zig's libc++ doesn't model Apple's availability rules, so the macOS 10.15 rule (no `std::format` in runtime code) isn't checked by this.
 
+## Efficiency, round 4 (2026-11-26)
+
+**How it is measured.** The runtime prints, every 300 retraces, the work of the game's threads per retrace, and the
+part of it spent waiting for the GPU thread; the figure here is work less that wait. Two scenes, headless: the
+attract mode's title (retraces 2100-3600 of a run from boot, the same 89,700 draws every time: the steadiest
+figure), its first demo race (windows 5700-6900; it varies more, as the demo isn't the same race every run), and a
+four-player Versus race reached with the devices role's `p4-steps.txt` (ports 2-4 pressing A, from retrace 4200).
+Builds are compared **side by side**, both running at once, so whatever else the PC is doing weighs on both: six
+agents share it, and a build in the background moved a single run's figure by half. The scripts are in the work
+folder (`core/bench.sh`, `bench4.sh`, `pair.sh`); `core/mbench` times single lifted functions (copied out of the
+generated code) under both compilers. All numbers: Ryzen 7 5800X, the MSVC build, unless they say otherwise.
+
+**Where the time went** (sampled from outside, the demo race, before this round): lifted SDK and JSystem 53% of
+the game thread's busy time, lifted game code 34%, runtime helpers 10%, native code 2%. By library: J3D 19%,
+`dolphin/mtx` 19% (`PSMTXConcat` alone 9.7%, `PSMTXCopy` 2.5%, `PSMTXInverse` 2%), the game's own libraries 31%,
+GX 5%. The write-gather pipe's handling on the game thread (`pipe_write`, `send_burst`, the store's slow branch) is
+about 3-5%; the dispatcher for indirect calls 1.8%; replaced-function lookup 0.6%.
+
+| Change | Title | Demo race | 4-view race |
+|---|---|---|---|
+| Registers around a direct call cut down to the callee's (before: `--full-sync`) | 10.63 -> 10.33 ms | 9.78 -> 9.41 | 6.77 -> 6.70 |
+| Cheaper floating-point helpers (below) | 9.71 -> 7.27 ms | 6.69 -> 5.39 | 6.50 -> 5.70 |
+
+| Tried and left out: lifted code reading the dispatcher's cache itself, a cache for replaced-function lookups | 7.31 -> 7.42 | 5.37 -> 5.14 | 5.86 -> 5.83 |
+
+(The pairs ran at different times, so a row's "after" needn't equal the next row's "before". The last row is within
+the noise either way, so the code stayed as it was.) The movie decoder (`qilin_game_difftest --thp`, above) went from
+6.63 to 4.73 ms a frame with MSVC and from 6.0 to 4.01 ms with Clang for MinGW (zig, `x86_64-windows-gnu -O2`, the
+player kit's compiler), 0 differences; that Clang build of the game difftest (10 trials a function, 68,375 runs
+compared) found 0 differences too.
+
+**The helpers.** A float's double, and `lfs`'s conversion, are the host's conversion, which is exact for every
+value (a denormal comes out normalised, as the manual has it); only a NaN takes the bitwise path, since the host
+would quiet a signalling one. Single mode's check for an ordinary result is one integer compare on its common path.
+`round25`, `store_single`, `madd_single` and `madd` are forced inline, with their rare paths (a subnormal, a tie)
+out of line; MSVC had left them as calls. GCC and Clang on x86-64 built for every CPU take the FMA instruction,
+where the CPU has it, through an asm statement (a function with a target attribute can't be inlined, and MinGW's
+`fma` is software), as MSVC does through its intrinsic. Checked: `load_single`, `to_d` and `ordinary` against the
+old definitions on all 2^32 floats, `round25` on 400 million doubles: 0 differences; the unit tests (also built with
+zig's Clang, for the asm path), the instruction difftest, `qilin_fp_check` and the game difftest pass. One lifted
+function alone (`mbench`), before and after, MSVC / Clang for MinGW: `PSMTXConcat` 136 / 126 ns -> 77 / 67,
+`PSMTXCopy` 33 / 35 -> 21 / 21, `PSMTXMultVec` 63 / 69 -> 35 / 33, `PSVECCrossProduct` 44 / 47 -> 20 / 21.
+
+**Four views.** Headless, the four-player race's game thread waits about 9.5 ms a retrace for the GPU thread, which
+records 14.7 ms of commands a frame: there the GPU thread is the bottleneck, not the lifted code.
+
+**On a Raspberry Pi 4** (not measurable here): build Release with GCC 14 or Clang 19 on the Pi itself (ARM64 has
+FMA, so `QILIN_FUSED_FLOAT` applies and none of the run-time choice above), with the CPU governor at `performance`
+and nothing else running, and run the same two scenes headless (`mkdd --headless <disc>`, a fresh save folder;
+`MKDD_PILOT_STEPS` and `MKDD_INPUT2..4` as in `bench4.sh` for four views). Read the same lines from the log: the
+title's windows 2100-3600 and the race's from 5700, work less the GPU wait. Three runs at least, as the figures move;
+`MKDD_PROFILE=<file>` (Linux's SIGPROF sampler, `profile.cpp`) gives the split by function there.
+
+**What is left** (the demo race after this round): `PSMTXConcat` is still the hottest function (6.8% of busy
+time), then the pipe's handling (about 5%, `gpu.cpp`), `J3DJoint::recursiveCalc`, and functions single mode
+can't take: the game's own vector code uses `frsqrte` (an inlined square root: `checkPosition`, `MakeSusMatrix`,
+`DoTireAction`, `NeckCtrl::update`, `PSVECMag`) or loads double constants with `lfd` (`searchBase`,
+`J3DGetKeyFrameInterpolation`), about 8% between them, in double mode. In single-mode code the
+ordinary-result checks are still half the time of a function like `PSMTXConcat` (with them removed, which would be
+wrong, it takes 46 ns instead of 77), and writing the FPR halves back on the way out is another 10-25%.
+
 ## Cheap wins noted, not taken
+- Single mode with a few halves kept as doubles: `frsqrte`'s estimate (not a single) and the double constants an
+  `lfd` loads would let the double-mode functions above run in single mode.
+- A function's FPR halves written back on the way out only if some caller can read them. That needs every
+  caller known, including the ones that reach it through pointers, or an assumption that the code follows the EABI
+  (f0-f13 dead after a call but for f1). The game difftest compares every register, so it would need to know the
+  rule too.
 - `ps1` of an FPR is carried through functions that only use scalar singles; a per-function "ps1 never read" would drop half the FP write-backs there.
