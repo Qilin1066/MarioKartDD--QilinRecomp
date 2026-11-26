@@ -267,6 +267,7 @@ if(QILIN_HOST)
     add_executable(mkdd_render_test mkdd/tests/render_test.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp
                    mkdd/src/renderer.cpp mkdd/src/priority.cpp mkdd/src/gpu.cpp)
     target_include_directories(mkdd_render_test PRIVATE mkdd/src)
+    target_sources(mkdd_render_test PRIVATE mkdd/src/hud.cpp)  # (the recorder places the HUD)
     target_link_libraries(mkdd_render_test PRIVATE qilin_host qilin_rt qilin_warnings)
     qilin_tool(mkdd_render_test)
     if(NOT MSVC)  # Vulkan structures written {sType}, as in the host layer
@@ -323,6 +324,13 @@ target_include_directories(mkdd_settings_test PRIVATE mkdd/src host/include)
 target_link_libraries(mkdd_settings_test PRIVATE qilin_rt qilin_warnings)
 qilin_tool(mkdd_settings_test)
 add_test(NAME mkdd_settings_test COMMAND mkdd_settings_test)
+# The widened picture without the game: the aspect getters and the cameras over
+# guest memory, the HUD's placing through the recorder (no window, no GPU).
+add_executable(mkdd_enhance_test mkdd/tests/enhance_test.cpp mkdd/src/enhance.cpp mkdd/src/hud.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp)
+target_include_directories(mkdd_enhance_test PRIVATE mkdd/src host/include)
+target_link_libraries(mkdd_enhance_test PRIVATE qilin_rt qilin_warnings)
+qilin_tool(mkdd_enhance_test)
+add_test(NAME mkdd_enhance_test COMMAND mkdd_enhance_test)
 # The controller ports: bindings to a GameCube controller, and scripted input.
 add_executable(mkdd_input_test mkdd/tests/input_test.cpp mkdd/src/input.cpp mkdd/src/settings.cpp)
 target_include_directories(mkdd_input_test PRIVATE mkdd/src host/include)
@@ -401,6 +409,7 @@ endif()
 # The game's runtime: everything in mkdd but the code lifted from main.dol.
 set(mkdd_runtime_sources mkdd/src/save_history.cpp mkdd/src/main.cpp mkdd/src/boot.cpp mkdd/src/os.cpp mkdd/src/dvd.cpp mkdd/src/vi.cpp mkdd/src/threads.cpp mkdd/src/sc.cpp mkdd/src/gpu.cpp mkdd/src/video.cpp mkdd/src/pad.cpp mkdd/src/card.cpp mkdd/src/exi.cpp mkdd/src/ar.cpp mkdd/src/later.cpp mkdd/src/hw.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/recorder.cpp mkdd/src/texture.cpp mkdd/src/renderer.cpp mkdd/src/settings.cpp mkdd/src/restart.cpp mkdd/src/profile.cpp mkdd/src/menu.cpp mkdd/src/priority.cpp)
 list(APPEND mkdd_runtime_sources mkdd/src/input.cpp)  # the controller ports (input.hpp)
+list(APPEND mkdd_runtime_sources mkdd/src/enhance.cpp mkdd/src/hud.cpp)  # the widened picture (enhance.hpp)
 
 # ---- The game: built only from the player's own main.dol ----
 # cmake -DQILIN_GAME_DOL=<extracted disc>/sys/main.dol: qilin lift turns it
