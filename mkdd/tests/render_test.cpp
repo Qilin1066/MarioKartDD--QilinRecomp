@@ -297,6 +297,61 @@ void sanity(Target& t, Gx& g) {
 
 // The scale changed between two frames (Renderer::request_scale): the next frame is drawn at
 // the new size, over the picture the EFB held; and back.
+// The phase of each picture presented between two frames (interp::phase), as main.cpp's loop
+// asks for it: the newest frame came at 0, pictures are seen at the display's vblanks (the
+// first 3 ms later, as vblank steering leaves it; 5 ms for a display the game's clock can't
+// follow). On a display at a whole multiple n of the game's rate: n even steps, the frame
+// itself last; elsewhere, the share of the tick gone by.
+void presented_phases() {
+    using mkdd::FrameRate;
+    namespace interp = mkdd::interp;
+    const double tick = 1e9 * 1.001 / 60.0;
+    const uint64_t came = 5'000'000'000ull;
+    // The phases of the pictures seen during one tick on a display at `hz`, the first `first_ms` after the frame came.
+    const auto shown = [&](FrameRate rate, double hz, double first_ms) {
+        interp::set_frame_rate(rate, hz);
+        std::vector<double> out;
+        for (double at = first_ms * 1e6; at < tick; at += 1e9 / hz) out.push_back(interp::phase(came, came + uint64_t(at)));
+        return out;
+    };
+    const auto is = [](const std::vector<double>& got, std::initializer_list<double> want) {
+        if (got.size() != want.size()) return false;
+        size_t i = 0;
+        for (double w : want)
+            if (std::fabs(got[i++] - w) > 1e-3) return false;
+        return true;
+    };
+    const double least = 1.0 / 64.0;  // "the frame before": never quite 0
+    check(is(shown(FrameRate::display, 120.0, 3.0), {least, 0.5}), "120 Hz: the frame before and the half-way picture, each tick");
+    check(is(shown(FrameRate::display, 120000.0 / 1001.0, 3.0), {least, 0.5}), "119.88 Hz: the same");
+    check(is(shown(FrameRate::display, 180.0, 2.0), {least, 1.0 / 3, 2.0 / 3}), "180 Hz: thirds");
+    check(is(shown(FrameRate::display, 240.0, 3.0), {0.25, 0.5, 0.75, 1.0}), "240 Hz: quarters (first seen more than half a step after the frame came: a step on, as even)");
+    check(is(shown(FrameRate::display, 240.0, 1.0), {least, 0.25, 0.5, 0.75}) && is(shown(FrameRate::display, 240.0, 2.0), {least, 0.25, 0.5, 0.75}),
+          "240 Hz: the same steps wherever in the first half-step the frame came (jitter doesn't show)");
+    check(is(shown(FrameRate::display, 360.0, 1.0), {least, 1.0 / 6, 2.0 / 6, 3.0 / 6, 4.0 / 6, 5.0 / 6}), "360 Hz: sixths");
+    {
+        // 144 and 165 Hz aren't multiples: each picture is where the tick has got to when it is seen.
+        const auto p144 = shown(FrameRate::display, 144.0, 5.0);
+        check(is(p144, {5.0 / 16.6833, (5.0 + 6.9444) / 16.6833}), "144 Hz: the share of the tick gone by");
+        const auto p165 = shown(FrameRate::display, 165.0, 5.0);
+        check(p165.size() == 2 && std::fabs(p165[1] - p165[0] - 6.0606 / 16.6833) < 1e-3 && p165[1] < 1.0, "165 Hz: evenly spaced in time");
+        const auto free_run = shown(FrameRate::unlimited, 0.0 + 1000.0, 0.5);  // (a picture every millisecond)
+        bool rising = free_run.size() == 17;
+        for (size_t i = 1; i < free_run.size(); ++i) rising = rising && free_run[i] > free_run[i - 1];
+        check(rising && free_run.back() < 1.0, "unlimited: every picture further on than the last");
+    }
+    interp::set_frame_rate(FrameRate::display, 120.0);
+    check(interp::phase(came, came + uint64_t(tick) + 3'000'000) == 1.0 && interp::phase(came, came + 10 * uint64_t(tick)) == 1.0,
+          "a tick after it came, and for as long as nothing newer comes (a load, a stall), the frame itself");
+    check(interp::phase(came, came - 1'000'000) == least, "a picture timed before the frame came is the frame before");
+    interp::set_frame_rate(FrameRate::display, 0.0);
+    check(std::fabs(interp::phase(came, came + uint64_t(tick / 4)) - 0.25) < 1e-3, "a display whose rate isn't known: the share of the tick");
+    interp::set_frame_rate(FrameRate::original, 120.0);
+    check(!interp::between_frames(), "original: no pictures between");
+    interp::set_frame_rate(FrameRate::sixty, 240.0);
+    check(!interp::between_frames() && !interp::unlimited(), "60: none either");
+}
+
 void scale_change(Target& t, Gx& g) {
     quad(g, 0, 0, 640, 528, -0.5f, 200, 40, 90);
     const auto one = t.finish(g, false);  // (not cleared: the next frame draws over it)
@@ -1139,6 +1194,7 @@ int main(int argc, char** argv) {
         g.setup();
         sanity(t, g);
         scale_change(t, g);
+        presented_phases();
         copy_filter(t, g);
         if (gpu.logic_op) logic_ops(t, g, false, "the GPU's");
         lines_and_points(t, g, gpu.wide_lines && gpu.large_points, "the GPU's");
