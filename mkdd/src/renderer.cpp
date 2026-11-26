@@ -678,7 +678,8 @@ struct Renderer::Impl {
             attrs.push_back({14, 0, VK_FORMAT_R32G32B32_UINT, offsetof(V, matrices)});
         };
         if (vertex_layout == gx::kLayoutSmall) compact(static_cast<const gx::SmallVertex*>(nullptr));
-        else if (vertex_layout == gx::kLayoutTiny) compact(static_cast<const gx::TinyVertex*>(nullptr));        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        else if (vertex_layout == gx::kLayoutTiny) compact(static_cast<const gx::TinyVertex*>(nullptr));
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
         if (vertices) {
             vi.vertexBindingDescriptionCount = vertex_layout != gx::kLayoutFull ? 2 : 1;
             vi.pVertexBindingDescriptions = binds;
