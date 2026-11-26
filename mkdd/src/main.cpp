@@ -826,7 +826,9 @@ int main(int argc, char** argv) {
         // below, which shows each frame as VI shows it and nothing else.
         const mkdd::gx::Frame* newest = between ? renderer->held() : nullptr;
         if (newest) renderer->take_real_copy();  // (a wrong foretold copy's real one, once it has come)
-        if (newest && vi_xfb) {
+        // A frame buffer the CPU wrote (the crash screen), copies having stopped: VI's, from memory.
+        const bool cpu_xfb = vi_xfb && renderer->cpu_wrote_xfb(vi_xfb);
+        if (newest && vi_xfb && !cpu_xfb) {
             const bool vsynced = display->sdl_window() && display->picture().vsync;
             uint64_t now = clock_ns(), seen = now;
             if (mkdd::interp::unlimited()) {
@@ -885,8 +887,9 @@ int main(int argc, char** argv) {
             // The newest frame's picture: its copy to the frame buffer, made just after this
             // retrace, which VI would show at the next one: a tick sooner, the frame itself drawn
             // already (the early frame end, recorder.hpp). With that off, VI's own.
-            if (xfb && newest_xfb && !newest_foretold && mkdd::gx::early_frame_end()) xfb = newest_xfb;
-            if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {
+            const bool cpu_wrote = xfb && renderer->cpu_wrote_xfb(xfb);
+            if (xfb && newest_xfb && !newest_foretold && mkdd::gx::early_frame_end() && !cpu_wrote) xfb = newest_xfb;
+            if (const qilin::host::Image* x = xfb && !cpu_wrote ? renderer->xfb(xfb) : nullptr) {
                 display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), h);
                 if (const auto it = xfb_frame.find(xfb & 0x1FFFFFFFu); it != xfb_frame.end()) mkdd::latency::presented(it->second);
                 if ((mkdd::latency::checking() || mkdd::latency::hashing()) && !display->sdl_window()) {

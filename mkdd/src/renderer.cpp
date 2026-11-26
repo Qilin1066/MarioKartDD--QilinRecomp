@@ -365,6 +365,45 @@ struct Renderer::Impl {
     std::unordered_map<int32_t, Spare> textures;  // by id, with the usage they were made for
     std::vector<Spare> spares;
     std::map<uint32_t, Image> xfbs;  // by guest address
+    // Frame buffers the CPU writes (JUTDirectPrint, JUTException's crash screen: pixels straight
+    // into guest memory, the GPU stopped). Our copies to a frame buffer don't write guest memory,
+    // so the memory a copy went to keeps what it held then unless the CPU writes it: its hash is
+    // taken at the first copy (and again at the first after a look), and looked at again only
+    // when copies to it have stopped for a while (cpu_wrote_xfb). Normal drawing costs nothing.
+    struct XfbWatch {
+        uint64_t hash = 0, copied_ns = 0;
+        uint32_t bytes = 0;
+        bool baseline = false, looked = false;
+    };
+    std::map<uint32_t, XfbWatch> xfb_watch;
+    static uint64_t hash_memory(uint32_t address, uint32_t bytes) {  // (four lanes, as texture.cpp's)
+        const uint8_t* p = rt::guest_ptr(0x80000000u | address);
+        uint64_t h[4] = {0x9E3779B97F4A7C15ull, 0xC2B2AE3D27D4EB4Full, 0x165667B19E3779F9ull, 0x27D4EB2F165667C5ull};
+        size_t i = 0;
+        for (; i + 32 <= bytes; i += 32)
+            for (int k = 0; k < 4; ++k) {
+                uint64_t v;
+                std::memcpy(&v, p + i + 8 * k, 8);
+                h[k] = (h[k] ^ v) * 0x100000001B3ull;
+            }
+        for (; i < bytes; ++i) h[0] = (h[0] ^ p[i]) * 0x100000001B3ull;
+        return h[0] ^ (h[1] << 1) ^ (h[2] << 2) ^ (h[3] << 3);
+    }
+    void watch_xfb(const gx::Copy& c) {
+        const uint32_t address = c.dest & 0x01FFFFFFu;
+        XfbWatch& w = xfb_watch[address];
+        w.copied_ns = gx::now_ns();
+        w.bytes = std::min(c.dest_width * c.dest_height * 2, gx::kMem1Size - std::min(address, gx::kMem1Size));
+        if (!w.baseline || w.looked) w.hash = hash_memory(address, w.bytes), w.baseline = true, w.looked = false;
+    }
+    bool cpu_wrote_xfb(uint32_t address) {
+        const auto it = xfb_watch.find(address & 0x01FFFFFFu);
+        if (it == xfb_watch.end()) return false;
+        XfbWatch& w = it->second;
+        if (gx::now_ns() - w.copied_ns < 100'000'000ull) return false;  // copies still coming: the GPU's picture
+        w.looked = true;
+        return hash_memory(address & 0x01FFFFFFu, w.bytes) != w.hash;
+    }
 
     // An image of this size and use: a spare one if there is one.
     Image obtain(uint32_t w, uint32_t h, uint32_t levels, VkImageUsageFlags usage) {
@@ -1406,6 +1445,7 @@ struct Renderer::Impl {
         const uint32_t w = std::max(1u, c.dest_width * xscale), h = std::max(1u, c.dest_height * scale);
         Image* target;
         if (c.to_xfb) {
+            if (!picture) watch_xfb(c);
             Image& x = picture ? *picture : xfbs[c.dest & 0x1FFFFFFFu];
             if (x.width != w || x.height != h) {
                 if (x.image) s.garbage.push_back({x, kXfb, 0});
@@ -2329,6 +2369,7 @@ void Renderer::render(gx::Frame& frame) {
     st.render_ns.fetch_add(gx::now_ns() - t0, std::memory_order_relaxed);
     st.rendered.fetch_add(1, std::memory_order_relaxed);
 }
+bool Renderer::cpu_wrote_xfb(uint32_t address) { return impl_->cpu_wrote_xfb(address); }
 const host::Image* Renderer::xfb(uint32_t address) const {
     const auto it = impl_->xfbs.find(address & 0x1FFFFFFFu);
     return it == impl_->xfbs.end() ? nullptr : &it->second;

@@ -951,6 +951,34 @@ void constant_alpha(Target& t, Stream& st, const char* how, uint32_t copies = kC
               rgb(a_right) + " | by the depth test " + rgb(a_top));
 }
 
+// A frame buffer the CPU writes (JUTDirectPrint, JUTException's crash screen: the GPU stopped,
+// pixels straight into memory): once copies to it have stopped for a tenth of a second and its
+// memory isn't what it was, VI's frame buffer in memory is the picture (Renderer::cpu_wrote_xfb);
+// while copies come, or the memory is untouched, the copy's.
+void cpu_frame_buffer(Target& t, Stream& st) {
+    const auto frame = [&] {
+        stream_begin(st);
+        stream_quad(st, 0, 0, 640, 528, -0.5f, 0x408020FFu);
+        st.end_frame();
+        st.send();
+        t.shown();
+    };
+    const auto wait = [] { std::this_thread::sleep_for(std::chrono::milliseconds(120)); };
+    frame();
+    const bool copying = t.renderer.cpu_wrote_xfb(kXfb);
+    wait();
+    const bool untouched = t.renderer.cpu_wrote_xfb(kXfb);
+    for (uint32_t i = 0; i < 64; ++i) guest(kXfb + 20000)[i] ^= 0xFF;  // a few pixels of text
+    const bool written = t.renderer.cpu_wrote_xfb(kXfb);
+    frame();
+    const bool again = t.renderer.cpu_wrote_xfb(kXfb);
+    wait();
+    const bool settled = t.renderer.cpu_wrote_xfb(kXfb);
+    check(!copying && !untouched && written && !again && !settled,
+          std::string("a frame buffer the CPU wrote once copies stopped is shown from memory: ") + (copying ? "copying " : "") +
+              (untouched ? "untouched " : "") + (written ? "" : "not-seen ") + (again ? "again " : "") + (settled ? "settled" : ""));
+}
+
 // Four players: each view's viewport and scissor take a quarter of the 608x448
 // picture, and a quad larger than the view stays inside it.
 void split_screen(Target& t, Stream& st) {
@@ -1778,6 +1806,7 @@ int main(int argc, char** argv) {
         clear_by_z_texture(t, st);
         depth_copies(t, st);
         z_on_time(t, st);
+        cpu_frame_buffer(t, st);
         if (gpu.dual_src_blend) constant_alpha(t, st, "dual-source blending");
         split_screen(t, st);
         indexed_matrices(t, st);
