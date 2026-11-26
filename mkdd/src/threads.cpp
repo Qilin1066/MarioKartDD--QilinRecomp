@@ -90,6 +90,7 @@ struct Thread {
     bool cancelled = false;  // under g_lock: wake a parked host so it can unwind
     std::condition_variable cv;
     std::vector<uint32_t> mutexes;  // held, for OSExitThread's unlock
+    uint64_t ran_ns = 0;            // the time it has had the guest CPU, less idle waits (log_threads)
 };
 
 std::mutex g_lock;  // guards the hand-over (go flags, condition variables)
@@ -167,6 +168,16 @@ void start_host(Thread* t) {
     }, lifetime);
 }
 
+// The running thread's time so far goes to its account (for log_threads).
+std::chrono::steady_clock::time_point g_running_since = std::chrono::steady_clock::now();
+uint64_t g_idle_then = 0;
+void account(Thread* t) {
+    const auto now = std::chrono::steady_clock::now();
+    const uint64_t idle = idle_time_ns(), wall = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - g_running_since).count());
+    t->ran_ns += wall - std::min(wall, idle - g_idle_then);
+    g_running_since = now, g_idle_then = idle;
+}
+
 // Hand the guest CPU to `next`; unless `leaving`, wait until it comes back.
 void switch_to(Thread* next, bool leaving = false) {
     // Keep the notified condition variable alive even if the other host
@@ -174,6 +185,7 @@ void switch_to(Thread* next, bool leaving = false) {
     const auto keep_next = g_threads.at(next->guest);
     next = keep_next.get();
     Thread* me = g_current;
+    account(me);
     me->enabled = interrupts_enabled();
     unready(next);
     next->state = kRunning;
@@ -714,6 +726,7 @@ void init_threads(Cpu& main_cpu) {
 }
 
 void log_threads() {
+    account(g_current);
     for (const auto& [address, t] : g_threads) {
         std::string stack;
         uint32_t sp = t->cpu->r[1];
@@ -727,9 +740,9 @@ void log_threads() {
             if (next <= sp) break;
             sp = next;
         }
-        rt::log("thread %08X%s: state %u, priority %d (own %d), suspended %d, sleeps on %08X, entry %08X, lr %08X; stack:%s", address,
-                t.get() == g_current ? " (running)" : "", t->state, t->priority, t->base, t->suspend, t->waiting_on, t->entry, t->cpu->lr,
-                stack.c_str());
+        rt::log("thread %08X%s: state %u, priority %d (own %d), suspended %d, sleeps on %08X, entry %08X, ran %.0f ms, lr %08X; stack:%s",
+                address, t.get() == g_current ? " (running)" : "", t->state, t->priority, t->base, t->suspend, t->waiting_on, t->entry,
+                double(t->ran_ns) / 1e6, t->cpu->lr, stack.c_str());
     }
 }
 

@@ -82,7 +82,7 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 - **Interrupt handlers:** the table is the OS's own at `80003040`, the mask its two words at `800000C4`/`C8` (`__OSSetInterruptHandler`, `__OSGetInterruptHandler`, `__OSMaskInterrupts`, `__OSUnmaskInterrupts`). The numbers, from `__OSDispatchInterrupt` (`800E8C54`): 0–4 memory protection, 5 audio DMA, 6 ARAM, 7 DSP, 8 audio streaming, 9–16 EXI, 17 CP, 18 PE token, 19 PE finish, 20 SI, 21 DVD, 22 reset switch, 23 PI error, 24 VI, 25 debugger, 26 high-speed port. `raise_interrupt(n)` runs a handler as an interrupt, with the number and the current context as the OS passes them; a masked one is held and arrives when the OS unmasks it, as the hardware's line stays up.
 - **Safe points:** interrupts are queued and delivered whenever the guest enables interrupts and inside every replacement that waits or polls. Each is entered with the guest's registers written back, so a delivery is the same as an interrupt arriving at that instruction. Handlers and callbacks run on a fresh frame below the interrupted thread's stack, with interrupts off and every register restored afterwards. If one wakes a thread of higher priority, the switch happens right after it.
 - **Contexts:** thread switching is native, so `OSSetCurrentContext`, `OSGetCurrentContext` and `OSClearContext` keep only the words in low memory that lifted interrupt handlers (GX, AI, DSP, JAudio) set around their callbacks. `OSFillFPUContext` and `OSGetStackPointer` serve the game's crash screen.
-- **Caches:** every flush and invalidate is a no-op, because the host is coherent; `DCZeroRange` zeroes memory. The locked cache's DMA (`LCStoreBlocks`, `LCStoreData`) is a copy done at once.
+- **Caches:** every flush and invalidate is a no-op, because the host is coherent; `DCZeroRange` zeroes memory. The locked cache's DMA (`LCStoreBlocks`, `LCStoreData`) is a copy done at once. `LCEnable` and `LCDisable` set and clear HID2's locked-cache bit, which the movie decoder reads.
 - **Time:** the time base counts at 40.5 MHz by the host's steady clock, from the PC's local date and time counted from 1 January 2000, as the console's does from its clock chip (`OSGetTime`, `OSGetTick`, `__OSGetSystemTime`). `OSTicksToCalendarTime` is exact for any date.
 - **SRAM** (`OSRtc.c`): the console's settings live where the SDK keeps its copy (`80375620`), filled from the port's settings instead of the clock chip's memory over EXI: language, the stereo flag, the progressive flag, with the checksum the SDK computes. `OSGetSoundMode`, `OSSetSoundMode`, `OSGetProgressiveMode`, `OSSetProgressiveMode`, the wireless-pad and Game Boy Player words, and the lock and unlock calls work on it. What the game changes is kept until the program ends; it isn't written back to the settings file yet.
 - **Reset** (`OSReset.c`): `OSResetSystem` calls the registered reset functions as the OS does (each with FALSE until all agree, then with TRUE). A restart or hot reset starts the program again with the same command line (`restart.cpp`); a hot reset to the console's menu closes it. The shutdown form isn't modelled and stops the runtime. `OSGetResetSwitchState` reads `g_reset_button` (`os.hpp`), which nothing sets yet.
@@ -111,7 +111,7 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 
 - **The retrace** is a timed interrupt from the host clock at the NTSC rate, 60000/1001 Hz, until the main loop matches it to the display (`set_retrace_rate`; 0/0 returns to the console's own). It counts, runs the pre-retrace callback, applies what `VIFlush` passed on (frame buffer, black, size, scan mode), hands the picture to the main thread (`video.cpp`), runs the post-retrace callback and wakes the threads in `VIWaitForRetrace`. More than a frame late, the schedule restarts from now rather than posting the missed retraces in a burst.
 - **Settings take effect at a retrace after `VIFlush`**, as the hardware's registers do: `VISetNextFrameBuffer`, `VISetBlack`, `VIConfigure`. `VIGetNextFrameBuffer` and `VIGetCurrentFrameBuffer` read the two sides of that.
-- **Modes:** `VIGetTvFormat` says NTSC; `VIConfigure` accepts NTSC modes (interlaced, double-strike, progressive) and stops on another TV format. `VIGetDTVStatus` reports a component cable when the progressive setting is on, which is what makes the game offer progressive scan. `VIGetNextField` alternates with the retraces when interlaced and is constant when progressive.
+- **Modes:** `VIGetTvFormat` says NTSC; `VIConfigure` accepts NTSC modes (interlaced, double-strike, progressive) and stops on another TV format. `VIGetDTVStatus` reports a component cable when the progressive setting is on, which is what makes the game offer progressive scan. `VIGetNextField` alternates with the retraces, under progressive scan too (the hardware's line counter still runs through two "fields", each a whole picture; the movie player counts on it).
 - **Not in:** `VIGetCurrentLine` (nothing calls it).
 
 ## Hardware registers (`hw.cpp`)
@@ -252,22 +252,32 @@ The main thread turns the pad, the keys and the mouse into the remote's buttons 
 
 ## Where the game stands
 
-Checked on 2026-11-26, on Windows, from the extracted disc, with no controller and an empty memory-card folder:
+Checked on 2026-11-26, on Windows, with no controller and an empty memory-card folder:
 
-- **Headless** (`mkdd <disc> --headless`), 240 s: the game boots as `__start` boots it, runs OSInit, its static constructors and `main`, brings up JKernel's heaps, ARAM, the controllers, GX, VI, JAudio on the DSP with its own microcode, the memory-card manager, and reaches its main loop. It then runs at the retrace rate without a stop: 300 frame buffers every 5 s, about 300 draws a frame, the audio DMA at 32 kHz.
-- **Drawn without a window** (`--offscreen`, frames dumped): the progressive-scan question appears with its countdown (the progressive setting is on by default, so the cable is "plugged in"), then the Lakitu loading scene, drawn correctly. After about 27 s of game time the dumped frames are black while the game goes on drawing about 300 primitives a frame. Whether that is the game (the opening movie needs THP, or a fade) or the renderer was not determined.
-- **Tests:** `mkdd_threads_test` (and its shutdown and restart forms) and `mkdd_dvd_test` pass.
+- **Unattended, drawn without a window** (`--offscreen`, frames dumped), 170 s from the extracted disc: the progressive-scan question with its countdown, the Lakitu loading scene, the opening movie, the title screen with "PRESS START", and the attract mode's demo races, in the game's own cycle, without a stop. With the progressive setting off there is no question and the movie follows the loading scene directly.
+- **From a disc image** (`.ciso`), headless, 60 s: the same start, into the movie.
+- **Tests:** all 27 of `ctest -E qilin_padtest` pass on the merged tree.
 
-Not yet:
+Two faults stood between the loading scene and the movie, both found with `MKDD_THREADS` (below):
 
-- **Anything past start-up with input.** No controller was plugged in for these runs, so no menu was entered and no race started. A replaced function with no native code stops the game and names itself; of those lifted code can reach, only the eight ETH functions lack one (reached only with a Broadband Adapter, which no port reports).
-- **A disc image.** The disc library's own tests cover images; the game was run from the extracted folder only.
-- **SRAM changes kept** between runs (`OSSetSoundMode`, `OSSetProgressiveMode`).
-- **The reset switch**: nothing sets `g_reset_button`.
-- **`OSResetSystem`'s shutdown form**, `VIGetCurrentLine`, drive errors and the cover, the DVD's 512 KB steps: not modelled; the first two stop the runtime if reached.
+- `LCEnable` did nothing, and the movie decoder (`THPVideoDecode`, `800F0848`) refuses to decode unless HID2's locked-cache bit is set. The player's decode thread suspended itself with the error, and the loading scene faded to black for good while still being drawn.
+- `VIGetNextField` was constant under progressive scan. The player takes a frame of its 59.94-a-second movie only when the next field is the one it expects, and flips that after each, so it showed one frame and waited for ever.
+
+Known and open:
+
+- **The movie plays slowly.** Its decode thread uses nearly all of the wall time while it plays (17.4 s of CPU in about 20 s of movie; `MKDD_THREADS` shows each thread's time), the game falls to about 155–190 frames in every 300 retraces, and the sound is skipped ahead. The decoder's inverse DCT is paired-single code, lifted with the exact single-precision and quantised load/store helpers; making that fast is the recompiler's work (`recompiler-core.md`). Measured with an MSVC build while other builds were running on the same PC.
+- **Nothing past the title with input** was tried here.
+- **SRAM changes kept** between runs (`OSSetSoundMode`, `OSSetProgressiveMode`), and the **reset switch** (nothing sets `g_reset_button`).
+- **`OSResetSystem`'s shutdown form**, `VIGetCurrentLine`, drive errors and the cover, the DVD's 512 KB steps: not modelled; the first two stop the runtime if reached. The eight ETH functions have no native code: they are reached only with a Broadband Adapter, which no port reports.
+
+## Finding what a game that stands still waits for
+
+- `MKDD_THREADS=<seconds>` logs, once at that much game time (frames handed to VI over 60), every guest thread: state, priority, what it sleeps on, the time it has had the CPU, and its call stack as return addresses. `MKDD_PEEK=<address>:<words>` (hex) adds that much guest memory.
+- `MKDD_DVD_LOG=1` logs each file as the game opens it, with the time.
+- `MKDD_TRACE=1` logs every call into a replacement.
 
 ## Next
 
-1. Find what the black frames after the loading scene are.
-2. Play with a controller: the title, the menus, a race; write whatever replaced function that reaches.
+1. The movie decoder's speed (the lifter's paired-single and quantised code).
+2. Play with a controller: the menus, a race; write whatever replaced function that reaches.
 3. SRAM changes back into the settings file, and a key or pad button for the reset switch.
