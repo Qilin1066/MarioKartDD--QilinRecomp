@@ -93,6 +93,7 @@ struct Entry {
 };
 struct Card {
     bool mounted = false, busy = false;
+    uint64_t mount_ends = 0;  // while it mounts, a probe says BUSY; busy with anything else, it answers
     uint32_t detach = 0;
     std::array<std::optional<Entry>, kMaxFiles> dir;
 };
@@ -321,7 +322,7 @@ Outcome do_probe(uint32_t slot, uint32_t mem_size, uint32_t sector_size) {
         if (g_cards[slot].mounted) detach(slot);
         return refuse(kNoCard);
     }
-    if (g_cards[slot].busy) return refuse(kBusy);
+    if (g_cards[slot].busy && time_base() < g_cards[slot].mount_ends) return refuse(kBusy);
     if (mem_size) rt::poke32(mem_size, kCardMegabits);
     if (sector_size) rt::poke32(sector_size, kCardSectorSize);
     return refuse(kReady);
@@ -337,6 +338,7 @@ Outcome do_mount(uint32_t slot, uint32_t detach_cb) {
     scan(slot);
     k.mounted = true;
     k.detach = detach_cb;
+    k.mount_ends = time_base() + mount_ticks();
     return after(mount_ticks());
 }
 Outcome do_unmount(uint32_t slot) {
@@ -618,6 +620,7 @@ Outcome do_rename(Cpu& c, uint32_t slot, uint32_t old_at, uint32_t new_at) {
 
 // ---- ending a call
 void finish(Cpu& c, uint32_t slot, const Outcome& o, const char* who) {
+    if (devices_log()) rt::log("card: %s (slot %u) = %d%s", who, slot, o.result, o.transfer && o.ticks ? ", after the card's time" : "");
     if (!o.transfer || o.ticks == 0) {
         c.r[3] = static_cast<uint32_t>(o.result);
         return;
@@ -635,6 +638,7 @@ void finish(Cpu& c, uint32_t slot, const Outcome& o, const char* who) {
 // The asynchronous forms: a refusal is returned; otherwise READY, and the
 // result goes to callback(slot, result) when the card is done.
 void finish_async(Cpu& c, uint32_t slot, const Outcome& o, uint32_t callback) {
+    if (devices_log()) rt::log("card: an asynchronous call (slot %u) = %d%s", slot, o.result, o.transfer ? ", by callback" : "");
     if (!o.transfer) {
         c.r[3] = static_cast<uint32_t>(o.result);
         return;

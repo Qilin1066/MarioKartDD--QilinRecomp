@@ -18,7 +18,13 @@
 // when SIProbe names a wheel) sits on the SI steering calls: no port ever
 // holds a wheel, and they say so.
 #include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+#include <vector>
 
 #include "boot.hpp"
 #include "input.hpp"
@@ -52,6 +58,7 @@ uint32_t g_sampling_rate = 0;
 uint64_t reset_ticks() { return ticks_from_us(1000); }
 
 void disable(uint32_t port) {
+    if (devices_log() && (g_enabled & bit(port))) rt::log("pad: port %u disabled", port);
     g_enabled &= ~bit(port);
     gc_rumble(static_cast<int>(port), false);
 }
@@ -66,7 +73,10 @@ void reset(uint32_t mask) {
         g_reset_free = std::max(g_reset_free, now) + reset_ticks();
         run_after(g_reset_free - now, [port](Cpu&) {
             g_resetting &= ~bit(port);
-            if (gc_pad(static_cast<int>(port)).connected) g_enabled |= bit(port);
+            if (gc_pad(static_cast<int>(port)).connected) {
+                if (devices_log()) rt::log("pad: port %u has a controller", port);
+                g_enabled |= bit(port);
+            }
         });
     }
 }
@@ -104,6 +114,111 @@ void write_error(uint32_t s, int8_t err) {
     rt::poke8(s + 10, static_cast<uint8_t>(err));
 }
 
+// ---- development: a pilot for runs without a player. A race can't be
+// driven by a script of timed presses, so the first port's stick can follow a
+// path instead: the positions a kart passed through, taken from the game
+// itself.
+//   MKDD_PILOT_RECORD=<file>[:kart]  writes the kart's position (x z, a line every 10 frames) while a
+//                                    race runs: kart 1 in a Grand Prix is one of the game's own drivers
+//   MKDD_PILOT=<file>                steers port 1's kart (kart 0) along such a path, closed into a lap;
+//                                    the script still holds A
+// Positions are read through the supported build's addresses (names from the disc's map):
+// RaceMgr::sRaceManager, KartCtrl's instance, its kart bodies and their position.
+constexpr uint32_t kRaceManager = 0x803CB7E8u, kKartCtrl = 0x803CC588u, kBodies = 0xA0, kBodyPosition = 0x23C;
+
+bool kart_position(uint32_t kart, float& x, float& z) {
+    const uint32_t ctrl = rt::peek32(kKartCtrl);
+    if (rt::peek32(kRaceManager) == 0 || ctrl < 0x80000000u || ctrl >= 0x81800000u) return false;
+    const uint32_t body = rt::peek32(ctrl + kBodies + 4 * kart);
+    if (body < 0x80000000u || body >= 0x81800000u) return false;
+    const auto f = [](uint32_t a) { return std::bit_cast<float>(rt::peek32(a)); };
+    x = f(body + kBodyPosition), z = f(body + kBodyPosition + 8);
+    return true;
+}
+void pilot_record() {
+    static const char* spec = std::getenv("MKDD_PILOT_RECORD");
+    if (!spec) return;
+    static uint32_t kart = 0, frame = 0;
+    static FILE* out = [] {
+        std::string name = spec;
+        if (const size_t colon = name.rfind(':'); colon != std::string::npos && colon > 1 && name.find_first_not_of("0123456789", colon + 1) == std::string::npos) {
+            kart = static_cast<uint32_t>(std::atoi(name.c_str() + colon + 1));
+            name.resize(colon);
+        }
+        FILE* f = std::fopen(name.c_str(), "w");
+        if (!f) rt::fatal(nullptr, "MKDD_PILOT_RECORD: can't write %s", name.c_str());
+        return f;
+    }();
+    float x, z;
+    if (!kart_position(kart, x, z) || ++frame % 10) return;
+    std::fprintf(out, "%.1f %.1f\n", x, z);
+    std::fflush(out);
+}
+// The first port's stick, if the pilot has it: set in the status PADRead has just written.
+void pilot_steer(uint32_t status) {
+    static const char* name = std::getenv("MKDD_PILOT");
+    if (!name) return;
+    struct Point {
+        float x, z;
+    };
+    static const std::vector<Point> path = [] {
+        std::vector<Point> out;
+        FILE* f = std::fopen(name, "r");
+        if (!f) rt::fatal(nullptr, "MKDD_PILOT: can't read %s", name);
+        for (Point p; std::fscanf(f, "%f %f", &p.x, &p.z) == 2;) out.push_back(p);
+        std::fclose(f);
+        if (out.size() < 8) rt::fatal(nullptr, "MKDD_PILOT: %s holds no path", name);
+        return out;
+    }();
+    static const float sign = [] { const char* e = std::getenv("MKDD_PILOT_SIGN"); return e && *e == '-' ? -1.0f : 1.0f; }();
+    static float last_x = 0, last_z = 0, heading_x = 0, heading_z = 0;
+    static size_t nearest = 0;
+    static uint32_t reversing = 0;  // frames left of backing out
+    static bool racing = false;
+    float x, z;
+    if (!kart_position(0, x, z)) {
+        racing = false;
+        return;
+    }
+    const auto distance2 = [&](size_t i) { return (path[i].x - x) * (path[i].x - x) + (path[i].z - z) * (path[i].z - z); };
+    if (!racing) {  // a new race: wherever the kart is on the path
+        nearest = 0;
+        for (size_t i = 1; i < path.size(); ++i)
+            if (distance2(i) < distance2(nearest)) nearest = i;
+        heading_x = heading_z = 0;
+    } else {  // along from where it was, never back
+        for (size_t step = 1; step <= 6; ++step)
+            if (distance2((nearest + step) % path.size()) < distance2(nearest)) nearest = (nearest + step) % path.size(), step = 0;
+        const float dx = x - last_x, dz = z - last_z;
+        if (dx * dx + dz * dz > 1.0f && !reversing) heading_x = dx, heading_z = dz;  // (not while backing out)
+    }
+    racing = true;
+    last_x = x, last_z = z;
+    // Stuck (against a wall, in the scenery): hardly moved in a second with A held. Back out for a
+    // second and a half with B, then go on.
+    static float mark_x = 0, mark_z = 0;
+    static uint32_t since_mark = 0;
+    const uint16_t buttons = rt::peek16(status);
+    if (reversing) {
+        --reversing;
+        rt::poke16(status, static_cast<uint16_t>((buttons & ~0x0100u) | 0x0200u));
+        rt::poke8(status + 2, 0);
+        mark_x = x, mark_z = z, since_mark = 0;
+        return;
+    }
+    if (!(buttons & 0x0100) || ++since_mark >= 60) {
+        if ((buttons & 0x0100) && since_mark >= 60 && (x - mark_x) * (x - mark_x) + (z - mark_z) * (z - mark_z) < 150.0f * 150.0f)
+            reversing = 90;
+        mark_x = x, mark_z = z, since_mark = 0;
+    }
+    const Point& target = path[(nearest + 4) % path.size()];
+    const float tx = target.x - x, tz = target.z - z;
+    if (heading_x == 0 && heading_z == 0) return;  // not moving yet: straight on
+    const float angle = std::atan2(heading_x * tz - heading_z * tx, heading_x * tx + heading_z * tz);
+    const long stick = std::lround(std::clamp(sign * angle * 200.0f, -100.0f, 100.0f));
+    rt::poke8(status + 2, static_cast<uint8_t>(static_cast<int8_t>(stick)));
+}
+
 uint32_t port_of(Cpu& c, const char* who) {
     if (c.r[3] >= kPorts) rt::fatal(&c, "%s: there is no controller port %u", who, c.r[3]);
     return c.r[3];
@@ -125,6 +240,8 @@ void PADRecalibrate(Cpu& c) {  // (mask) -> TRUE: a reset that also takes the st
     c.r[3] = 1;
 }
 void PADRead(Cpu& c) {  // (PADStatus[4]) -> the ports whose controllers can rumble
+    watch_guest_values();
+    pilot_record();
     const uint32_t status = c.r[3];
     uint32_t motor = 0;
     for (uint32_t port = 0; port < kPorts; ++port) {
@@ -138,6 +255,7 @@ void PADRead(Cpu& c) {  // (PADStatus[4]) -> the ports whose controllers can rum
             write_error(s, kErrNoController);
         } else {
             write_status(s, p);
+            if (port == 0) pilot_steer(s);
             motor |= bit(port);
         }
     }
@@ -145,6 +263,11 @@ void PADRead(Cpu& c) {  // (PADStatus[4]) -> the ports whose controllers can rum
 }
 void PADControlMotor(Cpu& c) {  // (port, command): 0 stop, 1 rumble, 2 stop hard
     const uint32_t port = port_of(c, "PADControlMotor");
+    if (devices_log()) {
+        static uint32_t last[kPorts] = {~0u, ~0u, ~0u, ~0u};
+        if (last[port] != c.r[4]) rt::log("pad: port %u motor %u%s", port, c.r[4], g_enabled & bit(port) ? "" : " (no controller)");
+        last[port] = c.r[4];
+    }
     if (g_enabled & bit(port)) gc_rumble(static_cast<int>(port), c.r[4] == 1);
 }
 void PADSetSpec(Cpu& c) { g_spec = c.r[3]; }
@@ -187,6 +310,7 @@ uint64_t sampling_deadline() { return g_steering_sampling && g_enabled ? g_next_
 
 void SIResetSteeringAsync(Cpu& c) {  // (port, callback(port, err)) -> 0, or -2 while one is in flight
     const uint32_t port = port_of(c, "SIResetSteeringAsync"), cb = c.r[4];
+    if (devices_log()) rt::log("pad: wheel reset asked of port %u", port);
     if (g_steering_reset[port]) {
         c.r[3] = static_cast<uint32_t>(kErrNotReady);
         return;
