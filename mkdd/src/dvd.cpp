@@ -13,6 +13,8 @@
 // asynchronous reads at +0x38.
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -155,8 +157,18 @@ void complete(Cpu& c, uint64_t serial) {  // as an interrupt
     const Command cmd = g_executing;
     const uint32_t b = cmd.block, offset = rt::peek32(b + kOffset), length = rt::peek32(b + kLength), addr = rt::peek32(b + kAddr);
     if (addr < 0x80000000u || uint64_t{addr} + length > 0x81800000u) rt::fatal(&c, "DVD read of %u bytes to %08X, outside memory", length, addr);
-    if (const auto read = game_disc().read(offset, std::span(rt::guest_ptr(addr), length)); !read)
-        rt::fatal(&c, "DVD read of %u bytes at %08X: %s", length, offset, read.error().c_str());
+    // A read that fails is tried again for a few seconds: a disc image on a network or USB drive
+    // can stop answering for a moment (a drive spinning up, a network hiccup). The game waits, as
+    // the console's drive retries a bad sector; only then does it stop, saying why.
+    auto read = game_disc().read(offset, std::span(rt::guest_ptr(addr), length));
+    for (unsigned attempt = 0; !read && attempt < 6; ++attempt) {
+        rt::log("DVD read of %u bytes at %08X failed (%s): trying again", length, offset, read.error().c_str());
+        std::this_thread::sleep_for(std::chrono::milliseconds(100u << attempt));  // 0.1 s, then twice as long: 6.3 s in all
+        read = game_disc().read(offset, std::span(rt::guest_ptr(addr), length));
+    }
+    if (!read)
+        rt::fatal(&c, "DVD read of %u bytes at %08X: %s (the disc image or folder was removed, or the drive it is on stopped "
+                      "answering)", length, offset, read.error().c_str());
     g_head = uint64_t{offset} + length;
     rt::poke32(b + kTransferred, length);
     g_busy = false;

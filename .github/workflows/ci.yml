@@ -56,20 +56,6 @@ jobs:
           else
             ctest --test-dir build -C Release --output-on-failure
           fi
-      - name: Scheduler, save and audio sanitizers
-        if: matrix.sweep
-        shell: bash
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-        run: |
-          cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug -DQILIN_SANITIZE=address,undefined -DQILIN_WERROR=ON \
-            -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
-            -DFETCHCONTENT_SOURCE_DIR_SDL3="$PWD/build/_deps/sdl3-src" \
-            -DFETCHCONTENT_SOURCE_DIR_VULKANHEADERS="$PWD/build/_deps/vulkanheaders-src" \
-            -DFETCHCONTENT_SOURCE_DIR_VOLK="$PWD/build/_deps/volk-src" \
-            -DFETCHCONTENT_SOURCE_DIR_IMGUI="$PWD/build/_deps/imgui-src"
-          cmake --build build-sanitize --parallel 2 --target mkdd_threads_test mkdd_save_history_test mkdd_card_test mkdd_pad_test mkdd_ar_test qilin_audio_callback_test
-          ctest --test-dir build-sanitize -R 'mkdd_(threads|save_history|card|pad|ar)_test|qilin_audio_callback_test' --output-on-failure
       # The decoder against GNU objdump over a sweep of the encoding space (no game files needed).
       - name: Decoder sweep
         if: matrix.sweep
@@ -84,3 +70,58 @@ jobs:
         run: |
           sudo apt-get install -y glslang-tools
           python3 tools/build_shaders.py --check
+
+  # Every test with AddressSanitizer (and LeakSanitizer) and UndefinedBehaviorSanitizer: GCC 14,
+  # the first report fails the run. Graphical tests draw with Mesa's lavapipe under Xvfb, as the
+  # build job's do; what the graphics stack and SDL keep until exit is suppressed (tools/check/lsan.supp).
+  sanitize:
+    name: linux-x64-asan-ubsan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: |
+          python -m pip install Pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+            libxtst-dev libxfixes-dev libxkbcommon-dev libwayland-dev libdecor-0-dev libegl-dev libdrm-dev libgbm-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev xvfb xauth libvulkan1 mesa-vulkan-drivers
+      - name: Configure
+        run: |
+          # (Warnings are the build job's: GCC's flow warnings under the sanitizers' instrumentation aren't ours.)
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQILIN_SANITIZE=address,undefined \
+            -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tools/check/lsan.supp:print_suppressions=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: xvfb-run -a env QILIN_REQUIRE_GRAPHICS=1 ctest --test-dir build --output-on-failure --timeout 600
+
+  # The tests of the threads' handoffs and the guest's clock with ThreadSanitizer (Clang 19). Newer
+  # kernels randomise mmap over more bits than TSan's memory layout allows: lowered for the run.
+  tsan:
+    name: linux-x64-tsan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 clang-19
+          sudo sysctl vm.mmap_rnd_bits=28
+      - name: Configure
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQILIN_SANITIZE=thread -DQILIN_HOST=OFF \
+            -DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19
+      - name: Build
+        run: cmake --build build --parallel --target mkdd_threads_test mkdd_guest_clock_test
+      - name: Test
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build -R 'mkdd_threads_test|mkdd_guest_clock_test' --output-on-failure --timeout 300

@@ -1,0 +1,16 @@
+# LeakSanitizer suppressions for CI's sanitizer job (.github/workflows/ci.yml): only what third-party
+# code keeps until the process ends, never our own.
+# The graphics stack, loaded at run time: the Vulkan loader, Mesa's lavapipe and the LLVM it JITs
+# shaders with, and what the X server's client libraries and D-Bus hold for the connection.
+leak:libvulkan
+leak:libvulkan_lvp
+leak:libgallium
+leak:libLLVM
+leak:libVkLayer
+leak:libX11
+leak:libxcb
+leak:libdbus
+# SDL3 is linked statically, so its frames are named, not its library: it keeps its global state
+# (hints, properties, the error string, the event queue) until SDL_Quit, which the programs leave
+# to the process's end (the display and the sound output quit only their own subsystems).
+leak:SDL_

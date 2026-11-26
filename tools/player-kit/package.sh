@@ -4,7 +4,7 @@
 #
 # Cross-compiles on Linux with llvm-mingw, then lays out:
 #   MarioKartDD--QilinRecomp/Play Double Dash.bat, README.txt, LICENSES/
-#   MarioKartDD--QilinRecomp/kit/  qilin.exe, qilin-disc.exe, qilin-dsp.exe, lib/libmkdd_kit.a, include/, kit.ninja,
+#   MarioKartDD--QilinRecomp/kit/  qilin.exe, qilin-disc.exe, qilin-dsp.exe, lib/libmkdd_kit.a and mkdd_manifest.o, include/, kit.ninja,
 #                            plan.tsv, play.ps1, ninja.exe, toolchain/ (llvm-mingw, trimmed), VERSION
 # Nothing in it is made from the game: the player's PC reads main.dol from their own
 # disc, lifts it (the game's code, and the DSP's microcode in it) and compiles that code
@@ -30,8 +30,8 @@ cmake -S "$root" -B "$build" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$root/tools/player
 cmake --build "$build" --target qilin qilin_disc_tool qilin-dsp mkdd_kit mkdd_kit_link_check --parallel
 cmake --install "$build" --component player --prefix "$pkg"
 # What play.ps1 will look for: fail here, not on a player's PC.
-for f in kit/qilin.exe kit/qilin-disc.exe kit/qilin-dsp.exe kit/lib/libmkdd_kit.a kit/kit.ninja kit/plan.tsv \
-         kit/include/dsp_core.hpp kit/include/qilin/rt/system.hpp; do
+for f in kit/qilin.exe kit/qilin-disc.exe kit/qilin-dsp.exe kit/lib/libmkdd_kit.a kit/lib/mkdd_manifest.o kit/kit.ninja \
+         kit/plan.tsv kit/include/dsp_core.hpp kit/include/qilin/rt/system.hpp; do
     [ -f "$pkg/$f" ] || { echo "package.sh: $f is missing from the kit" >&2; exit 1; }
 done
 

@@ -347,6 +347,11 @@ int main() {
         const mkdd::Settings again = mkdd::save_settings(dir, changed) ? mkdd::load_settings(dir) : s;
         check(again.look == host::Look::crt && same(again, changed), "saving, then loading, keeps a change");
         check(!std::filesystem::exists(dir / "mkdd.ini.tmp"), "the temporary file is gone");
+        // A folder nothing can be written in (here: "inside" a file): the defaults, and the game goes on.
+        { std::ofstream(dir / "not-a-folder") << "x"; }
+        const mkdd::Settings unwritable = mkdd::load_settings(dir / "not-a-folder");
+        check(same(unwritable, d), "a folder that can't be written: the defaults, without stopping");
+        check(!mkdd::save_settings(dir / "not-a-folder", changed), "and saving there says it failed");
         std::filesystem::remove_all(dir);
     }
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");

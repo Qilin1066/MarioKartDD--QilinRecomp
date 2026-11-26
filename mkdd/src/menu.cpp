@@ -18,6 +18,7 @@
 #include "enhance.hpp"
 #include "os.hpp"
 #include "save_history.hpp"
+#include "video.hpp"
 #include "qilin/host/capture.hpp"
 #include "qilin/host/pacing.hpp"
 #include "qilin/rt/system.hpp"
@@ -172,7 +173,10 @@ bool Menu::handle(const void* event) {
                 return true;
             }
             if (!e.key.repeat && e.key.key == SDLK_F9) {  // a capture of the next frames, for a report
-                if (!frames_wanted_) frames_wanted_ = kCaptureFrames, frames_.clear();
+                if (!frames_wanted_) {
+                    frames_wanted_ = kCaptureFrames, frames_.clear();
+                    capture_asked_ms_ = SDL_GetTicks(), capture_asked_frame_ = frame_count();
+                }
                 return true;
             }
             break;
@@ -290,6 +294,17 @@ void Menu::tick() {
         frames_wanted_ = 0;
         finish_capture();
     }
+    // A capture of a game that has stopped drawing (stuck: what a report most needs): no new
+    // frame a second after F9, so the picture on the screen now, with the log so far.
+    if (!open_ && frames_wanted_ && SDL_GetTicks() - capture_asked_ms_ > 1000 && frames_.empty() &&
+        frame_count() == capture_asked_frame_) {
+        take_capture_frame();
+        frames_wanted_ = 0;
+        capture_stuck_ = true;
+        qilin::rt::log("F9: the game has drawn no new frame since it was pressed: capturing the picture as it is");
+        finish_capture();
+        capture_stuck_ = false;
+    }
     if (open_) {
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -362,7 +377,11 @@ void Menu::finish_capture() {
                   ft.average_ms, ft.low1_fps, ft.low01_fps, ft.worst_ms, unsigned(ft.frames));
     info += line;
     for (const std::string& detail : frame_details_) info += detail + "\n";
-    info += "frames captured: " + std::to_string(frames_.size()) + (open_ ? " (the settings menu was open: the paused picture)\n" : "\n");
+    info += "frames captured: " + std::to_string(frames_.size()) +
+            (open_            ? " (the settings menu was open: the paused picture)\n"
+             : capture_stuck_ ? " (the game drew no new frame for a second after F9: stuck? the picture as it was)\n"
+                              : "\n");
+    info += "game frames so far: " + std::to_string(frame_count()) + "\n";
     tar.add(name + "/info.txt", info.data(), info.size());
     const bool ok = tar.close();
     frames_.clear();
