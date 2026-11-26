@@ -84,8 +84,8 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 - **Contexts:** thread switching is native, so `OSSetCurrentContext`, `OSGetCurrentContext` and `OSClearContext` keep only the words in low memory that lifted interrupt handlers (GX, AI, DSP, JAudio) set around their callbacks. `OSFillFPUContext` and `OSGetStackPointer` serve the game's crash screen.
 - **Caches:** every flush and invalidate is a no-op, because the host is coherent; `DCZeroRange` zeroes memory. The locked cache's DMA (`LCStoreBlocks`, `LCStoreData`) is a copy done at once. `LCEnable` and `LCDisable` set and clear HID2's locked-cache bit, which the movie decoder reads.
 - **Time:** the time base counts at 40.5 MHz by the host's steady clock, from the PC's local date and time counted from 1 January 2000, as the console's does from its clock chip (`OSGetTime`, `OSGetTick`, `__OSGetSystemTime`). `OSTicksToCalendarTime` is exact for any date.
-- **SRAM** (`OSRtc.c`): the console's settings live where the SDK keeps its copy (`80375620`), filled from the port's settings instead of the clock chip's memory over EXI: language, the stereo flag, the progressive flag, with the checksum the SDK computes. `OSGetSoundMode`, `OSSetSoundMode`, `OSGetProgressiveMode`, `OSSetProgressiveMode`, the wireless-pad and Game Boy Player words, and the lock and unlock calls work on it. What the game changes is kept until the program ends; it isn't written back to the settings file yet.
-- **Reset** (`OSReset.c`): `OSResetSystem` calls the registered reset functions as the OS does (each with FALSE until all agree, then with TRUE). A restart or hot reset starts the program again with the same command line (`restart.cpp`); a hot reset to the console's menu closes it. The shutdown form isn't modelled and stops the runtime. `OSGetResetSwitchState` reads `g_reset_button` (`os.hpp`), which nothing sets yet.
+- **SRAM** (`OSRtc.c`): the console's settings live where the SDK keeps its copy (`80375620`), filled from the port's settings instead of the clock chip's memory over EXI: language, the stereo flag, the progressive flag, with the checksum the SDK computes. `OSGetSoundMode`, `OSSetSoundMode`, `OSGetProgressiveMode`, `OSSetProgressiveMode`, the wireless-pad and Game Boy Player words, and the lock and unlock calls work on it. What the game sets with `OSSetSoundMode` and `OSSetProgressiveMode` is handed to the main loop (`g_game_set_stereo`, `g_game_set_progressive`) and saved in the settings file, as the console keeps it in SRAM. The progressive setting is also the component cable, so a game that turns progressive scan off also finds no cable next time (and so doesn't ask); holding B at start-up to be asked again, as on a console, has nothing to act on then.
+- **Reset** (`OSReset.c`): `OSResetSystem` calls the registered reset functions as the OS does (each with FALSE until all agree, then with TRUE). A restart or hot reset starts the program again with the same command line (`restart.cpp`); a hot reset to the console's menu closes it. The shutdown form isn't modelled and stops the runtime: the game's only call (`ResetAgent`, `801DEEB0`) is a hot reset. `OSGetResetSwitchState` reads `g_reset_button` (`os.hpp`), which nothing sets yet.
 - **Errors:** `OSPanic` is fatal. `OSSetErrorHandler` keeps the handlers in the OS's table, never called: a fault in the guest stops the runtime with its own report. A handler for floating-point exceptions is logged; none are raised.
 - **Console output:** the C library's console writes go to the debug serial port (`InitializeUART`, `WriteUARTN`), which a retail console doesn't have; here they become the log's `game: ...` lines.
 - **The IPL's font** (`OSFont.c`): only `OSGetFontEncode` is in the DOL (it answers ANSI); the game doesn't load the ROM font.
@@ -112,7 +112,7 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 - **The retrace** is a timed interrupt from the host clock at the NTSC rate, 60000/1001 Hz, until the main loop matches it to the display (`set_retrace_rate`; 0/0 returns to the console's own). It counts, runs the pre-retrace callback, applies what `VIFlush` passed on (frame buffer, black, size, scan mode), hands the picture to the main thread (`video.cpp`), runs the post-retrace callback and wakes the threads in `VIWaitForRetrace`. More than a frame late, the schedule restarts from now rather than posting the missed retraces in a burst.
 - **Settings take effect at a retrace after `VIFlush`**, as the hardware's registers do: `VISetNextFrameBuffer`, `VISetBlack`, `VIConfigure`. `VIGetNextFrameBuffer` and `VIGetCurrentFrameBuffer` read the two sides of that.
 - **Modes:** `VIGetTvFormat` says NTSC; `VIConfigure` accepts NTSC modes (interlaced, double-strike, progressive) and stops on another TV format. `VIGetDTVStatus` reports a component cable when the progressive setting is on, which is what makes the game offer progressive scan. `VIGetNextField` alternates with the retraces, under progressive scan too (the hardware's line counter still runs through two "fields", each a whole picture; the movie player counts on it).
-- **Not in:** `VIGetCurrentLine` (nothing calls it).
+- **`VIGetCurrentLine`** answers from the time since the last retrace, in the mode's lines (nothing in the game calls it directly).
 
 ## Hardware registers (`hw.cpp`)
 
@@ -257,6 +257,8 @@ Checked on 2026-11-26, on Windows, with no controller and an empty memory-card f
 - **Unattended, drawn without a window** (`--offscreen`, frames dumped), 170 s from the extracted disc: the progressive-scan question with its countdown, the Lakitu loading scene, the opening movie, the title screen with "PRESS START", and the attract mode's demo races, in the game's own cycle, without a stop. With the progressive setting off there is no question and the movie follows the loading scene directly.
 - **From a disc image** (`.ciso`), headless, 60 s: the same start, into the movie.
 - **Tests:** all 27 of `ctest -E qilin_padtest` pass on the merged tree.
+- **A 15-minute unattended headless run** through the attract loop (movie, demo races on several courses in one-, two- and four-view layouts, title, round again): no stop; the process's working set stayed between 77 and 99 MB.
+- **Pictures looked at** (frame dumps at 1x and 3x, progressive and interlaced, about ten minutes of the loop): courses, karts, shadows, water, item boxes, the split layouts and the logo overlay are drawn as the game plainly intends; no fault was confirmed.
 
 Two faults stood between the loading scene and the movie, both found with `MKDD_THREADS` (below):
 
@@ -267,12 +269,13 @@ Known and open:
 
 - **The movie plays slowly.** Its decode thread uses nearly all of the wall time while it plays (17.4 s of CPU in about 20 s of movie; `MKDD_THREADS` shows each thread's time), the game falls to about 155–190 frames in every 300 retraces, and the sound is skipped ahead. The decoder's inverse DCT is paired-single code, lifted with the exact single-precision and quantised load/store helpers; making that fast is the recompiler's work (`recompiler-core.md`). Measured with an MSVC build while other builds were running on the same PC.
 - **Nothing past the title with input** was tried here.
-- **SRAM changes kept** between runs (`OSSetSoundMode`, `OSSetProgressiveMode`), and the **reset switch** (nothing sets `g_reset_button`).
-- **`OSResetSystem`'s shutdown form**, `VIGetCurrentLine`, drive errors and the cover, the DVD's 512 KB steps: not modelled; the first two stop the runtime if reached. The eight ETH functions have no native code: they are reached only with a Broadband Adapter, which no port reports.
+- **The reset switch**: `g_reset_button` (`os.hpp`) is read by `OSGetResetSwitchState`; nothing sets it yet (a key or menu action is the host's).
+- **Sound during loads.** Interrupts arrive only at safe points, so a long stretch of lifted code that calls no replacement (the loads between the title and a demo race) holds the audio DMA's interrupt back: a 15-minute run logged "audio: 100-420 ms behind, skipping ahead" eleven times, nine of them at such a load.
+- **`OSResetSystem`'s shutdown form**, drive errors and the cover, the DVD's 512 KB steps: not modelled; the first stops the runtime if reached. The eight ETH functions have no native code: they are reached only with a Broadband Adapter, which no port reports.
 
 ## Finding what a game that stands still waits for
 
-- `MKDD_THREADS=<seconds>` logs, once at that much game time (frames handed to VI over 60), every guest thread: state, priority, what it sleeps on, the time it has had the CPU, and its call stack as return addresses. `MKDD_PEEK=<address>:<words>` (hex) adds that much guest memory.
+- `MKDD_THREADS=<seconds>[,<seconds>...]` logs, at that much game time (frames handed to VI over 60), every guest thread: state, priority, what it sleeps on, the time it has had the CPU, and its call stack as return addresses. `MKDD_PEEK=<address>:<words>` (hex) adds that much guest memory.
 - `MKDD_DVD_LOG=1` logs each file as the game opens it, with the time.
 - `MKDD_TRACE=1` logs every call into a replacement.
 
@@ -280,4 +283,4 @@ Known and open:
 
 1. The movie decoder's speed (the lifter's paired-single and quantised code).
 2. Play with a controller: the menus, a race; write whatever replaced function that reaches.
-3. SRAM changes back into the settings file, and a key or pad button for the reset switch.
+3. A key or pad button for the reset switch (host); safe points inside long lifted loops, for sound during loads (recompiler).
