@@ -9,6 +9,7 @@
 
 #include "build.hpp"
 #include "dol.hpp"
+#include "qilin/disc/disc.hpp"
 #include "os.hpp"
 #include "threads.hpp"
 #include "qilin/rt/system.hpp"

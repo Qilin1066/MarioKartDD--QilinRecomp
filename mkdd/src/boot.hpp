@@ -4,8 +4,11 @@
 #include <filesystem>
 #include <span>
 
-#include "qilin/disc/disc.hpp"
 #include "qilin/rt/system.hpp"
+
+namespace qilin::disc {
+class Disc;  // qilin/disc/disc.hpp
+}
 
 namespace mkdd {
 

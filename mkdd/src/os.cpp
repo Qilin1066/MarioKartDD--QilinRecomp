@@ -47,6 +47,7 @@ constexpr uint32_t kSystemTimeOffset = 0x800030D8u;                             
 
 void nothing(Cpu&) {}
 void returns_zero(Cpu& c) { c.r[3] = 0; }
+void returns_one(Cpu& c) { c.r[3] = 1; }
 
 // ---- SRAM (OSRtc.c): the console's settings, kept where the SDK keeps its
 // copy (build::kSramControl), so a lock hands out the pointer it always did.
@@ -166,8 +167,7 @@ void OSInit(Cpu& c) {  // once: the game calls it again
     rt::call(c, b::kSIInit);
     init_sram();
     // __OSThreadInit is init_threads (threads.cpp), done before the game starts.
-    // __OSInitAudioSystem loads a stub program into the DSP and resets it: the
-    // DSP (dsp.cpp) starts as that leaves it, so there's nothing to run.
+    rt::call(c, b::kInitAudioSystem);  // lifted: it runs a stub program on the DSP (dsp.cpp) and resets it
     rt::log("OSInit: Dolphin OS, console type %08X, %u MB, arena %08X-%08X", rt::peek32(0x8000002Cu), rt::peek32(0x80000028u) >> 20,
             rt::peek32(b::kArenaLo), rt::peek32(b::kArenaHi));
     // ClearArena: after a cold boot, the arena is zeroed.
@@ -455,6 +455,7 @@ const rt::Provided kReplacements[] = {
     {0x800C56F4u, "InitializeUART", InitializeUART},
     {0x800C5764u, "WriteUARTN", WriteUARTN},
     {0x801116DCu, "__TRK_write_console (no debugger)", returns_zero},
+    {0x80111798u, "__read_console (no debugger: an I/O error)", returns_one},  // stdin's read procedure, in MSL's FILE tables
     // OSError.c, OSFont.c, OSMemory.c
     {0x800E80F8u, "OSPanic", OSPanic},
     {0x800E8224u, "OSSetErrorHandler", OSSetErrorHandler},

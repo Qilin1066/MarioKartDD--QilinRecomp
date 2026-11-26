@@ -27,6 +27,7 @@ inline constexpr uint32_t kExit = 0x800FFE28u;         // exit(status): destruct
 inline constexpr uint32_t kEXIInit = 0x800C4B00u;
 inline constexpr uint32_t kSIInit = 0x800EEFF4u;
 inline constexpr uint32_t kDVDInit = 0x800ABE14u;
+inline constexpr uint32_t kInitAudioSystem = 0x800E6DD0u;  // __OSInitAudioSystem: lifted, over the DSP's registers (dsp.cpp)
 
 // OS globals (small data, r13-relative), from the code that reads them.
 inline constexpr uint32_t kArenaLo = kSdaBase - 32080;          // __OSArenaLo (OSGetArenaLo, 800E6DB8: lifted)

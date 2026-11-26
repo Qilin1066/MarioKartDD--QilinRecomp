@@ -26,7 +26,7 @@ struct DolError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-// The Wii's first 24 MB of RAM (MEM1), cached view: where a DOL loads.
+// The GameCube's 24 MB of RAM (MEM1), cached view: where a DOL loads.
 inline constexpr uint32_t kMem1Base = 0x80000000u;
 inline constexpr uint32_t kMem1Size = 24u << 20;
 

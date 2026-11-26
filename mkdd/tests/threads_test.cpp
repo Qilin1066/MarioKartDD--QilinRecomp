@@ -43,7 +43,8 @@ constexpr uint32_t kCreateThread = 0x800EB780u, kResumeThread = 0x800EBCA8u, kSu
                    kResetSystem = 0x800E9D64u, kSetInterruptHandler = 0x800E87C8u, kMaskInterrupts = 0x800E8B44u,
                    kUnmaskInterrupts = 0x800E8BCCu, kDisableInterrupts = 0x800E877Cu, kRestoreInterrupts = 0x800E87A4u,
                    kGetSoundMode = 0x800EAAF8u, kSetSoundMode = 0x800EAB78u, kLockSram = 0x800EA6ACu, kUnlockSram = 0x800EAAA0u,
-                   kOSInit = 0x800E5B8Cu, kEXIInit = 0x800C4B00u, kSIInit = 0x800EEFF4u, kDVDInit = 0x800ABE14u;
+                   kOSInit = 0x800E5B8Cu, kEXIInit = 0x800C4B00u, kSIInit = 0x800EEFF4u, kDVDInit = 0x800ABE14u,
+                   kInitAudioSystem = 0x800E6DD0u;
 
 // Guest memory the tests use (MEM1, clear of the addresses the OS fixes).
 constexpr uint32_t kThreadC = 0x80100800u, kStackC = 0x80128000u;
@@ -214,7 +215,8 @@ const rt::FunctionEntry kFunctions[] = {  // sorted by address
     {kFnChain, fn_chain},
     {kFnChainWaiter, fn_chain_waiter},
     {kFnNothing, fn_nothing},
-    {kDVDInit, fn_nothing},  // OSInit calls these three: other libraries'
+    {kDVDInit, fn_nothing},  // OSInit calls these four: other libraries', or lifted
+    {kInitAudioSystem, fn_nothing},
     {kEXIInit, fn_nothing},
     STUB(kOSInit),
     STUB(kCreateAlarm),

@@ -1,39 +1,56 @@
-// The DSP and the audio interface, as registers.
+// The DSP and the audio interface, as registers (GameCube).
 //
 // DSP (0xCC005000, 16-bit registers; a 32-bit access is two of them, high
 // half first):
-//   00/02 mail to the DSP (writing the low half sends it), 04/06 mail from
-//   the DSP (bit 31 set while unread; reading the low half takes it),
-//   0A control: 0 reset, 1 assert, 2 halt, 3/4 AI DMA flag/enable,
+//   00/02 mail to the DSP (writing the low half sends it; bit 15 of the high
+//   half reads set until the DSP has taken it), 04/06 mail from the DSP (bit
+//   15 set while unread; reading the low half takes it),
+//   0A control: 0 reset, 1 interrupt the DSP, 2 halt, 3/4 AI DMA flag/enable,
 //   5/6 ARAM flag/enable, 7/8 DSP flag/enable, 9 ARAM DMA busy, 10 init code,
 //   11 init. Writing 1 to a flag clears it. The PI's DSP line is raised while
 //   any flag is set with its enable.
+//   12 ARAM size, 16 mode (bit 0 reads set: ready), 1A refresh,
+//   20/22 ARAM DMA main-memory address, 24/26 its ARAM address, 28/2A its
+//   length in bytes (bit 15 of 28: from ARAM); writing 2A does the copy at once
+//   and raises the ARAM flag,
 //   30/32 audio DMA source, 36 bit 15 enable and bits 0-14 its length in
 //   32-byte blocks, 3A blocks left.
-// The DSP's own program is not run: Wii titles boot one of a few AX
-// microcode versions through the ROM's task loader, and ax.cpp does what
-// that microcode does, from the mails it receives.
+//
+// The DSP's program is run, not imitated: the game's microcode is lifted to
+// C++ at build time (recomp/src/dsp) and runs on dsp_core.hpp's DSP, on the
+// guest thread that touches these registers, each time the CPU gives it
+// something to do (a mail sent or taken, the interrupt, the halt released)
+// and until it can only wait again. Only the DSP's ROM is ours: its task
+// loader (the mails 80F3xxxx that hand it a microcode; the entry at 0x80B5 a
+// microcode jumps to when the CPU switches tasks; reset at 0x8000), which
+// finds the lifted program by the image's hash, and the stub
+// __OSInitAudioSystem uploads, which only has to answer.
+//
+// ARAM, the 16 MB behind the DSP, is here (aram_base): the microcode reads
+// and writes it through the accelerator, the AR library through the DMA
+// registers above or directly.
 //
 // The audio DMA plays 32-byte blocks (8 stereo samples, right then left,
 // big-endian) at the AI's DMA rate; when the last block of a buffer has
 // played it reloads from the source registers and raises the AI DMA flag.
-// The AX library answers that flag by queueing the next 3 ms buffer and
-// sending the DSP its command list, so this clock drives all of the sound.
+// JAudio answers that flag by queueing the next buffer and asking the DSP
+// for the next frame, so this clock drives all of the sound.
 //
-// AI (0xCD006C00, 32-bit): 00 control (0 counter run, 1 stream rate,
+// AI (0xCC006C00, 32-bit): 00 control (0 counter run, 1 stream rate,
 // 2 interrupt enable, 3 interrupt flag, 4 interrupt valid, 5 counter reset,
 // 6 DMA rate: 1 32 kHz, 0 48 kHz), 04 volume, 08 sample counter, 0C
 // interrupt timing.
 //
-// After Dolphin's DSP.cpp, AudioInterface.cpp, DSPHLE.cpp, MailHandler.cpp,
-// UCodes.cpp, ROM.cpp and INIT.cpp: the register map and mail protocol are
-// facts taken from there; no code is.
-#include <deque>
+// After Dolphin's DSP.cpp, AudioInterface.cpp and its notes on the ROM: the
+// register map and the loader's protocol are facts taken from there; no code is.
+#include <algorithm>
+#include <cstring>
+#include <memory>
 #include <utility>
 #include <vector>
 
 #include "audio.hpp"
-#include "speaker.hpp"
+#include "dsp_core.hpp"
 #include "hw.hpp"
 #include "os.hpp"
 
@@ -53,14 +70,14 @@ AudioSink g_sink = nullptr;
 void* g_sink_user = nullptr;
 
 // The DSP's side.
-enum class Microcode { Rom, Init, Ax };
+enum class Microcode { Rom, Init, Lifted };
 Microcode g_ucode = Microcode::Rom;
-uint16_t g_dsp_bits = kHalt | kInit;  // control as the microcode keeps it
+dsp::Core g_core;
+std::unique_ptr<uint8_t[]> g_aram;
+uint16_t g_dsp_bits = kHalt | kInit;  // control as the DSP keeps it
 uint64_t g_init_code_clear = 0;      // time base at which the init code bit reads clear
-bool g_halted = true;
-std::deque<std::pair<uint32_t, bool>> g_mail;  // to the CPU; .second: interrupt once read
-uint32_t g_last_mail = 0;
-uint32_t g_cpu_mail = 0;  // the CPU's mailbox
+uint32_t g_greeting = 0;             // the ROM's or the stub's first mail, due when the DSP next runs
+uint16_t g_cpu_mail_high = 0;        // the CPU's mailbox, high half as written
 
 // The ROM's task loader: parameter mails, then the boot.
 uint32_t g_rom_param = 0, g_rom_iram = 0, g_rom_length = 0;
@@ -68,7 +85,7 @@ uint32_t g_rom_param = 0, g_rom_iram = 0, g_rom_length = 0;
 // The CPU's side.
 uint16_t g_control = 0;
 bool g_line_posted = false;
-uint16_t g_ar[16] = {};  // AR registers 0x5012..0x502A: kept, the Wii has no ARAM
+uint16_t g_ar[16] = {};  // ARAM registers 0x5012..0x502A as written
 
 // Audio DMA.
 uint32_t g_dma_source = 0;
@@ -114,55 +131,115 @@ void raise_flag(uint16_t flag) {
     update_line();
 }
 
-// --- the microcode's side ---
+// --- the DSP's side ---
 
-void set_microcode(Microcode m) {
-    g_mail.clear();
-    g_ucode = m;
-    if (m == Microcode::Rom) {
-        g_rom_param = 0;
-        dsp::push_mail(0x8071FEED, false);
-    } else if (m == Microcode::Init) {
-        dsp::push_mail(0x80544348, false);
-    }
+constexpr uint16_t kAssert = 1u << 1;
+
+void mail_from_dsp(uint32_t mail) {
+    ++g_stats.mails_out;
+    g_core.dsp_mail = mail | 0x80000000u;
 }
 
-uint32_t ector_hash(const uint8_t* p, uint32_t n) {
-    uint32_t h = 0;
-    for (uint32_t i = 0; i < n; ++i) {
-        h ^= p[i];
-        h = (h << 3) | (h >> 29);
-    }
-    return h;
+void set_microcode(Microcode m) {
+    g_ucode = m;
+    g_core.program = nullptr;
+    g_core.dsp_mail = 0;
+    g_core.cpu_mail = 0;
+    g_core.ext_int = false;
+    g_rom_param = 0;
+    // The ROM's loader greets, and so does the stub the OS uploads to try the DSP; each when it runs.
+    g_greeting = m == Microcode::Rom ? 0x8071FEEDu : 0x80544348u;
+}
+
+const dsp::Program* find_program(Cpu* c, uint32_t address, uint32_t length, uint32_t* hash) {
+    *hash = dsp::ector_hash(dsp::physical(c, address, length), length);
+    for (size_t i = 0; i < dsp::g_program_count; ++i)
+        if (dsp::g_programs[i].hash == *hash && dsp::g_programs[i].bytes == length) return &dsp::g_programs[i];
+    return nullptr;
+}
+void load_image(Cpu* c, const dsp::Program* p, uint32_t address) {
+    const uint8_t* image = dsp::physical(c, address, p->bytes);
+    std::memset(g_core.iram, 0, sizeof g_core.iram);
+    for (uint32_t i = 0; i < p->bytes / 2; ++i) g_core.iram[i] = static_cast<uint16_t>((image[2 * i] << 8) | image[2 * i + 1]);
+}
+
+// Run the microcode until it can only wait for the CPU (or halts).
+void run_dsp() {
+    if (g_core.halted) return;
+    if (g_greeting) mail_from_dsp(std::exchange(g_greeting, 0));
+    if (g_ucode != Microcode::Lifted) return;
+    ++g_stats.dsp_runs;
+    g_core.run();
+    if (!g_core.ext_int) g_dsp_bits &= ~kAssert;  // taken
+    if (g_core.halted) g_dsp_bits |= kHalt;        // the microcode's own HALT
 }
 
 void rom_mail(Cpu& c, uint32_t mail) {
     if (g_rom_param == 0) {
         if ((mail & 0xFFFF0000u) == 0x80F30000u) g_rom_param = mail;
-        else dsp::push_mail(0xFEEE0000u | (mail & 0xFFFF), false);
+        else mail_from_dsp(0xFEEE0000u | (mail & 0xFFFF));
         return;
     }
     const uint32_t param = std::exchange(g_rom_param, 0);
     switch (param) {
         case 0x80F3A001: g_rom_iram = mail; break;           // microcode in main memory
         case 0x80F3A002: g_rom_length = mail & 0xFFFF; break;  // its length in bytes
-        case 0x80F3B002:                                      // data memory to load: AX needs none
-            if (mail & 0xFFFF) rt::fatal(&c, "a DSP task asks for %u bytes of data memory: not handled", mail & 0xFFFF);
+        case 0x80F3B002:                                      // data memory to load: JAudio's needs none
+            if (mail & 0xFFFF) rt::fatal(&c, "a DSP task asks for %u bytes of data memory at boot: not handled", mail & 0xFFFF);
             break;
-        case 0x80F3C002: break;  // where it goes in instruction memory
-        case 0x80F3D001: {       // its start: boot it
-            const uint32_t crc = ector_hash(dsp::physical(&c, g_rom_iram, g_rom_length), g_rom_length);
-            g_stats.ucode_crc = crc;
-            if (!ax::known(crc))
-                rt::fatal(&c, "the DSP was given a microcode this doesn't know (hash %08X, %u bytes at %08X)", crc, g_rom_length, g_rom_iram);
-            rt::log("dsp: AX microcode %08X booted", crc);
-            g_mail.clear();
-            g_ucode = Microcode::Ax;
-            ax::start(crc);
+        case 0x80F3C002:  // where it goes in instruction memory
+            if (mail & 0xFFFF) rt::fatal(&c, "a DSP task loads at %04X in instruction memory: not handled", mail & 0xFFFF);
+            break;
+        case 0x80F3D001: {  // its start: boot it
+            uint32_t hash = 0;
+            const dsp::Program* p = find_program(&c, g_rom_iram, g_rom_length, &hash);
+            g_stats.ucode_crc = hash;
+            if (!p)
+                rt::fatal(&c, "the DSP was given a microcode that was not lifted into this build (hash %08X, %u bytes at %08X)", hash,
+                          g_rom_length, g_rom_iram);
+            rt::log("dsp: microcode %08X (%s) booted at %04X", hash, p->name, mail & 0xFFFF);
+            g_ucode = Microcode::Lifted;
+            const bool halted = g_core.halted;
+            g_core.boot(p, static_cast<uint16_t>(mail));
+            g_core.halted = halted;
+            load_image(&c, p, g_rom_iram);
+            run_dsp();
             break;
         }
         default: rt::fatal(&c, "the DSP's boot loader got parameter %08X: not known", param);
     }
+}
+
+// The microcode jumped into the ROM. 0x8000 is reset. 0x80B5 is the loader's entry for a task
+// switch, with what the CPU mailed the old task in registers: the new image's address in main
+// memory (ix0:ix1), length (ix3) and place (ix2), its start (ar0), and data memory to load first
+// (ax0 the address, ax1.l the length, ax1.h the place): __DSP_exec_task's order.
+bool rom_entry(void*, dsp::Core& core, uint16_t address) {
+    if (address == 0x8000) {
+        set_microcode(Microcode::Rom);
+        mail_from_dsp(std::exchange(g_greeting, 0));
+        return false;
+    }
+    if (address != 0x80B5) rt::fatal(nullptr, "the DSP microcode jumped to %04X in the DSP's ROM: only the loader's entries are known", address);
+    const dsp::Regs& r = core.r;
+    const uint32_t image = (uint32_t(r.ix0) << 16) | r.ix1, length = r.ix3;
+    if (r.ix2) rt::fatal(nullptr, "a DSP task loads at %04X in instruction memory: not handled", r.ix2);
+    uint32_t hash = 0;
+    const dsp::Program* p = find_program(nullptr, image, length, &hash);
+    g_stats.ucode_crc = hash;
+    if (!p)
+        rt::fatal(nullptr, "the DSP was switched to a microcode that was not lifted into this build (hash %08X, %u bytes at %08X)", hash, length,
+                  image);
+    load_image(nullptr, p, image);
+    const uint32_t data = (uint32_t(r.axh0) << 16) | r.axl0, data_words = r.axl1 / 2u, at = r.axh1;
+    if (data_words) {
+        if (at + data_words > 0x1000) rt::fatal(nullptr, "a DSP task's saved data memory (%u words at %04X) doesn't fit", data_words, at);
+        const uint8_t* d = dsp::physical(nullptr, data, data_words * 2);
+        for (uint32_t i = 0; i < data_words; ++i) core.dram[at + i] = static_cast<uint16_t>((d[2 * i] << 8) | d[2 * i + 1]);
+    }
+    core.program = p;
+    core.pc = r.ar0;
+    return true;
 }
 
 void mail_to_dsp(Cpu& c, uint32_t mail) {
@@ -170,27 +247,23 @@ void mail_to_dsp(Cpu& c, uint32_t mail) {
     switch (g_ucode) {
         case Microcode::Rom: rom_mail(c, mail); break;
         case Microcode::Init: break;
-        case Microcode::Ax: ax::mail(c, mail); break;
+        case Microcode::Lifted:
+            g_core.cpu_mail = mail | 0x80000000u;
+            run_dsp();
+            break;
     }
 }
 
-uint16_t read_mail_high() {
-    if (!g_halted && !g_mail.empty()) g_last_mail = g_mail.front().first;
-    return static_cast<uint16_t>(g_last_mail >> 16);
-}
 uint16_t read_mail_low() {
-    if (!g_halted && !g_mail.empty()) {
-        g_last_mail = g_mail.front().first;
-        const bool interrupt = g_mail.front().second;
-        g_mail.pop_front();
-        if (interrupt) raise_flag(kDspFlag);
+    const uint16_t low = static_cast<uint16_t>(g_core.dsp_mail);
+    if (g_core.dsp_mail & 0x80000000u) {
+        g_core.dsp_mail &= 0x7FFFFFFFu;
+        run_dsp();  // it may have been waiting for exactly this
     }
-    g_last_mail &= ~0x80000000u;
-    return static_cast<uint16_t>(g_last_mail);
+    return low;
 }
 
 uint16_t microcode_control_write(uint16_t v) {
-    if ((g_dsp_bits ^ v) & kHalt) g_halted = (v & kHalt) != 0;
     if (v & kReset) {
         set_microcode(Microcode::Rom);
         v &= ~kReset;
@@ -201,11 +274,45 @@ uint16_t microcode_control_write(uint16_t v) {
         g_init_code_clear = time_base() + 130;
     }
     g_dsp_bits = v;
-    return v;
+    g_core.halted = (v & kHalt) != 0;
+    if (v & kAssert) {
+        if (g_ucode == Microcode::Lifted) {
+            g_core.ext_int = true;
+            ++g_stats.command_lists;
+        } else {
+            g_dsp_bits &= ~kAssert;
+        }
+    }
+    run_dsp();
+    return g_dsp_bits;
 }
 uint16_t microcode_control_read() {
     if ((g_dsp_bits & kInitCode) && time_base() >= g_init_code_clear) g_dsp_bits &= ~kInitCode;
     return g_dsp_bits;
+}
+
+// --- ARAM DMA ---
+
+void aram_dma(Cpu& c) {
+    const uint32_t main_address = (uint32_t(g_ar[7]) << 16) | g_ar[8], aram_address = (uint32_t(g_ar[9]) << 16) | g_ar[10];
+    const uint32_t count = ((uint32_t(g_ar[11]) << 16) | g_ar[12]) & 0x7FFFFFFFu;
+    const bool from_aram = (g_ar[11] & 0x8000) != 0;
+    if (count) {
+        uint8_t* m = dsp::physical(&c, main_address, count);
+        uint8_t* a = aram_base();
+        for (uint32_t done = 0; done < count;) {  // (the address wraps at ARAM's size)
+            const uint32_t at = (aram_address + done) & static_cast<uint32_t>(kAramSize - 1);
+            const uint32_t n = std::min<uint32_t>(count - done, static_cast<uint32_t>(kAramSize) - at);
+            if (from_aram) std::memcpy(m + done, a + at, n);
+            else std::memcpy(a + at, m + done, n);
+            done += n;
+        }
+    }
+    const uint32_t m2 = main_address + count, a2 = aram_address + count;
+    g_ar[7] = static_cast<uint16_t>(m2 >> 16), g_ar[8] = static_cast<uint16_t>(m2);
+    g_ar[9] = static_cast<uint16_t>(a2 >> 16), g_ar[10] = static_cast<uint16_t>(a2);
+    g_ar[11] &= 0x8000, g_ar[12] = 0;
+    raise_flag(kAram);
 }
 
 // --- audio DMA ---
@@ -223,10 +330,6 @@ void play(Cpu* c, uint32_t source, uint32_t blocks) {
         out[2 * i] = s(4 * i + 2);
         out[2 * i + 1] = s(4 * i);
     }
-    // The Wii Remotes' speakers, which the console plays from the remotes in the player's hands:
-    // here from the PC's speakers, with the rest.
-    const bool speakers = g_speakers_on.load(std::memory_order_relaxed);
-    for (Speaker& sp : g_speakers) sp.mix(out.data(), frames, g_dma_rate, speakers);
     g_sink(out.data(), frames, g_dma_rate, g_sink_user);
 }
 
@@ -266,9 +369,9 @@ uint64_t deadline() {
 
 uint16_t dsp_read16(Cpu& c, uint32_t off) {
     switch (off) {
-        case 0x00: return static_cast<uint16_t>(g_cpu_mail >> 16);
-        case 0x02: return static_cast<uint16_t>(g_cpu_mail);
-        case 0x04: return read_mail_high();
+        case 0x00: return static_cast<uint16_t>(g_core.cpu_mail >> 16);
+        case 0x02: return static_cast<uint16_t>(g_core.cpu_mail);
+        case 0x04: return static_cast<uint16_t>(g_core.dsp_mail >> 16);
         case 0x06: return read_mail_low();
         case 0x0A: return (g_control & ~kMicrocodeBits) | (microcode_control_read() & kMicrocodeBits);
         case 0x30: return static_cast<uint16_t>(g_dma_source >> 16);
@@ -282,26 +385,24 @@ uint16_t dsp_read16(Cpu& c, uint32_t off) {
             return static_cast<uint16_t>(left > 0 ? left - 1 : 0);
         }
         default:
+            if (off == 0x16) return g_ar[2] | 1;  // ARAM is ready
             if (off >= 0x12 && off < 0x2C) return g_ar[(off - 0x12) / 2];
             rt::fatal(&c, "load from DSP register %04X: not handled", off);
     }
 }
 void dsp_write16(Cpu& c, uint32_t off, uint16_t v) {
     switch (off) {
-        case 0x00: g_cpu_mail = (g_cpu_mail & 0xFFFF) | (uint32_t(v) << 16); return;
-        case 0x02:
-            g_cpu_mail = (g_cpu_mail & 0xFFFF0000u) | v;
-            mail_to_dsp(c, g_cpu_mail);
-            g_cpu_mail &= 0x7FFFFFFFu;
-            return;
+        case 0x00: g_cpu_mail_high = v; return;
+        case 0x02: mail_to_dsp(c, (uint32_t(g_cpu_mail_high) << 16) | v); return;
         case 0x04: case 0x06: rt::fatal(&c, "the CPU wrote %04X to the DSP's outgoing mailbox", v);
         case 0x0A: {
             if (v & 0xF000) rt::fatal(&c, "DSP control written with %04X: the top bits must be 0", v);
+            // Flags first (a 1 clears one; ARAM busy kept; the enables from the write): the DSP may run
+            // on this write and raise its interrupt anew.
+            g_control = static_cast<uint16_t>((g_control & 0x0200) | (v & 0x0150) | (g_control & kFlags & ~v));
             const uint16_t ucode = microcode_control_write(v) & kMicrocodeBits;
             if (v & kReset) g_dma_control = 0;
-            uint16_t ctrl = (g_control & 0x0200) | ucode | (v & 0x0150);  // keep ARAM busy; the enables from the write
-            ctrl |= g_control & kFlags & ~v;                               // a 1 clears a flag
-            g_control = ctrl;
+            g_control = static_cast<uint16_t>((g_control & ~kMicrocodeBits) | ucode);
             update_line();
             return;
         }
@@ -321,9 +422,8 @@ void dsp_write16(Cpu& c, uint32_t off, uint16_t v) {
         }
         default:
             if (off >= 0x12 && off < 0x2C) {
-                if (off == 0x2A)
-                    rt::fatal(&c, "an ARAM DMA was started (the Wii has no ARAM): not handled");
                 g_ar[(off - 0x12) / 2] = v;
+                if (off == 0x2A) aram_dma(c);
                 return;
             }
             rt::fatal(&c, "store of %04X to DSP register %04X: not handled", v, off);
@@ -393,29 +493,28 @@ void ai_write(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
 }  // namespace
 
 namespace dsp {
-void push_mail(uint32_t mail, bool interrupt) {
-    ++g_stats.mails_out;
-    if (interrupt) {
-        if (g_mail.empty()) raise_flag(kDspFlag);
-        else g_mail.front().second = true;
-    }
-    g_mail.emplace_back(mail, false);
-}
-void reset_to_rom() { set_microcode(Microcode::Rom); }
 uint8_t* physical(Cpu* c, uint32_t address, uint32_t size) {
     const uint32_t a = address & 0x1FFFFFFFu;  // the DSP's DMA ignores the cached/uncached segment bits
     const uint32_t end = a + size;
     if (a < 0x01800000u && end <= 0x01800000u) return rt::guest_ptr(0x80000000u | a);
-    if (a >= 0x10000000u && end <= 0x14000000u) return rt::guest_ptr(0x80000000u | a);
-    rt::fatal(c, "the DSP reached %u bytes at %08X: outside MEM1 and MEM2", size, address);
+    rt::fatal(c, "the DSP reached %u bytes at %08X: outside main memory", size, address);
 }
-AudioStats& stats() { return g_stats; }
 }  // namespace dsp
+
+uint8_t* aram_base() {
+    if (!g_aram) g_aram = std::make_unique<uint8_t[]>(kAramSize);  // zeroed
+    return g_aram.get();
+}
 
 void init_audio() {
     map_mmio({0xCC005000u, 0xCC005200u, "the DSP", dsp_read, dsp_write});
-    map_mmio({0xCD006C00u, 0xCD006C20u, "the audio interface", ai_read, ai_write});
+    map_mmio({0xCC006C00u, 0xCC006C20u, "the audio interface", ai_read, ai_write});
     add_timer_source(poll, deadline);
+    g_core.aram = aram_base();
+    g_core.memory = [](void*, uint32_t address, uint32_t bytes) { return dsp::physical(nullptr, address, bytes); };
+    g_core.irq = [](void*) { raise_flag(kDspFlag); };
+    g_core.rom = rom_entry;
+    g_core.fatal = [](void*, const char* message) { rt::fatal(nullptr, "%s", message); };
     set_microcode(Microcode::Rom);
 }
 void dsp_interrupt_enables(uint32_t os_mask) {

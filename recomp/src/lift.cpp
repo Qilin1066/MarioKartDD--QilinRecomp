@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <format>
 #include <map>
+#include <string_view>
 
 namespace qilin {
 
@@ -53,6 +54,7 @@ bool in_slice(const Insn& in, std::string* why) {
     }
     if (s.flags & ppc::kPrivileged) return no(std::format("privileged ({})", s.name));
     if ((s.flags & ppc::kOe) && in.oe()) return no(std::format("overflow-enable form ({}o)", s.name));
+    if (ppc::lmw_loads_base(in)) return no("lmw with its base among the registers loaded");
     switch (in.op) {
     case Op::lswi: case Op::lswx: case Op::stswi: case Op::stswx: return no("string load/store");
     case Op::sc: return no("system call");
@@ -308,7 +310,7 @@ private:
                 std::string all;
                 for (unsigned h = 0; h < 64; ++h)
                     if (single_->live_in & (uint64_t{1} << h))
-                        all += std::format("{}fp::to_f_exact(c.ps{}[{}], {})", all.empty() ? "" : " & ", h < 32 ? 0 : 1, h & 31, half(h));
+                        all += std::format("{}int(fp::to_f_exact(c.ps{}[{}], {}))", all.empty() ? "" : " & ", h < 32 ? 0 : 1, h & 31, half(h));
                 p += std::format("    if (!({})) [[unlikely]] {{ {}_d(c); return; }}\n", all, name_);
             }
         } else {
@@ -335,6 +337,7 @@ private:
             if (!(single_->may[cur_] & bit)) continue;
             (h < 32 ? fprs_ : ps1s_).insert(h & 31);
             const std::string store = std::format("c.ps{}[{}] = fp::to_d({}); ", h < 32 ? 0 : 1, h & 31, half(h));
+            if (!(single_->must[cur_] & bit)) flags_read_ |= bit;
             s += (single_->must[cur_] & bit) ? store : std::format("if (w{}) {}", half(h), store);
         }
         return s;
@@ -350,6 +353,9 @@ private:
     std::string sync_in() { return "@IN@"; }
 
 public:
+    // Single mode: the "written" flags some way out reads (the others needn't exist).
+    uint64_t flags_read() const { return flags_read_; }
+
     std::string expand(const std::string& code) const {
         std::string out_s, in_s;
         for (unsigned n : gprs_) {
@@ -389,6 +395,12 @@ public:
         std::string r = code;
         for (auto [ph, with] : {std::pair{std::string("@OUT@"), out_s}, std::pair{std::string("@IN@"), in_s}})
             for (size_t p; (p = r.find(ph)) != std::string::npos;) r.replace(p, ph.size(), with);
+        // A function that touches no state (a lone blr) leaves its parameter unnamed.
+        static constexpr std::string_view kParam = "(Cpu& c) {\n";
+        if (const size_t p = r.find(kParam); p != std::string::npos) {
+            const std::string_view rest = std::string_view(r).substr(p + kParam.size());
+            if (!rest.contains("c.") && !rest.contains("(c")) r.replace(p, kParam.size(), "(Cpu&) {\n");
+        }
         return r;
     }
 
@@ -475,7 +487,7 @@ private:
             return fill(out, d, madd(F(a), F(cr), F(b), in.op == Op::fmsubs || in.op == Op::fnmsubs, in.op == Op::fnmadds || in.op == Op::fnmsubs));
         case Op::frsp: return fill(out, d, std::format("fp::single_s({})", F(b)));
         case Op::fres: return fill(out, d, std::format("fp::res_s({})", F(b)));
-        case Op::fmr: return one(d, F(b));
+        case Op::fmr: return d == b ? (line("/* fmr to itself */"), true) : one(d, F(b));
         case Op::fneg: return one(d, std::format("fp::neg_s({})", F(b)));
         case Op::fabs: return one(d, std::format("fp::abs_s({})", F(b)));
         case Op::fnabs: return one(d, std::format("fp::nabs_s({})", F(b)));
@@ -709,7 +721,9 @@ private:
             line(std::format("{{ const uint32_t v = {}; {} = ({} & {}u) | (v << {}u); }}", v, f, f, 15u & ~(1u << sh), sh));
             return true;
         }
-        case Op::mcrf: line(std::format("{} = {};", CR(in.crfd()), CR(in.crfs()))); return true;
+        case Op::mcrf:
+            line(in.crfd() == in.crfs() ? std::string("/* mcrf to itself */") : std::format("{} = {};", CR(in.crfd()), CR(in.crfs())));
+            return true;
         case Op::mcrxr:
             line(std::format("{} = ({} << 3) | ({} << 2) | ({} << 1); {} = 0u; {} = 0u; {} = 0u;", CR(in.crfd()), SO(), OV(), CA(), SO(), OV(), CA()));
             return true;
@@ -770,6 +784,11 @@ private:
             if (in.lk()) {
                 if (f_.not_calls.contains(pc)) {
                     line(std::format("{} = {};", LR(), hex(pc + 4)));
+                    return true;
+                }
+                if (in.aa() && f_.outside_image && f_.outside_image(t)) {
+                    // `bla` into low memory (exception-vector code, copied there at run time): the dispatcher's.
+                    line(std::format("{} = {}; {} c.hooks->call(c, {}); {}", LR(), hex(pc + 4), sync_out(), hex(t), sync_in()));
                     return true;
                 }
                 if (!f_.is_function || !f_.is_function(t)) {
@@ -868,7 +887,7 @@ private:
         case Op::frsqrte: line(std::format("{} = fp::estimate_rsqrt({});", F(d), F(b))); return true;
         case Op::fctiw: line(std::format("{} = fp::to_int({}, false);", F(d), F(b))); return true;
         case Op::fctiwz: line(std::format("{} = fp::to_int({}, true);", F(d), F(b))); return true;
-        case Op::fmr: line(std::format("{} = {};", F(d), F(b))); return true;
+        case Op::fmr: line(d == b ? std::string("/* fmr to itself */") : std::format("{} = {};", F(d), F(b))); return true;
         case Op::fneg: line(std::format("{} = fp::from_bits(fp::bits({}) ^ fp::kSign);", F(d), F(b))); return true;
         case Op::fabs: line(std::format("{} = fp::from_bits(fp::bits({}) & ~fp::kSign);", F(d), F(b))); return true;
         case Op::fnabs: line(std::format("{} = fp::from_bits(fp::bits({}) | fp::kSign);", F(d), F(b))); return true;
@@ -976,6 +995,7 @@ private:
     std::map<uint32_t, const JumpTable*> tables_;
     std::set<unsigned> gprs_, crs_, fprs_, ps1s_;
     std::set<std::string> specials_;
+    uint64_t flags_read_ = 0;
     std::string error_;
 };
 
@@ -989,8 +1009,15 @@ Lifted lift(const LiftInput& f) {
     // Single mode, where the function's floating point allows it (and nothing in it waits for
     // interrupts: that reads the registers back). With halves read before they're written, the
     // double version stays, for when they don't hold single-precision values.
-    const SingleInfo info = analyse_single(f);
+    SingleInfo info = analyse_single(f);
     if (!info.ok) return out;
+    uint64_t read = 0;
+    {
+        Emitter first(f, &info);  // finds which "written" flags the ways out read
+        if (!first.run().ok) return out;
+        read = first.flags_read();
+    }
+    info.flags = read;
     Emitter s(f, &info);
     Lifted single = s.run();
     if (!single.ok || single.code.contains("@IN@")) return out;
@@ -1016,6 +1043,7 @@ LiftInput lift_input(const Cfg& cfg, const Function& f) {
     in.falls_into = f.falls_into;
     const auto& fs = cfg.functions();
     in.is_function = [&fs](uint32_t a) { return fs.contains(a); };
+    in.outside_image = [&cfg](uint32_t a) { return cfg.outside_image(a); };
     in.pure_call = [&cfg](uint32_t target, RegEffects& e) {
         const FunctionInsns code = [&cfg](uint32_t start) {
             std::vector<std::pair<uint32_t, Insn>> v;

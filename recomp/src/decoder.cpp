@@ -368,7 +368,6 @@ bool constraints_hold(uint32_t flags, const Insn& in) {
     const unsigned ra = in.ra(), rd = in.rd();
     if ((flags & kRaNonZero) && ra == 0) return false;
     if ((flags & kRaNotZeroOrRd) && (ra == 0 || ra == rd)) return false;
-    if ((flags & kLmw) && ra >= rd) return false;
     if (flags & kLswi) {
         const unsigned bytes = in.rb() ? in.rb() : 32;
         const unsigned regs = (bytes + 3) / 4;

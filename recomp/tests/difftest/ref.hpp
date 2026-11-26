@@ -24,6 +24,12 @@ struct State {
     uint32_t reserve_addr = 0;
     uint8_t* mem = nullptr;  // guest address a is mem[a]
     bool trapped = false;
+    // Running real code (game.cpp): memory is [lo, hi) only. An access outside
+    // it sets `fault` (the load reads 0, the store is dropped), and each store
+    // marks its 4 KB page in `dirty` (one byte per page from lo).
+    uint32_t lo = 0, hi = 0;  // hi == 0: unchecked
+    bool fault = false;
+    uint8_t* dirty = nullptr;
 };
 
 // Executes one non-branch instruction at pc. Returns false if it isn't one the

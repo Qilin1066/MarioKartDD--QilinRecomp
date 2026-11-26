@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "boot.hpp"
+#include "qilin/disc/disc.hpp"
 #include "os.hpp"
 #include "threads.hpp"
 
@@ -94,6 +95,7 @@ struct Command {
 std::deque<Command> g_waiting;
 Command g_executing{};
 bool g_busy = false, g_completion_posted = false;
+uint64_t g_serial = 0;   // of the command running: a completion posted for one cancelled since finds another
 uint64_t g_done_at = 0;  // time base
 uint64_t g_head = 0;     // where the last read ended on the disc
 
@@ -124,6 +126,8 @@ void start_next() {
     g_executing = g_waiting.front();
     g_waiting.pop_front();
     g_busy = true;
+    g_completion_posted = false;
+    ++g_serial;
     const uint32_t b = g_executing.block;
     rt::poke32(b + kState, kBusy);
     g_done_at = time_base() + read_ticks(rt::peek32(b + kOffset), rt::peek32(b + kLength));
@@ -136,9 +140,9 @@ void finish(Cpu& c, const Command& cmd, uint32_t state, int32_t result) {
     wake_all(c, kSyncQueue);
 }
 
-void complete(Cpu& c) {  // as an interrupt
+void complete(Cpu& c, uint64_t serial) {  // as an interrupt
+    if (!g_busy || serial != g_serial) return;  // cancelled since
     g_completion_posted = false;
-    if (!g_busy) return;  // cancelled since
     const Command cmd = g_executing;
     const uint32_t b = cmd.block, offset = rt::peek32(b + kOffset), length = rt::peek32(b + kLength), addr = rt::peek32(b + kAddr);
     if (addr < 0x80000000u || uint64_t{addr} + length > 0x81800000u) rt::fatal(&c, "DVD read of %u bytes to %08X, outside memory", length, addr);
@@ -154,7 +158,7 @@ void complete(Cpu& c) {  // as an interrupt
 void poll_drive() {
     if (g_busy && !g_completion_posted && time_base() >= g_done_at) {
         g_completion_posted = true;
-        post_interrupt(complete);
+        post_interrupt([serial = g_serial](Cpu& c) { complete(c, serial); });
     }
 }
 

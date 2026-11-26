@@ -42,7 +42,8 @@
 800E4760	800E58D8	lift	dolphin/ip: md5, base64
 800E58D8	800E6B9C	replace	dolphin/os
 800E6B9C	800E6DD0	lift	dolphin/os: OSAlloc (heaps) and OSArena (arena bounds), no hardware access
-800E6DD0	800E8078	replace	dolphin/os
+800E6DD0	800E6F8C	lift	dolphin/os: __OSInitAudioSystem (runs its stub program on the emulated DSP)
+800E6F8C	800E8078	replace	dolphin/os
 800E8078	800E80F8	lift	dolphin/os: OSReport (formats through MSL's vprintf)
 800E80F8	800EC7B8	replace	dolphin/os
 800EC7B8	800EC84C	lift	dolphin/os: __init_user, __init_cpp, _ExitProcess (the EABI's constructors)
@@ -64,7 +65,9 @@
 80123198	8017872C	lift	game: Kameda (2D screens, scenes)
 8017872C	801B5A18	lift	game: Kaneshige (race, course, movies)
 801B5A18	801CBF4C	lift	game: Kawano (drivers, animation)
-801CBF4C	801E7ABC	lift	game: Osako (system, applications, network)
+801CBF4C	801D0F50	lift	game: Osako (system, applications, network)
+801D0F50	801D0F68	replace	game: aspect getters (enhancements)
+801D0F68	801E7ABC	lift	game: Osako (system, applications, network)
 801E7ABC	8024A7E0	lift	game: Sato (items, objects, effects)
 8024A7E0	8029866C	lift	game: Shiraiwa (map objects, wipes)
 8029866C	802D8518	lift	game: Yamamoto (kart physics, camera)
