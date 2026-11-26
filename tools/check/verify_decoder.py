@@ -14,6 +14,14 @@ objdump runs as `-M broadway,raw`: the Broadway instruction set, no simplified
 mnemonics. Use binutils-powerpc-linux-gnu (Debian/Ubuntu) or devkitPPC's
 powerpc-eabi-objdump; set OBJDUMP to choose one.
 
+Where there is no PowerPC objdump, `--dol main.dol --assembler "zig"` (or
+"python -m ziglang", or a Clang) checks the other way round with LLVM's
+assembler, which is as independent of qilin as binutils is: every distinct word
+qilin decodes is written out as qilin's text, assembled, and must come back as
+the same word. That checks the mnemonic and every operand field of each valid
+word; it can't check that an invalid word is invalid, and LLVM doesn't know
+Gekko's paired singles, which are counted and left out.
+
 The comparison is strict: mnemonic and every operand must match, and a word
 must be valid for both or neither. Disagreements that are reviewed and
 explained are counted by class (KNOWN below) instead of failing; anything else
@@ -23,6 +31,8 @@ import argparse
 import collections
 import os
 import random
+import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -170,6 +180,96 @@ def compare(words, ours, theirs, base, report):
     return unexplained
 
 
+# ---- the round trip through LLVM's assembler (--assembler)
+REGISTER = re.compile(r"\b(?:cr|r|f)(\d+)\b")
+BRANCHES = {"b", "bl", "bc", "bcl"}  # relative: qilin prints the target, the assembler wants the distance
+
+
+def llvm_text(addr, text):
+    """qilin's text for the word at addr, in the assembler's syntax; None for what LLVM has no instruction for."""
+    mnemonic, _, operands = text.partition(" ")
+    if mnemonic.startswith(("ps_", "psq_")) or mnemonic == "dcbz_l":
+        return None
+    ops = operands.split(",") if operands else []
+    if mnemonic in BRANCHES:
+        distance = int(ops[-1], 16) - addr
+        if distance >= 1 << 31:
+            distance -= 1 << 32
+        if distance < -(1 << 31):
+            distance += 1 << 32
+        ops[-1] = f".{distance:+d}"
+    if mnemonic.rstrip(".") in ("fres", "frsqrte") and ops[-1] == "0":
+        ops.pop()  # objdump's raw mode prints a later ISA's field there, which the 750 has as zero
+    ops = [REGISTER.sub(r"\1", o) for o in ops]
+    return f"{mnemonic} {','.join(ops)}"
+
+
+def assemble(assembler, lines):
+    """The words the assembler makes of `lines` (one instruction each), and the lines it refused."""
+    refused = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        src, obj, raw = (os.path.join(tmp, n) for n in ("words.s", "words.o", "words.bin"))
+        while True:
+            kept = [i for i in range(len(lines)) if i not in refused]
+            with open(src, "w") as f:
+                f.write(".text\n" + "".join(lines[i] + "\n" for i in kept))
+            r = subprocess.run(assembler + ["cc", "-target", "powerpc-linux-gnu", "-mcpu=750", "-c", src, "-o", obj],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                break
+            bad = {}
+            for m in re.finditer(r"words\.s:(\d+):\d+: error: (.*)", r.stderr):
+                bad.setdefault(kept[int(m.group(1)) - 2], m.group(2))
+            if not bad:
+                sys.exit("verify_decoder: the assembler failed:\n" + r.stderr[:2000])
+            refused.update(bad)
+        subprocess.run(assembler + ["objcopy", "-O", "binary", "--only-section=.text", obj, raw], check=True)
+        data = open(raw, "rb").read()
+    if len(data) != 4 * len(kept):
+        sys.exit(f"verify_decoder: the assembler made {len(data)} bytes of {len(kept)} instructions")
+    return {i: struct.unpack_from(">I", data, 4 * k)[0] for k, i in enumerate(kept)}, refused
+
+
+def roundtrip(assembler, items):
+    """items: (address, word, qilin's text). Returns the exit status."""
+    distinct, invalid, unknown = {}, 0, collections.Counter()
+    for addr, word, text in items:
+        if text.startswith(".long"):
+            invalid += 1
+        elif word not in distinct:
+            line = llvm_text(addr, text)
+            if line is None:
+                unknown[text.split()[0]] += 1
+            distinct[word] = (addr, text, line)
+    todo = [(w, a, t, l) for w, (a, t, l) in distinct.items() if l is not None]
+    words, refused = assemble(assembler, [l for _, _, _, l in todo])
+    # LLVM assembles mftb as the mfspr of the same number (what later ISAs made of it): one bit
+    # of the extended opcode apart, with every operand field the same.
+    mftb = [i for i, (w, _, t, _) in enumerate(todo) if t.startswith("mftb ") and words.get(i) == w ^ 0x40]
+    for i in mftb:
+        words[i] = todo[i][0]
+    if mftb:
+        print(f"  known difference ({len(mftb)}): mftb comes back as mfspr (extended opcode 339 for 371), operands the same")
+    wrong = [(a, w, t, f"{words[i]:08x}") for i, (w, a, t, _) in enumerate(todo) if i in words and words[i] != w]
+    wrong += [(a, w, t, "refused: " + refused[i]) for i, (w, a, t, _) in enumerate(todo) if i in refused]
+    print(f"{len(items)} words: {len(items) - invalid} valid for qilin ({len(distinct)} distinct), {invalid} invalid (not checked)")
+    print(f"  {len(todo) - len(wrong)} distinct words assembled back to themselves from qilin's text")
+    print(f"  {sum(unknown.values())} distinct words left out: LLVM has no paired singles "
+          f"({', '.join(sorted(unknown))})" if unknown else "  nothing left out")
+    if wrong:
+        print(f"{len(wrong)} DISAGREEMENTS (address word | qilin | assembler):")
+        classes = collections.defaultdict(list)
+        for t in wrong:
+            classes[t[2].split()[0]].append(t)
+        for name, group in sorted(classes.items(), key=lambda kv: -len(kv[1])):
+            print(f"  {len(group):7} {name}")
+            for addr, w, x, y in group[:3]:
+                print(f"            {addr:08x} {w:08x} | {x} | {y}")
+        return 1
+    print("no disagreements")
+    return 0
+
+
 # Random bits within `allowed`, with each 5-bit register field (and the
 # record bit) left zero half the time, so that the valid forms of
 # instructions with reserved fields come up often.
@@ -207,7 +307,18 @@ def main():
     ap.add_argument("--per-xo", type=int, default=24, help="sweep: random words per extended opcode")
     ap.add_argument("--per-primary", type=int, default=4096, help="sweep: random words per primary opcode")
     ap.add_argument("--show", type=int, default=3, help="examples to print per class of unexplained disagreement")
+    ap.add_argument("--assembler", help='with --dol: round-trip through LLVM\'s assembler instead of objdump; the command '
+                    'that takes "cc" and "objcopy" (zig, or "python -m ziglang")')
     args = ap.parse_args()
+    if args.assembler:
+        if not args.dol:
+            sys.exit("verify_decoder: --assembler goes with --dol")
+        out = subprocess.run([os.path.abspath(args.qilin), "insns", args.dol], check=True, capture_output=True, text=True).stdout
+        items = []
+        for line in out.splitlines():
+            addr_s, word_s, text = line.split(" ", 2)
+            items.append((int(addr_s, 16), int(word_s, 16), normalise(text)))
+        return roundtrip(shlex.split(args.assembler), items)
     objdump = find_objdump()
     report = collections.Counter()
     unexplained = []
