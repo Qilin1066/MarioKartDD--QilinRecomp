@@ -33,6 +33,7 @@ bool (*g_follows)(const gx::Frame&, const gx::Draw&) = nullptr;
 
 constexpr float kFills = 0.9f;     // of the view's width: not a part of the HUD
 constexpr float kLineGap = 0.03f;  // of the view's width: pieces of one line
+constexpr float kReaches = 0.05f;  // of the view's width: a part this near the middle reaches it
 
 struct Flat {
     uint32_t draw;
@@ -74,10 +75,16 @@ bool anchor_of(Place p, float left, float right, float x0, float x1, bool follow
     const float width = right - left;
     if (p == Place::stretched || !(width > 0)) return false;
     if (std::min(x1, right) - std::max(x0, left) >= kFills * width) return false;
-    const float centre = 0.5f * (x0 + x1);
+    const float centre = 0.5f * (x0 + x1), middle = 0.5f * (left + right), reach = kReaches * width;
     if (follows_world) anchor = centre;
-    else if (p == Place::middle) anchor = 0.5f * (left + right);
-    else anchor = centre < left + width / 3 ? left : centre > right - width / 3 ? right : centre;
+    else if (p == Place::middle) anchor = middle;
+    // Mostly at a side but reaching the view's middle (the countdown's speed lines trail its number
+    // from the left to the middle): about the middle, so the inner end stays where it was drawn and
+    // what it leads to (the number: perspective, never squeezed) keeps it. Pulled to the edge, the
+    // lines were left as stray bands across the view.
+    else if (centre < left + width / 3) anchor = x1 >= middle - reach ? middle : left;
+    else if (centre > right - width / 3) anchor = x0 <= middle + reach ? middle : right;
+    else anchor = centre;
     return true;
 }
 

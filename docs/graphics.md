@@ -252,6 +252,11 @@ The aspect path (enhance.cpp, hud.cpp) widens the game's cameras and stretches t
 
   The bands beside the old picture are as full as a 4:3 picture's own edges, at every shape: nothing in this race is still culled against 4:3. (One ten-second stretch alone, the race's start, read thinner at 21:9; over the race it doesn't.) Split screen and the other courses weren't surveyed.
 
+### Two things seen in widened pictures (2026-11-26)
+
+- **Faint bands across the lower part of player 1's view in a two-player countdown at 16:9 and 21:9**: ours. Captured (`work/render2/p2c.dff`, `MKDD_DFF=...@803CBDA0=8+6.5`: 6.5 s after the race scene starts, the countdown at "2"), they are five flat quads, 226 by 6 pixels at y 185-265, alpha fading from 75 to 0 towards the middle: the countdown number's speed lines, trailing it in from the left. The number is drawn in perspective, so it stays where it is on a widened picture; the lines are flat, their centre in the left third, so the HUD's placing (`hud.cpp`) pulled them towards the left edge and left them across the views as stray bands. A flat part mostly at a side that reaches the view's middle (within 5% of the width) is now squeezed about the middle instead, which keeps its inner end where it was drawn (`enhance_test`'s anchors). `mkdd_render_test --picture-dff <file> <out> [loops] [scale] [widening]` draws a capture with the HUD placed as in the game.
+- **A pale rectangle behind Lakitu's lap board at 3x** (`work/os/review/keep/babypark-scale3-lakitu-rectangle.png`): not reproduced. The countdown capture above has Lakitu with his lights and shows no rectangle at 1x or 3x; the lap board is up only for a moment after the line is crossed, and no trigger for that moment was at hand (a lap counter's address would do: `MKDD_DFF=<file>@<address>=<lap>+<seconds>`). Next: capture it so, and compare its picture at 1x and 3x.
+
 ## Tools
 
 - A GLSL compiler isn't on the build machine and CI installs `glslang-tools`. For the shader change here, glslang 15.1.0 was built from source in scratch (`work\gpu\bin\glslangValidator.exe`), and `tools/build_shaders.py` used as it is. Every shader's SPIR-V bytes changed with the compiler's version; only `copy.frag` changed in source.

@@ -1641,12 +1641,15 @@ int zwait_dff(host::Gpu& gpu, const char* path, unsigned loops) {
     return 0;
 }
 
-// mkdd_render_test --picture-dff <file.dff> <out.ppm> [loops] [scale]: the frame's picture as our renderer
+// mkdd_render_test --picture-dff <file.dff> <out.ppm> [loops] [scale] [widening]: the frame's picture as our renderer
 // draws it (the last loop's copy to the frame buffer, at the EFB's scale, as it stands), for
 // comparing two builds byte for byte.
-int picture_dff(host::Gpu& gpu, const char* path, const char* out, unsigned loops, unsigned scale) {
+int picture_dff(host::Gpu& gpu, const char* path, const char* out, unsigned loops, unsigned scale, float widening) {
     Target t(gpu);
-    t.renderer.request_scale(scale);
+    t.renderer.request_scale(scale), t.renderer.request_widening(widening);
+    static float shown_wider = 1.0f;  // (the HUD's placing on a widened picture, as in the game: hud.hpp)
+    shown_wider = widening;
+    mkdd::hud::set_widening_source([]() -> float { return shown_wider; });
     uint32_t xfb = 0;
     mkdd::replay_dff(path, loops, [&](gx::Frame& f) {
         f.captured = std::getenv("MKDD_PROBE") != nullptr;  // (MKDD_PROBE follows a pixel through it)
@@ -1779,7 +1782,8 @@ int main(int argc, char** argv) {
         return code;
     }
     if (argc >= 4 && std::strcmp(argv[1], "--picture-dff") == 0) {
-        const int code = picture_dff(gpu, argv[2], argv[3], argc >= 5 ? unsigned(std::atoi(argv[4])) : 1, argc >= 6 ? unsigned(std::atoi(argv[5])) : 1);
+        const int code = picture_dff(gpu, argv[2], argv[3], argc >= 5 ? unsigned(std::atoi(argv[4])) : 1, argc >= 6 ? unsigned(std::atoi(argv[5])) : 1,
+                                     argc >= 7 ? float(std::atof(argv[6])) : 1.0f);
         gpu.destroy();
         return code;
     }

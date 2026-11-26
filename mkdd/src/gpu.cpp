@@ -337,7 +337,8 @@ uint32_t be32(const uint8_t* p) {  // (a load and a byte swap, which MSVC doesn'
 
 // Decode whole commands from data[used..size); stop at one that isn't complete.
 // ---- MKDD_DFF=<file>@<seconds>: the first whole frame after that much
-// game time, as a Dolphin FIFO log (.dff, version 6), for Dolphin's FIFO
+// game time (or @<address>=<hex>+<seconds>: that long after the word at the address first
+// holds the value, say a scene's start: 803CBDA0=8+6.5 is a race's countdown), as a Dolphin FIFO log (.dff, version 6), for Dolphin's FIFO
 // player to render as the hardware would: a reference to compare our
 // renderer's picture with. It holds the registers at the frame's start, the
 // frame's commands from one XFB copy to the next, the console's RAM (MEM1)
@@ -350,6 +351,9 @@ void dff_note_memory(uint32_t physical, uint32_t size);
 struct DffCapture {
     std::string path;
     double at = 0;
+    // @<address>=<hex>+<seconds> instead: that long after the word at the address first holds the value (a scene's start).
+    uint32_t when_address = 0, when_value = 0;
+    double when_seen = -1;
     int state = 0;  // 0 waiting, 1 recording the frame, 2 written
     std::vector<uint8_t> bytes;
     std::array<uint32_t, 256> bp{}, cp{};
@@ -371,6 +375,12 @@ DffCapture* g_dff = [] () -> DffCapture* {
     const size_t atsign = spec.rfind('@');
     d->path = spec.substr(0, atsign);
     if (atsign != std::string::npos) d->at = std::atof(spec.c_str() + atsign + 1);
+    if (const size_t eq = spec.find('=', atsign); atsign != std::string::npos && eq != std::string::npos) {
+        d->when_address = uint32_t(std::strtoul(spec.c_str() + atsign + 1, nullptr, 16));
+        d->when_value = uint32_t(std::strtoul(spec.c_str() + eq + 1, nullptr, 16));
+        const size_t plus = spec.find('+', eq);
+        d->at = plus == std::string::npos ? 0.0 : std::atof(spec.c_str() + plus + 1);
+    }
     return d;
 }();
 
@@ -564,7 +574,8 @@ void dff_after(const uint8_t* p, size_t n) {
     if (d.state == 1) d.bytes.insert(d.bytes.end(), p, p + n);
     if (!g_xfb_copied) return;
     g_xfb_copied = false;
-    if (d.state == 0 && frame_count() / 60.0 >= d.at) {
+    if (d.when_address && d.when_seen < 0 && rt::peek32(d.when_address) == d.when_value) d.when_seen = frame_count() / 60.0;
+    if (d.state == 0 && (!d.when_address || d.when_seen >= 0) && frame_count() / 60.0 >= d.at + std::max(d.when_seen, 0.0)) {
         d.bp = g_bp, d.cp = g_cpmem, d.xf = g_xf;
         const auto* m1 = static_cast<const uint8_t*>(rt::guest_ptr(0x80000000u));
         d.mem1.assign(m1, m1 + gx::kMem1Size);

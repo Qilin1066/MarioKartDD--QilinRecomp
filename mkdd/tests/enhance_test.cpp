@@ -406,6 +406,8 @@ void test_hud() {
     check(hud::anchor_of(hud::Place::edges, 0, 608, 100, 200, false, a) && a == 0, "centre 150 of 608: the left edge");
     check(hud::anchor_of(hud::Place::edges, 0, 608, 180, 240, false, a) && a == 210, "centre 210: its own centre");
     check(hud::anchor_of(hud::Place::edges, 0, 608, 400, 500, false, a) && a == 608, "centre 450: the right edge");
+    check(hud::anchor_of(hud::Place::edges, 0, 608, 80, 306, false, a) && a == 304, "centre 193 but reaching the middle (the countdown's speed lines): the middle");
+    check(hud::anchor_of(hud::Place::edges, 0, 608, 302, 528, false, a) && a == 304, "... and from the right");
     check(!hud::anchor_of(hud::Place::edges, 0, 608, 30, 578, false, a), "548 of 608 wide (90%) fills the view");
     check(hud::anchor_of(hud::Place::edges, 0, 608, 31, 577, false, a), "546 of 608 doesn't");
     check(!hud::anchor_of(hud::Place::edges, 0, 608, -200, 800, false, a), "wider than the view fills it");
