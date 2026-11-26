@@ -676,6 +676,14 @@ void test_fp() {
     CHECK(fp::load_single(0x3F800000u) == 1.0);
     CHECK(b(fp::load_single(0x7F800001u)) == 0x7FF0000020000000ull);  // a signalling NaN stays signalling
     CHECK(b(fp::load_single(0x00000001u)) == 0x36A0000000000000ull);  // the smallest subnormal single, normalised
+    CHECK(b(fp::load_single(0x807FFFFFu)) == 0xB80FFFFFC0000000ull);  // the largest, negative
+    CHECK(b(fp::load_single(0xFFC00001u)) == 0xFFF8000020000000ull && b(fp::load_single(0xFF800000u)) == 0xFFF0000000000000ull);
+    CHECK(b(fp::to_d(fp::ffrom(0xFF800001u))) == 0xFFF0000020000000ull);  // single mode's widening keeps a signalling NaN too
+    // Single mode's "ordinary" result: zero, or a normal above the smallest normal single.
+    for (const uint32_t x : {0x00000000u, 0x80000000u, 0x00800001u, 0x7F7FFFFFu, 0xFF7FFFFFu, 0x3F800000u})
+        CHECK(fp::ordinary(fp::ffrom(x)));
+    for (const uint32_t x : {0x00000001u, 0x00800000u, 0x80800000u, 0x7F800000u, 0xFF800000u, 0x7FC00000u, 0x807FFFFFu})
+        CHECK(!fp::ordinary(fp::ffrom(x)));
     CHECK(fp::store_single(1.0) == 0x3F800000u);
     CHECK(fp::store_single(d(0x36A0000000000000ull)) == 0x00000001u);  // 2^-149
     CHECK(fp::store_single(d(0x36B0000000000000ull)) == 0x00000002u);  // 2^-148
