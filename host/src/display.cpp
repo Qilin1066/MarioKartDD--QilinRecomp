@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <utility>
 
 #include "qilin/host/pacing.hpp"
 #include "qilin/host/vulkan.hpp"
@@ -121,6 +122,7 @@ struct Display::Impl {
     Image frame;      // the uploaded frame
     Image target;     // headless: what's presented
     bool need_rebuild = false;
+    bool fullscreen_changed = false;  // (take_fullscreen_changed)
     bool vsync_built = true;  // the present mode the swapchain has
     // Rebuilds for a suboptimal swapchain since the window last changed size:
     // a few, then it is used as it is (a surface that stays suboptimal would
@@ -646,6 +648,7 @@ bool Display::poll() {
         if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED || e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED ||
             e.type == SDL_EVENT_WINDOW_RESTORED || e.type == SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED)
             d.need_rebuild = true, d.suboptimal_rebuilds = 0;
+        if (e.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN || e.type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN) d.fullscreen_changed = true;
         if (e.type == SDL_EVENT_JOYSTICK_ADDED && !SDL_IsGamepad(e.jdevice.which)) list_controllers();  // say why it isn't used
         if (e.type == SDL_EVENT_GAMEPAD_ADDED) d.open_pad(e.gdevice.which);
         if (e.type == SDL_EVENT_GAMEPAD_REMOVED) d.close_pad(e.gdevice.which);
@@ -1037,6 +1040,7 @@ void Display::set_fullscreen(bool on) {
     SDL_SetWindowFullscreen(impl_->window, on);
 }
 const std::string& Display::mode_note() const { return impl_->mode_note; }
+bool Display::take_fullscreen_changed() { return std::exchange(impl_->fullscreen_changed, false); }
 
 std::vector<std::string> Display::monitors() const {
     std::vector<std::string> out;
@@ -1057,7 +1061,7 @@ void Display::move_to(const std::string& monitor) {
     if (full) SDL_SetWindowFullscreen(w, false);
     const int at = int(SDL_WINDOWPOS_CENTERED_DISPLAY(id));
     SDL_SetWindowPosition(w, at, at);
-    if (full) SDL_SetWindowFullscreen(w, true);
+    if (full) set_fullscreen(true);  // the new display's own even mode, not the old one's
 }
 
 void* Display::sdl_window() const { return impl_->window; }

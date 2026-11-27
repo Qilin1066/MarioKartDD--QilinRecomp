@@ -168,8 +168,7 @@ bool Menu::handle(const void* event) {
             }
             if (!e.key.repeat && e.key.key == SDLK_F3) {  // the frame-time readout, kept in the settings
                 s_.performance_overlay = !s_.performance_overlay;
-                if (!save_settings(folder_, s_))
-                    qilin::rt::log("the settings can't be saved to %s", settings_file(folder_).string().c_str());
+                save();  // (with the window's full screen as it is now, not as last saved)
                 return true;
             }
             if (!e.key.repeat && e.key.key == SDLK_F9) {  // a capture of the next frames, for a report

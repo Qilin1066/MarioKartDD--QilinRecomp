@@ -117,6 +117,9 @@ public:
     const Picture& picture() const;
     bool fullscreen() const;
     void set_fullscreen(bool on);
+    // The window went into or out of full screen since the last call (F11, Alt+Enter, the menu,
+    // the window manager), so the setting can follow it.
+    bool take_fullscreen_changed();
     // The displays connected, by name, and moving the window to one (empty: the main one).
     std::vector<std::string> monitors() const;
     void move_to(const std::string& monitor);

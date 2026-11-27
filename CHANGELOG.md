@@ -4,8 +4,14 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-27
+
 ### Fixed
 
+- Full screen switched with F11 or Alt+Enter is remembered for the next start. Before, it was kept only if the settings menu was opened afterwards, and pressing F3 could write back the old full-screen setting.
+- Moving the game to another display from the settings menu while in full screen picks that display's own even-refresh mode, rather than reusing the previous display's.
+- A save restore that can't be carried out (its backup gone, say) stops that start with the reason once, then is set aside as `restore-save.failed.txt`. Before, the game refused to start every time until the request file was deleted by hand.
+- Previous saves are listed with the computer's local time rather than UTC.
 - The Windows build compiles again with warnings as errors: the audio transition test filled 16-bit buffers from `int` constants (MSVC C4244).
 - The settings menu's frame rate no longer lists "60" beside "60 (original)": the two were the same in this game (it only differed in LAN play, which has no adapter here). `frame_rate = 60` in an existing `mkdd.ini` still loads, as original.
 - Controls' "Back to the defaults" also takes the restored inputs off the console's Reset button. A key or button bound to Reset (Return, say) no longer ends up on Start and Reset at once, resetting the game when pressed.

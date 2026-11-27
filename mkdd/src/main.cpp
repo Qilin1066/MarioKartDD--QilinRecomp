@@ -427,7 +427,7 @@ int main(int argc, char** argv) {
     }
     std::string restore_error;
     if (!mkdd::apply_save_restore(qilin::host::user_folder(), restore_error))
-        rt::fatal(nullptr, "save recovery: %s (the restore request is restore-save.txt in the save folder)", restore_error.c_str());
+        rt::fatal(nullptr, "save recovery: %s", restore_error.c_str());
     mkdd::load_game(folder);
 
     const std::filesystem::path data = qilin::host::user_folder();
@@ -615,6 +615,11 @@ int main(int argc, char** argv) {
             mkdd::before_exit();
             std::fflush(nullptr);
             std::_Exit(0);  // guest threads are parked on host threads: no static destructors
+        }
+        // Full screen as last left (F11, Alt+Enter), kept for the next start.
+        if (display && display->take_fullscreen_changed() && display->fullscreen() != settings.fullscreen) {
+            settings.fullscreen = display->fullscreen();
+            if (!mkdd::save_settings(data, settings)) rt::log("the settings can't be saved");
         }
         if (menu) {
             menu->tick();

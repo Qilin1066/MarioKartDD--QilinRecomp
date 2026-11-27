@@ -143,7 +143,9 @@ can't be made the write fails (IOERROR) and the save stays as it was.
 **F1 → Game → Previous saves** lists them with the card, the file and the
 time; **Restore and restart** writes `restore-save.txt`, and the next start
 puts that copy back before the game runs, keeping the one it replaces in the
-history too. Only files inside `card-a/` and `card-b/` can be restored over.
+history too. A request that can't be carried out stops that start with the
+reason and is set aside as `restore-save.failed.txt`, so the start after plays
+the current save. Only files inside `card-a/` and `card-b/` can be restored over.
 A backup is itself a `.gci` under another name.
 
 ## Tests

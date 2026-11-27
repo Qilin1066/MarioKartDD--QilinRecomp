@@ -32,7 +32,9 @@ int main() {
     check(!mkdd::request_save_restore(folder, folder / "../outside.bak", error), "outside path rejected");
     { std::ofstream invalid(folder / "restore-save.txt"); invalid << "../../outside.bak\n"; }
     check(!mkdd::apply_save_restore(folder, error) && read(save) == selected_data, "bad request cannot modify current save");
-    fs::remove(folder / "restore-save.txt");
+    check(!fs::exists(folder / "restore-save.txt") && fs::exists(folder / "restore-save.failed.txt") &&
+              mkdd::apply_save_restore(folder, error),
+          "a failed request is set aside: the next start isn't stopped by it again");
     // A request edited on Windows: a byte-order mark and CR LF.
     write("current again");
     const auto second = mkdd::save_backups(folder).front().file;

@@ -130,13 +130,14 @@ std::vector<SaveBackup> save_backups(const fs::path& folder) {
             const std::string stamp = it->path().stem().string().substr(0, 20);
             const auto seconds = static_cast<std::time_t>(std::strtoll(stamp.c_str(), nullptr, 10) / 1000000);
             std::tm calendar{};
+            // (The computer's own time, as the player knows it.)
 #if defined(_WIN32)
-            gmtime_s(&calendar, &seconds);
+            localtime_s(&calendar, &seconds);
 #else
-            gmtime_r(&seconds, &calendar);
+            localtime_r(&seconds, &calendar);
 #endif
             char label[64]{};
-            std::strftime(label, sizeof label, "%Y-%m-%d %H:%M:%S UTC", &calendar);
+            std::strftime(label, sizeof label, "%Y-%m-%d %H:%M:%S", &calendar);
             const std::string kind = *target.lexically_relative(folder).begin() == "card-a" ? "Card A: " : "Card B: ";
             out.push_back({it->path(), kind + target.stem().string() + " / " + label});
         }
@@ -159,7 +160,8 @@ bool request_save_restore(const fs::path& folder, const fs::path& backup, std::s
     error.clear(); return true;
 }
 
-bool apply_save_restore(const fs::path& folder, std::string& error) {
+namespace {
+bool apply_request(const fs::path& folder, std::string& error) {
     const fs::path request = folder / "restore-save.txt";
     std::error_code ec;
     if (!fs::exists(request, ec)) return ec ? fail(error, "cannot inspect restore request", ec) : true;
@@ -203,5 +205,20 @@ bool apply_save_restore(const fs::path& folder, std::string& error) {
     fs::remove(request, ec);
     if (ec) return fail(error, "save restored but restore request cannot be removed", ec);
     error.clear(); return true;
+}
+}  // namespace
+
+bool apply_save_restore(const fs::path& folder, std::string& error) {
+    if (apply_request(folder, error)) return true;
+    // A request that can't be carried out is set aside, so the next start plays the current save
+    // rather than stopping at the same request every time.
+    std::error_code ec;
+    const fs::path request = folder / "restore-save.txt", failed = folder / "restore-save.failed.txt";
+    if (fs::exists(request, ec)) {
+        fs::remove(failed, ec);
+        fs::rename(request, failed, ec);
+        if (!ec) error += " (the request was set aside as restore-save.failed.txt; the next start plays the current save)";
+    }
+    return false;
 }
 }  // namespace mkdd
