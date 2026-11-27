@@ -4,6 +4,19 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-27
+
+### Fixed
+
+- Widescreen HUD grouping separates overlapping elements with different anchors, while preserving adjacent text across anchor boundaries. A countdown effect can no longer absorb the right-hand map and its icons into its group. Fully clipped sprites are excluded from grouping.
+- A group of small HUD sprites spanning the whole view remains corrected for widescreen; it is no longer mistaken for a full-screen fade and left stretched.
+- Audio DMA recovery after a stall of at least 100 ms reloads its source and raises the interrupt that asks JAudio for fresh sound immediately. The stale buffer is discarded, avoiding its delayed replay after the stall.
+
+### Tests
+
+- Added synthetic countdown/map overlap and full-width HUD-group regressions.
+- Added a game-data-free test of the actual DSP/AI registers and DMA timer, covering stereo order, buffer completion, stall recovery, source reload and stopping playback. The old HUD and DMA implementations fail the new regression cases.
+
 ## [0.1.2] - 2026-11-27
 
 ### Fixed

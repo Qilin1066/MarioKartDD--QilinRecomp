@@ -14,8 +14,8 @@
 // A view is the draw's viewport cut by its scissor box, so a player's HUD in
 // a half or a quarter of the screen keeps to it. Draws on one line (most of
 // their height shared, no more than 3% of the view's width apart) are one
-// part and move together, so a line of text or an icon and its number
-// aren't pulled apart.
+// part and move together. Overlapping draws with different anchors stay
+// separate, so a centre effect cannot pull the map away from its edge.
 #include "hud.hpp"
 
 #include <algorithm>
@@ -43,6 +43,7 @@ struct Flat {
     float x0, x1, y0, y1;  // the draw's extent, EFB pixels
     float sign;            // the vertex shader's flip of x (the viewport's width negative)
     bool follows;
+    int lane;              // left, centre or right anchor; overlays cannot join another lane
 };
 
 // The extent of a draw's vertices as the vertex shader places them.
@@ -126,6 +127,7 @@ void place(gx::Frame& f) {
         fl.top = std::max(d.viewport[1], float(d.scissor[1]));
         fl.bottom = std::min(d.viewport[1] + d.viewport[3], float(d.scissor[1] + d.scissor[3]));
         if (!(fl.right > fl.left) || !(fl.bottom > fl.top)) continue;
+        if (fl.x1 <= fl.left || fl.x0 >= fl.right || fl.y1 <= fl.top || fl.y0 >= fl.bottom) continue;
         if (std::min(fl.x1, fl.right) - std::max(fl.x0, fl.left) >= kFills * (fl.right - fl.left)) continue;
         // Read back by a texture copy later in the frame: something's work area.
         bool copied = false;
@@ -137,11 +139,15 @@ void place(gx::Frame& f) {
         }
         if (copied) continue;
         fl.follows = follows && follows(f, d);
+        float anchor;
+        if (!anchor_of(p, fl.left, fl.right, fl.x0, fl.x1, fl.follows, anchor)) continue;
+        fl.lane = anchor == fl.left ? -1 : anchor == fl.right ? 1 : 0;
         flats.push_back(fl);
     }
     if (flats.empty()) return;
 
-    // Lines: a part is the draws that sit side by side in one view.
+    // An expanding centre overlay must not absorb the right-hand map.
+    // Adjacent text can still cross an anchor boundary as one line.
     thread_local std::vector<uint32_t> part;
     part.resize(flats.size());
     std::iota(part.begin(), part.end(), 0u);
@@ -154,9 +160,12 @@ void place(gx::Frame& f) {
             const Flat& a = flats[i];
             const Flat& b = flats[j];
             if (a.left != b.left || a.right != b.right || a.top != b.top || a.bottom != b.bottom || a.follows || b.follows) continue;
+            const float gap = std::max(a.x0, b.x0) - std::min(a.x1, b.x1);
+            const float ha = a.y1 - a.y0, hb = b.y1 - b.y0;
+            if (a.lane != b.lane && (gap < 0 || std::max(ha, hb) > 2 * std::min(ha, hb))) continue;
             const float shared = std::min(a.y1, b.y1) - std::max(a.y0, b.y0);
             if (shared < 0.5f * std::min(a.y1 - a.y0, b.y1 - b.y0) || !(shared > 0)) continue;
-            if (std::max(a.x0, b.x0) - std::min(a.x1, b.x1) > kLineGap * (a.right - a.left)) continue;
+            if (gap > kLineGap * (a.right - a.left)) continue;
             part[root(i)] = root(j);
         }
     thread_local std::vector<float> x0, x1;
@@ -177,7 +186,9 @@ void place(gx::Frame& f) {
         const Flat& fl = flats[i];
         const uint32_t r = root(i);
         float at;
-        if (!anchor_of(p, fl.left, fl.right, x0[r], x1[r], fl.follows, at)) continue;
+        // Each individual draw already passed the full-width-effect check.
+        // A group of small sprites spanning the view is still HUD, not a fade.
+        if (!anchor_of(p, fl.left, fl.right, x0[r], x1[r], fl.follows, at)) at = 0.5f * (fl.left + fl.right);
         gx::Draw& d = f.draws[fl.draw];
         const float anchor = fl.sign * ((at - d.viewport[0]) / d.viewport[2] * 2 - 1);  // in clip space, before the flip
         const auto same = std::find_if(made.begin(), made.end(), [&](const Made& m) { return m.from == d.state && m.anchor == anchor; });

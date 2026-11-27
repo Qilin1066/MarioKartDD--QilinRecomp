@@ -476,18 +476,18 @@ void poll() {
     const uint64_t gap = g_last_poll ? now - g_last_poll : 0;
     g_last_poll = now;
     g_poll_gap_worst = std::max(g_poll_gap_worst, gap);
-    if (now >= dma_end() + kTimerHz / 10) {  // more than 100 ms behind (a stall): start again from now
+    const uint64_t end = dma_end();
+    if (now < end) return;
+    const bool stalled = now - end >= kTimerHz / 10;
+    if (stalled) {  // discard old sound, but still reload and ask JAudio for a fresh buffer
         rt::log("audio: %llu ms behind, skipping ahead (the timers were last polled %llu ms before this: %s)",
-                static_cast<unsigned long long>((now - dma_end()) * 1000 / kTimerHz), static_cast<unsigned long long>(gap * 1000 / kTimerHz),
+                static_cast<unsigned long long>((now - end) * 1000 / kTimerHz), static_cast<unsigned long long>(gap * 1000 / kTimerHz),
                 gap >= kTimerHz / 20 ? "the game's thread did not run, or ran without a safe point" : "the DMA fell behind while the timers were polled");
-        g_dma_t0 = now;
-        return;
     }
-    if (now < dma_end()) return;
-    g_dma_late_worst = std::max(g_dma_late_worst, now - dma_end());
+    g_dma_late_worst = std::max(g_dma_late_worst, now - end);
     g_aid_raised = now;
-    play(nullptr, g_dma_current, g_dma_blocks);
-    g_dma_t0 = dma_end();
+    if (!stalled) play(nullptr, g_dma_current, g_dma_blocks);
+    g_dma_t0 = stalled ? now : end;
     g_dma_current = g_dma_source;
     g_dma_blocks = g_dma_control & 0x7FFF;
     if (!g_dma_blocks) rt::fatal(nullptr, "the audio DMA reloaded a buffer of 0 blocks");

@@ -155,6 +155,38 @@ void split_hud_boundary() {
     mkdd::hud::set_widening_source(nullptr);
 }
 
+void countdown_overlay() {
+    widening = 4.0f / 3;
+    mkdd::hud::set_widening_source([] { return widening; });
+    mkdd::hud::set_place(mkdd::hud::Place::edges);
+    for (float end : {430.0f, 470.0f, 560.0f}) {
+        gx::Frame f;
+        // The track and a character icon share the right anchor. A large
+        // countdown animation overlaps both, but belongs to the centre.
+        add_hud(f, 460, 160, 620, 360);
+        add_hud(f, 500, 220, 524, 244);
+        add_hud(f, 220, 180, end, 300);
+        mkdd::hud::place(f);
+        const float right = 1.0f - 2.0f / widening;
+        for (unsigned i : {0u, 1u})
+            check(std::fabs(f.states[f.draws[i].state].projection[0][3] - right) < 1e-5f,
+                  "countdown overlap does not change the map or its icon's right anchor");
+        const float k = 1.0f / widening, centre = (220 + end) / 640 - 1;
+        check(std::fabs(f.states[f.draws[2].state].projection[0][3] - (-k + centre * (1 - k))) < 1e-5f,
+              "the map does not pull the countdown away from its own centre");
+    }
+    mkdd::hud::set_place(mkdd::hud::Place::middle);
+    gx::Frame f;
+    add_hud(f, 0, 100, 220, 140);
+    add_hud(f, 220, 100, 440, 140);
+    add_hud(f, 440, 100, 640, 140);
+    mkdd::hud::place(f);
+    for (const auto& d : f.draws)
+        check(std::fabs(f.states[d.state].projection[0][0] - 2.0f / (640 * widening)) < 1e-5f,
+              "a full-width group of HUD sprites remains squeezed in middle placement");
+    mkdd::hud::set_widening_source(nullptr);
+}
+
 void materials(gx::Frame& f, float a, float b) {
     auto s = f.states[0];
     f.states.clear();
@@ -247,6 +279,7 @@ int main() {
     widened_interpolation();
     independent_views();
     split_hud_boundary();
+    countdown_overlay();
     texture_materials();
     recorded_shape();
     callback_handoff();

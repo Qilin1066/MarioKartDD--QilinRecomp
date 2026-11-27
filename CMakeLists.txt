@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(MarioKartDDQilinRecomp VERSION 0.1.2 LANGUAGES C CXX)
+project(MarioKartDDQilinRecomp VERSION 0.1.3 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -607,6 +607,13 @@ if(QILIN_HOST AND NOT QILIN_GAME_DOL AND NOT QILIN_PLAYER_KIT)
         set_source_files_properties(mkdd/src/renderer.cpp mkdd/src/menu.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
     endif()
 endif()
+
+# The audio DMA registers and timer, without game microcode or a host device.
+add_executable(mkdd_audio_dma_test mkdd/tests/audio_dma_test.cpp mkdd/src/dsp.cpp mkdd/src/dsp_core.cpp mkdd/src/dsp_trace.cpp mkdd/src/dsp_no_ucode.cpp)
+target_include_directories(mkdd_audio_dma_test PRIVATE mkdd/src)
+target_link_libraries(mkdd_audio_dma_test PRIVATE qilin_rt qilin_warnings)
+qilin_tool(mkdd_audio_dma_test)
+add_test(NAME mkdd_audio_dma_test COMMAND mkdd_audio_dma_test)
 
 # The DSP core and the microcode lifter: a program written for the test, lifted at build time.
 add_custom_command(
