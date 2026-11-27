@@ -123,6 +123,11 @@ Menu::~Menu() {
     if (ImGui::GetCurrentContext()) ImGui::DestroyContext();
 }
 
+void Menu::notify(const std::string& text, uint64_t ms) {
+    banner_ = text;
+    banner_until_ = SDL_GetTicks() + ms;
+}
+
 bool Menu::take_controls_changed() {
     const bool was = controls_changed_;
     controls_changed_ = false;

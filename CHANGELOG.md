@@ -4,6 +4,25 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-27
+
+### Fixed
+
+- A mistake in `mkdd.ini` (a typo, a setting from another version, one controller named for two players) no longer stops the game at start. Every line that reads is kept and each that doesn't goes back to its default; the file as it was is kept as `mkdd.ini.bad`, the rest is written back, and the problems are shown at the bottom of the window for 20 s and in the log.
+- A key in `mkdd.ini` that the keyboard layout doesn't name is left out of its control, with a line in the log, instead of stopping the game.
+- A rejected setting no longer leaves part of itself behind: `anisotropy = 3` doesn't store 3 before being refused, and a control's list with one bad input keeps its previous inputs rather than the half read before the bad one.
+- Monitor, sound-device, GPU and controller names that begin or end with a tab or other white space are quoted in `mkdd.ini`, so they read back exactly. Before, the chosen device was lost at the next start. A line break in such a name is written as a space.
+- Two `.gci` files holding the same save (a downloaded copy beside the game's own) no longer both appear on the memory card, which a real card can't hold. The one under the game's own file name is used and the other is left in the folder, with a line in the log.
+
+### Tests
+
+- The settings parser was fuzzed (strict and keep-going modes, with a save-and-reload round trip of whatever loads) and so was the disc reader (plain and CISO images, FST, DOL and file reads), with AddressSanitizer and UndefinedBehaviorSanitizer. The half-applied setting and the white-space names above were found that way; the disc reader had no problems in about 800,000 runs.
+- Added regressions for a file with five kinds of mistake (kept lines, defaults, `mkdd.ini.bad`, the clean rewrite), names ending in white space, and duplicate card files.
+
+### Documentation
+
+- `docs/runtime.md`'s description of `mkdd.ini` was still the Wii project's (the remote's buttons, `internal_scale`, a `settings.ini` migration that no longer exists). It now lists this game's sections and keys and what happens to mistakes.
+
 ## [0.1.5] - 2026-11-27
 
 ### Fixed

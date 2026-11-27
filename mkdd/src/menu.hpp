@@ -49,6 +49,8 @@ public:
     // After each new picture the main loop presents: a capture takes it.
     void frame_shown();
     bool quit_requested() const { return quit_; }
+    // Something the player should know (mkdd.ini had mistakes, say): shown at the bottom for a while.
+    void notify(const std::string& text, uint64_t ms = 20000);
     // Whether the controls changed since the last call (the main loop's
     // table of them is rebuilt).
     bool take_controls_changed();

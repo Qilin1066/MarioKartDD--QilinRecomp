@@ -1,5 +1,6 @@
 #include "settings.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <initializer_list>
@@ -95,14 +96,15 @@ bool parse_binding(const std::string& text, Binding& b, std::string& why) {
 
 // A comma-separated list of inputs (empty items skipped).
 bool parse_bindings(const std::string& value, std::vector<Binding>& out, std::string& why) {
-    out.clear();
+    std::vector<Binding> list;  // (all or nothing: a bad list leaves the control as it was)
     std::istringstream items(value);
     for (std::string item; std::getline(items, item, ',');) {
         if (trim(item).empty()) continue;
         Binding b;
         if (!parse_binding(item, b, why)) return false;
-        out.push_back(b);
+        list.push_back(b);
     }
+    out = std::move(list);
     return true;
 }
 
@@ -243,14 +245,18 @@ unsigned render_scale(const Settings& s, int height_pixels) {
     return unsigned(k < 1 ? 1 : k > 8 ? 8 : k);
 }
 
-bool parse_settings(const std::string& text, Settings& out, std::string& error) {
+namespace {
+
+// Every line; a bad one stops it, or with keep_going is said and skipped (the rest still read).
+bool parse_lines(const std::string& text, Settings& out, std::vector<std::string>& errors, bool keep_going) {
     Settings s = default_settings();
     std::istringstream in(text);
     std::string line, section;
     std::set<std::string> seen;
     for (int n = 1; std::getline(in, line); ++n) {
+      const auto one = [&]() -> bool {
         const auto fail = [&](const std::string& why) {
-            error = "line " + std::to_string(n) + ": " + why;
+            errors.push_back("line " + std::to_string(n) + ": " + why);
             return false;
         };
         if (n == 1 && line.starts_with("\xEF\xBB\xBF")) line.erase(0, 3);
@@ -277,19 +283,20 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
             line.erase(hash);
         }
         line = trim(line);
-        if (line.empty()) continue;
+        if (line.empty()) return true;
         if (line.front() == '[') {
             if (line.back() != ']') return fail("a section is written [name]");
             section = lower(trim(line.substr(1, line.size() - 2)));
             if (section != "display" && section != "sound" && section != "controls" && section != "console" &&
                 !(section.size() == 7 && section.starts_with("player") && section[6] >= '1' && section[6] <= '4'))
                 return fail("there's no section [" + section + "] (display, sound, controls, player1 to player4, console)");
-            continue;
+            return true;
         }
         const size_t eq = line.find('=');
         if (eq == std::string::npos) return fail("expected name = value");
         const std::string name = lower(trim(line.substr(0, eq)));
         if (section.empty()) return fail("'" + name + "' comes before any [section]");
+        if (section == "?") return true;  // under a section that isn't one (said once, at its line)
         if (!seen.insert(section + "." + name).second) return fail("'" + name + "' is set twice");
         const std::string v = lower(value);
         bool ok = true;
@@ -373,8 +380,10 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
                 if (v == "auto" || v == "0") s.scale = 0;
                 else if (!number(s.scale, 1, 8)) return false;
             } else if (name == "anisotropy") {
-                if (!number(s.anisotropy, 1, 16)) return false;
-                if (s.anisotropy & (s.anisotropy - 1)) return fail("anisotropy is 1, 2, 4, 8 or 16");
+                unsigned a = 0;
+                if (!number(a, 1, 16)) return false;
+                if (a & (a - 1)) return fail("anisotropy is 1, 2, 4, 8 or 16");
+                s.anisotropy = a;
             } else if (name == "true_color") {
                 if (!boolean(s.true_color)) return false;
             } else if (name == "vsync") {
@@ -400,7 +409,7 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
                             "render_resolution anisotropy true_color vsync low_latency frame_rate gpu performance_overlay "
                             "match_refresh variable_refresh)");
             }
-            continue;
+            return true;
         }
         if (section == "sound") {
             unsigned pick = 0;
@@ -416,7 +425,7 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
             } else {
                 return fail("[sound] has no '" + name + "' (volume mute_unfocused output device)");
             }
-            continue;
+            return true;
         }
         if (section == "console") {
             if (name == "language") {
@@ -433,7 +442,7 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
             } else {
                 return fail("[console] has no '" + name + "' (language sound progressive component_cable)");
             }
-            continue;
+            return true;
         }
         if (section == "controls") {
             if (name == "stick_deadzone") {
@@ -452,17 +461,17 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
                             "' (stick_deadzone stick_threshold trigger_threshold rumble_strength reset; a player's controls are in "
                             "[player1] to [player4])");
             }
-            continue;
+            return true;
         }
         // [player1] to [player4]
         Player& p = s.players[section[6] - '1'];
         if (name == "controller") {
             p.controller = v == "none" ? "none" : value;
-            continue;
+            return true;
         }
         if (name == "rumble") {
             if (!boolean(p.rumble)) return false;
-            continue;
+            return true;
         }
         unsigned c = 0;
         while (c < kControlCount && name != kControlNames[c]) ++c;
@@ -471,25 +480,57 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
                         "stick_up stick_down stick_left stick_right c_up c_down c_left c_right), controller or rumble");
         std::string why;
         if (!parse_bindings(value, p.controls[c], why)) return fail(why);
+        return true;
+      };
+        if (!one()) {
+            if (!keep_going) return false;
+            // (A section that isn't one: what follows it belongs to none, until the next.)
+            if (!line.empty() && line.front() == '[') section = "?";
+        }
     }
     for (unsigned a = 0; a < kPlayers; ++a)
         for (unsigned b = a + 1; b < kPlayers; ++b)
             if (!s.players[a].controller.empty() && s.players[a].controller != "none" &&
                 s.players[a].controller == s.players[b].controller) {
-                error = "players " + std::to_string(a + 1) + " and " + std::to_string(b + 1) + " cannot use the same explicit controller";
-                return false;
+                errors.push_back("players " + std::to_string(a + 1) + " and " + std::to_string(b + 1) +
+                                 " cannot use the same explicit controller");
+                if (!keep_going) return false;
+                s.players[b].controller.clear();  // (the later one: automatic)
             }
+    out = std::move(s);
+    return errors.empty();
+}
+
+}  // namespace
+
+bool parse_settings(const std::string& text, Settings& out, std::string& error) {
+    std::vector<std::string> errors;
+    Settings s;
+    if (!parse_lines(text, s, errors, false)) {
+        error = errors.empty() ? std::string("unreadable") : errors.front();
+        return false;
+    }
     error.clear();
     out = std::move(s);
     return true;
 }
 
+Settings parse_settings_keeping_going(const std::string& text, std::vector<std::string>& errors) {
+    errors.clear();
+    Settings s;
+    parse_lines(text, s, errors, true);
+    return s;
+}
+
 std::string settings_text(const Settings& s) {
     const auto b = [](bool v) { return v ? "true" : "false"; };
     // A value as the file holds it: in quotes where it has a # (else a comment), opens with a
-    // quote, or begins or ends with a space.
-    const auto q = [](const std::string& v) {
-        if (v.find('#') == std::string::npos && (v.empty() || (v.front() != '"' && v.front() != ' ' && v.back() != ' '))) return v;
+    // quote, or begins or ends with white space (a tab too), which reading would trim. A line
+    // break can't be kept in a line: a name with one (from a driver) is written with spaces.
+    const auto q = [](std::string v) {
+        std::replace_if(v.begin(), v.end(), [](char ch) { return ch == '\n' || ch == '\r'; }, ' ');
+        const auto space = [](char ch) { return std::isspace(static_cast<unsigned char>(ch)) != 0; };
+        if (v.find('#') == std::string::npos && (v.empty() || (v.front() != '"' && !space(v.front()) && !space(v.back())))) return v;
         std::string out = "\"";
         for (char ch : v) out += ch == '"' ? std::string("\"\"") : std::string(1, ch);
         return out + "\"";
@@ -653,7 +694,7 @@ bool save_settings(const std::filesystem::path& folder, const Settings& s) {
     return ok;
 }
 
-Settings load_settings(const std::filesystem::path& folder) {
+Settings load_settings(const std::filesystem::path& folder, std::vector<std::string>* problems) {
     const std::filesystem::path file = settings_file(folder);
     std::string text;
     bool read = false;
@@ -669,10 +710,29 @@ Settings load_settings(const std::filesystem::path& folder) {
     if (read) {
         Settings s;
         std::string error;
-        if (!parse_settings(text, s, error))
-            qilin::rt::fatal(nullptr, "%s, %s (fix it, or delete the file to get the defaults back)", file.string().c_str(),
-                             error.c_str());
-        qilin::rt::log("settings: read %s", file.string().c_str());
+        if (parse_settings(text, s, error)) {
+            qilin::rt::log("settings: read %s", file.string().c_str());
+            return s;
+        }
+        // A mistake in the file (an edit, a setting from another version) needn't stop the game: the
+        // lines that read are kept, the others go back to their defaults, and the file as it was is
+        // kept beside it as mkdd.ini.bad.
+        std::vector<std::string> errors;
+        s = parse_settings_keeping_going(text, errors);
+        std::filesystem::path bad = file;
+        bad += ".bad";
+        std::error_code ec;
+        std::filesystem::copy_file(file, bad, std::filesystem::copy_options::overwrite_existing, ec);
+        for (const std::string& e : errors) qilin::rt::log("settings: %s, %s: left at its default", file.string().c_str(), e.c_str());
+        const bool kept = !ec && save_settings(folder, s);
+        qilin::rt::log("settings: %zu line%s of %s didn't read%s", errors.size(), errors.size() == 1 ? "" : "s", file.string().c_str(),
+                       kept ? " (the file as it was is mkdd.ini.bad; the rest is kept)" : "");
+        if (problems) {
+            problems->push_back("mkdd.ini: " + std::to_string(errors.size()) + (errors.size() == 1 ? " line" : " lines") +
+                                " didn't read and went back to the default" + (kept ? " (the old file is mkdd.ini.bad)" : "") + ":");
+            for (size_t i = 0; i < errors.size() && i < 3; ++i) problems->push_back("  " + errors[i]);
+            if (errors.size() > 3) problems->push_back("  ... (the log has the rest)");
+        }
         return s;
     }
     std::error_code read_ec;

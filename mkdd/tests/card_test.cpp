@@ -262,6 +262,25 @@ int main() {
     check(mkdd::save_backups(folder).size() == kept + 3 && fs::exists(folder / "card-a" / "broken.gci"),
           "each file it held is in the history; what wasn't a card file is left alone");
 
+    // ---- two copies of one save (a download beside the game's own): the game's is the one on the card
+    {
+        std::string save_file(64 + 8192, '\x11');
+        std::memset(save_file.data(), 0, 64);
+        std::memcpy(save_file.data(), "GM4E01", 6);
+        std::memcpy(save_file.data() + 8, "Copied", 6);
+        save_file[0x34] = 4, save_file[0x39] = 1;
+        std::ofstream(folder / "card-a" / "GM4E01-Copied.gci", std::ios::binary) << save_file;
+        save_file[64] = '\x22';
+        std::ofstream(folder / "card-a" / "Copied (download).gci", std::ios::binary) << save_file;
+    }
+    call("CARDUnmount", 0);
+    set(name2, "Copied");
+    check(call("CARDMount", 0, buffer, 0) == 0 && free_bytes() == 250 * 8192 && free_files() == 126 && call("CARDOpen", 0, name2, info) == 0 &&
+              call("CARDRead", info, buffer2, 0x200, 0) == 0 && *rt::guest_ptr(buffer2) == 0x11,
+          "a second file of the same name is left out, and the one under the game's own name is kept");
+    check(call("CARDDelete", 0, name2) == 0 && call("CARDOpen", 0, name2, info) == -4 && fs::exists(folder / "card-a" / "Copied (download).gci"),
+          "deleting the save deletes it once; the copy left out stays in the folder");
+
     fs::remove_all(folder);
     return failures ? 1 : 0;
 }

@@ -202,6 +202,7 @@ void scan(uint32_t slot) {
     uint32_t used = 0;
     for (const auto& f : k.dir)
         if (f) used += blocks_of(*f);
+    std::vector<Entry> fresh;
     for (const fs::path& p : found) {
         if (std::any_of(k.dir.begin(), k.dir.end(), [&](const auto& f) { return f && f->host == p; })) continue;
         Entry f;
@@ -209,11 +210,31 @@ void scan(uint32_t slot) {
         FILE* in = open_file(p, "rb");
         const bool read = in && std::fread(f.e.data(), 1, kEntrySize, in) == kEntrySize;
         if (in) std::fclose(in);
+        ec.clear();
         const uintmax_t size = fs::file_size(p, ec);
         const uint32_t blocks = blocks_of(f);
         if (!read || ec || f.e[kGame] == 0xFF || f.e[kGame] == 0 || blocks == 0 ||
             size != kEntrySize + uintmax_t{blocks} * kCardSectorSize) {
             rt::log("saves: %s isn't a card file (.gci: a 64-byte entry and its 8 KiB blocks): left alone", p.string().c_str());
+            continue;
+        }
+        fresh.push_back(std::move(f));
+    }
+    // A file under the name this program gives it first: of two copies of one save (a download
+    // beside the game's own), the game's is the one kept.
+    std::stable_partition(fresh.begin(), fresh.end(), [](const Entry& f) { return f.host.filename() == fs::path(host_name(f) + kSuffix); });
+    for (Entry& f : fresh) {
+        const fs::path& p = f.host;
+        const uint32_t blocks = blocks_of(f);
+        // A card holds one file of a name for each game and maker; a second would be opened,
+        // written and deleted in place of the first by turns.
+        const auto same_name = [&](const auto& other) {
+            return other && std::memcmp(other->e.data() + kGame, f.e.data() + kGame, 6) == 0 &&
+                   std::memcmp(other->e.data() + kName, f.e.data() + kName, kNameLength) == 0;
+        };
+        if (const auto first = std::find_if(k.dir.begin(), k.dir.end(), same_name); first != k.dir.end()) {
+            rt::log("saves: %s is the same save as %s (one game's file of one name per card): left out", p.string().c_str(),
+                    (*first)->host.string().c_str());
             continue;
         }
         const auto free = std::find(k.dir.begin(), k.dir.end(), std::nullopt);

@@ -431,7 +431,8 @@ int main(int argc, char** argv) {
     mkdd::load_game(folder);
 
     const std::filesystem::path data = qilin::host::user_folder();
-    mkdd::Settings settings = mkdd::load_settings(data);
+    std::vector<std::string> settings_problems;
+    mkdd::Settings settings = mkdd::load_settings(data, &settings_problems);
     // SRAM's language, sound mode and progressive flag; the component cable is the console's hardware (VIGetDTVStatus).
     mkdd::set_console(settings.language, settings.sound != 0, settings.progressive);
     mkdd::g_component_cable.store(settings.component_cable, std::memory_order_relaxed);
@@ -480,6 +481,11 @@ int main(int argc, char** argv) {
         if (!offscreen) {
             menu = std::make_unique<mkdd::Menu>(*display, settings, data);
             menu->set_running_scale(scale);
+            if (!settings_problems.empty()) {
+                std::string text;
+                for (const std::string& line : settings_problems) text += (text.empty() ? "" : "\n") + line;
+                menu->notify(text);
+            }
         }
     }
     std::unique_ptr<qilin::host::AudioOut> audio;
@@ -504,8 +510,11 @@ int main(int argc, char** argv) {
         bound_reset.clear();
         for (const mkdd::Binding& b : settings.reset) {
             int key = -1;
-            if (b.kind == mkdd::Binding::kKey && display && display->sdl_window() && (key = display->key_code(b.key.c_str())) < 0)
-                rt::fatal(nullptr, "mkdd.ini: [controls] reset = key:%s, but there's no key called '%s'", b.key.c_str(), b.key.c_str());
+            if (b.kind == mkdd::Binding::kKey && display && display->sdl_window() && (key = display->key_code(b.key.c_str())) < 0) {
+                // (A key this keyboard layout or SDL version doesn't name: left out, not a reason to stop.)
+                rt::log("mkdd.ini: [controls] reset = key:%s, but there's no key called '%s' here: left out", b.key.c_str(), b.key.c_str());
+                continue;
+            }
             bound_reset.push_back({b.kind, b.pad, key});
         }
         for (unsigned p = 0; p < mkdd::kPlayers; ++p) {
@@ -513,9 +522,11 @@ int main(int argc, char** argv) {
             for (unsigned c = 0; c < mkdd::kControlCount; ++c)
                 for (const mkdd::Binding& b : settings.players[p].controls[c]) {
                     int key = -1;
-                    if (b.kind == mkdd::Binding::kKey && display && display->sdl_window() && (key = display->key_code(b.key.c_str())) < 0)
-                        rt::fatal(nullptr, "mkdd.ini: [player%u] %s = key:%s, but there's no key called '%s'", p + 1,
-                                  mkdd::control_name(static_cast<mkdd::Control>(c)), b.key.c_str(), b.key.c_str());
+                    if (b.kind == mkdd::Binding::kKey && display && display->sdl_window() && (key = display->key_code(b.key.c_str())) < 0) {
+                        rt::log("mkdd.ini: [player%u] %s = key:%s, but there's no key called '%s' here: left out", p + 1,
+                                mkdd::control_name(static_cast<mkdd::Control>(c)), b.key.c_str(), b.key.c_str());
+                        continue;
+                    }
                     if (b.kind != mkdd::Binding::kPad) bound[p].has_keys = true;
                     bound[p].controls[c].push_back({b.kind, b.pad, key});
                 }

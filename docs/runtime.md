@@ -228,20 +228,19 @@ Two threads share the work. The game's thread records what the command stream as
 
 ## Settings (`settings.cpp`, v0.13.2; rebuilt in v0.18.0)
 
-`mkdd.ini` sits in the game's data folder, next to the saves. The first run writes it with every key and comments; the settings menu (`menu.cpp`) changes it and saves it back through a temporary file. Its layout follows the other Qilin recomps (BeatTheBeat's `beatthebeat.ini`):
-- `[display]`: `preset` (original, low-end, desktop: sets `internal_scale`, `anisotropy`, `vsync` and `true_color`; keys after it override it), `fullscreen`, `monitor`, `scaling` (integer, fit, stretch), `smooth`, `look` (plain, crt), `scanlines` and `mask` (0-100), `internal_scale` (1-8; `MKDD_SCALE` overrides it), `anisotropy` (1, 2, 4, 8, 16), `true_color` (on: every pixel keeps its 24 bits, as Dolphin's "Force 24-Bit Color"; off: the console's 18-bit colour with its dither wherever the game draws with alpha, and its copies narrowed as the console narrows them), `vsync`, `gpu`.
-- `[controls]`: `rumble`, `second_player` (off, second controller, first controller), and each of the remote's buttons, in the player's terms (`up down left right one two a plus minus home`), with a comma-separated list of inputs:
-  - `pad:<Xbox name>` (Up Down Left Right A B X Y Start Back Guide LB RB LT RT L3 R3);
-  - `key:<SDL key name>` (not Escape, F1 or F11, which are the program's);
+`mkdd.ini` sits in the game's data folder, next to the saves. The first run writes it with every key and comments; the settings menu (`menu.cpp`) changes it and saves it back through a temporary file. Its layout follows the other Qilin recomps (BeatTheBeat's `beatthebeat.ini`); the file's own comments describe every key (`settings_text` in `settings.cpp`):
+- `[display]`: `preset` (original, low-end, desktop: sets `render_resolution`, `anisotropy`, `vsync` and `true_color`, and original and low-end turn `smaa` and `fsr` off; keys after it override it), `fullscreen`, `monitor`, `aspect` (auto or width:height, 4:3 to 4:1), `hud` (edges, middle, stretched), `scaling` (integer, fit, stretch), `smooth`, `smaa`, `fsr`, `sharpness`, `look` (plain, crt), `scanlines` and `mask` (0-100), `render_resolution` (auto or 1-8; `MKDD_SCALE` overrides it), `anisotropy` (1, 2, 4, 8, 16), `true_color`, `vsync`, `low_latency`, `frame_rate` (original, display, unlimited; an older file's `60` reads as original), `gpu`, `performance_overlay`, `match_refresh`, `variable_refresh`.
+- `[sound]`: `volume`, `mute_unfocused`, `output` (stereo, surround, device), `device`.
+- `[controls]`: `stick_deadzone`, `stick_threshold`, `trigger_threshold`, `rumble_strength`, and `reset`, the console's reset button: a list of inputs (a pad's input on any controller), held while one is; empty by default.
+- `[player1]` to `[player4]`: `controller` (empty: automatic; a device's identity; none), `rumble`, and each of the GameCube controller's controls (`a b x y z l r start up down left right stick_up stick_down stick_left stick_right c_up c_down c_left c_right`), each a comma-separated list of inputs:
+  - `pad:<Xbox name>` (Up Down Left Right A B X Y Start Back Guide LB RB LT RT L3 R3, LSUp ... RSRight);
+  - `key:<SDL key name>` (not Escape, F1, F3, F9 or F11, which are the program's);
   - `mouse`, its left button.
 
-  An empty list leaves the button unused. Controls the file doesn't mention keep their defaults.
-- `[controls] reset`: the console's reset button, a list of inputs as above (a pad's input on any controller), held while one is; empty by default.
+  An empty list leaves the control unused. Controls the file doesn't mention keep their defaults.
 - `[console]`: the GameCube's own settings, from the next start: `language` (english, the only one on the USA disc), `sound` (mono, stereo) and `progressive` (true, false) are SRAM's (`OSGetLanguage`, `OSGetSoundMode`, `OSGetProgressiveMode`), and the game's own changes to the last two are saved back; `component_cable` (true by default) is the console's hardware, answered by `VIGetDTVStatus`: without one the game never offers progressive scan.
 
-v0.17.0's `settings.ini` (`[video] scale` and `[controls]`) is read once, written out as `mkdd.ini` and renamed `settings.ini.old`; a `key:Escape` in it becomes `key:H`.
-
-The main thread turns the pad, the keys and the mouse into the remote's buttons after each poll; WPAD turns those into its own bits. Mistakes stop the program at start-up, naming the line or the key, rather than leaving a button dead without saying why: an unknown name, section, button, key, preset or look; a number out of range; a control set twice; a reserved key.
+The main thread turns the pads, the keys and the mouse into the four GameCube controllers after each poll. A mistake in the file (an unknown name, section, control or key, a number out of range, a setting given twice, a reserved key, one controller named for two players) doesn't stop the game: every line that reads is kept, each that doesn't stays at its default, the file as it was is copied to `mkdd.ini.bad` and the rest written back, and what was wrong is shown at the bottom of the window for 20 s and in the log, line by line. A key the keyboard layout doesn't name is left out of its control, with a line in the log. Only a file that exists and can't be read at all stops the program, so that it isn't written over.
 
 `mkdd_settings_test` checks that every setting reads back as written, that edits and presets are read, that the old file carries over, and that mistakes are reported.
 

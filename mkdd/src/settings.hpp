@@ -142,13 +142,19 @@ unsigned render_scale(const Settings& s, int height_pixels);
 // Read settings from text. On a problem: false, with `error` saying what
 // and where ("line 12: ...").
 bool parse_settings(const std::string& text, Settings& out, std::string& error);
+// The same, reading on past problems: each bad line said in `errors` and left
+// out (its setting stays the default), every good one kept.
+Settings parse_settings_keeping_going(const std::string& text, std::vector<std::string>& errors);
 
 // The file's text for the given settings, with comments explaining each part.
 std::string settings_text(const Settings& s);
 
 // mkdd.ini in `folder`: read it, or write the defaults there if it's
-// missing. A file that doesn't read stops the program.
-Settings load_settings(const std::filesystem::path& folder);
+// missing. Lines that don't read are left at their defaults: the file as it
+// was is copied to mkdd.ini.bad, the rest written back, and what was wrong
+// added to `problems` (for the screen) and the log. A file that can't be
+// read at all stops the program, so that it isn't overwritten.
+Settings load_settings(const std::filesystem::path& folder, std::vector<std::string>* problems = nullptr);
 // Write it back (through a temporary file, so a failure leaves the old one);
 // false if it can't be written.
 bool save_settings(const std::filesystem::path& folder, const Settings& s);

@@ -3,7 +3,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
+#include <vector>
 
 #include "settings.hpp"
 #include "qilin/host/pad.hpp"
@@ -335,6 +337,14 @@ int main() {
         check(mkdd::parse_settings(mkdd::settings_text(s), back, e) && same(back, s), "every setting reads back as written");
     }
     {
+        // Names from drivers can end in a tab: quoted, so reading doesn't trim it (found by fuzzing).
+        mkdd::Settings s = mkdd::default_settings(), back;
+        s.sound_device = "\tUSB Audio\t", s.monitor = "Dell\v";
+        std::string e;
+        check(mkdd::parse_settings(mkdd::settings_text(s), back, e) && back.sound_device == s.sound_device && back.monitor == s.monitor,
+              "white space other than a space at a name's ends reads back");
+    }
+    {
         // The data folder's file: written with the defaults, then kept.
         const std::filesystem::path dir = std::filesystem::temp_directory_path() / "mkdd_settings_test";
         std::filesystem::remove_all(dir);
@@ -352,6 +362,30 @@ int main() {
         const mkdd::Settings unwritable = mkdd::load_settings(dir / "not-a-folder");
         check(same(unwritable, d), "a folder that can't be written: the defaults, without stopping");
         check(!mkdd::save_settings(dir / "not-a-folder", changed), "and saving there says it failed");
+        // A file with mistakes: the game starts, the good lines kept, the bad ones at their defaults.
+        const std::string broken = "[display]\nlook = crt\nvsync = maybe\nanisotropy = 3\n[nonsense]\nvolume = 3\n[sound]\nvolume = 40\n"
+                                   "[player1]\na = key:Q, pad:Nope\nb = key:W\n[player2]\ncontroller = same\n[player3]\ncontroller = same\n";
+        { std::ofstream(dir / "mkdd.ini", std::ios::binary) << broken; }
+        std::vector<std::string> problems;
+        const mkdd::Settings kept = mkdd::load_settings(dir, &problems);
+        check(kept.look == host::Look::crt && kept.vsync == d.vsync && kept.anisotropy == d.anisotropy && kept.volume == 40 &&
+                  kept.players[0].controls[mkdd::kCtlA] == d.players[0].controls[mkdd::kCtlA] &&
+                  kept.players[0].controls[mkdd::kCtlB] == std::vector<Binding>{{Binding::kKey, 0, "W"}} &&
+                  kept.players[1].controller == "same" && kept.players[2].controller.empty(),
+              "a file with mistakes keeps every line that reads; the others (and a whole unknown section) are the defaults");
+        check(!problems.empty() && problems[0].find("5 lines") != std::string::npos, "and the problems are told: five of them");
+        check(std::filesystem::exists(dir / "mkdd.ini.bad") && [&] {
+                  std::ifstream in(dir / "mkdd.ini.bad", std::ios::binary);
+                  return std::string(std::istreambuf_iterator<char>(in), {}) == broken;
+              }(),
+              "the file as it was is kept as mkdd.ini.bad");
+        std::string e;
+        mkdd::Settings reread;
+        check([&] {
+                  std::ifstream in(dir / "mkdd.ini", std::ios::binary);
+                  return mkdd::parse_settings(std::string(std::istreambuf_iterator<char>(in), {}), reread, e) && same(reread, kept);
+              }(),
+              "and mkdd.ini is written back clean");
         std::filesystem::remove_all(dir);
     }
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");
