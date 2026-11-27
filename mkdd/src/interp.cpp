@@ -248,7 +248,10 @@ bool Blender::pair(const gx::Frame& prev, const gx::Frame& cur) {
         for (const gx::Load& l : cur.loads) g_probe->untagged += l.tag == 0 || l.view == gx::kNoView;
         if (prev.views.size() != views) ++g_probe->view_changes;
     }
-    if (cur.state_info.size() != cur.states.size() || views == 0) return false;
+    if (cur.state_info.size() != cur.states.size() || views == 0 || prev.widening != cur.widening) {
+        last_step_.assign(views, -1.0f);
+        return false;
+    }
     // Views pair by their order in the frame, which holds while there are as
     // many: a camera a player, drawn in the same order every frame. Another
     // count is a change of scene.
@@ -380,34 +383,79 @@ constexpr size_t kTexRows = offsetof(gx::State, posmtx) + 30 * sizeof(float[4]),
 void Blender::pair_textures(const gx::Frame& prev, const gx::Frame& cur) {
     tex_.clear();
     if (!counts_.paired || prev.state_info.size() != prev.states.size()) return;
-    prev_state_of_.assign(prev.loads.size(), gx::kNoLoad);
-    for (size_t j = 0; j < prev.state_info.size(); ++j)
-        for (uint32_t l : prev.state_info[j].load)
-            if (l < prev_state_of_.size() && prev_state_of_[l] == gx::kNoLoad) prev_state_of_[l] = uint32_t(j);
-    float to[30][4];
-    for (size_t i = 0; i < cur.states.size(); ++i) {
-        float w;  // projection[3][2]: -1 for a perspective projection (flat drawing isn't blended)
-        cur.states.read(i, offsetof(gx::State, projection) + 14 * sizeof(float), sizeof w, &w);
-        if (w != -1.0f) continue;
-        uint32_t j = gx::kNoLoad;
-        for (uint32_t l : cur.state_info[i].load)
-            if (l != gx::kNoLoad && prepared_[l].how == 1 && prepared_[l].prev < prev_state_of_.size()) {
-                j = prev_state_of_[prepared_[l].prev];
+    // A position load may be reused by several materials. Match their state
+    // sequences separately; using the first state for every material makes a
+    // later material's texture scroll towards an unrelated transform.
+    matched_loads_.assign(prev.loads.size(), 0);
+    for (const Prepared& p : prepared_)
+        if (p.how == 1) matched_loads_[p.prev] = 1;
+    prev_tex_states_.clear(), cur_tex_states_.clear();
+    const auto perspective = [](const gx::Frame& f, size_t i) {
+        float w;
+        f.states.read(i, offsetof(gx::State, projection) + 14 * sizeof(float), sizeof w, &w);
+        return w == -1.0f;
+    };
+    for (size_t i = 0; i < prev.state_info.size(); ++i) {
+        if (!perspective(prev, i)) continue;
+        for (uint32_t l : prev.state_info[i].load)
+            if (l < matched_loads_.size() && matched_loads_[l]) {
+                prev_tex_states_.push_back({l, uint32_t(i)});
                 break;
             }
-        if (j == gx::kNoLoad) continue;
-        TexBlend& tb = tex_.emplace_back();
-        tb.state = uint32_t(i), tb.groups = 0;
-        prev.states.read(j, kTexRows, kTexBytes, tb.from);
-        cur.states.read(i, kTexRows, kTexBytes, to);
-        for (unsigned g = 0; g < 10; ++g) {
-            if (std::memcmp(tb.from[3 * g], to[3 * g], 3 * sizeof(float[4])) == 0) continue;
-            bool jump = false;
-            for (unsigned r = 3 * g; r < 3 * g + 3; ++r) jump |= !(std::fabs(to[r][3] - tb.from[r][3]) <= kTextureJump);
-            if (jump) ++counts_.texture_snaps;
-            else tb.groups |= 1u << g, ++counts_.textures;
-        }
-        if (!tb.groups) tex_.pop_back();
+    }
+    for (size_t i = 0; i < cur.state_info.size(); ++i) {
+        if (!perspective(cur, i)) continue;
+        for (uint32_t l : cur.state_info[i].load)
+            if (l < prepared_.size() && prepared_[l].how == 1) {
+                cur_tex_states_.push_back({prepared_[l].prev, uint32_t(i)});
+                break;
+            }
+    }
+    const auto order = [](const TextureState& a, const TextureState& b) {
+        return a.load != b.load ? a.load < b.load : a.state < b.state;
+    };
+    std::sort(prev_tex_states_.begin(), prev_tex_states_.end(), order);
+    std::sort(cur_tex_states_.begin(), cur_tex_states_.end(), order);
+    // If material order changes, equal counts alone aren't enough. The image
+    // and palette bindings must still identify the same material.
+    const auto same_images = [&](uint32_t j, uint32_t i) {
+        uint32_t a[4], b[4];
+        for (unsigned bank : {0x80u, 0xA0u})
+            for (unsigned reg : {bank + 8, bank + 20, bank + 24}) {
+                const size_t at = offsetof(gx::State, bp) + reg * sizeof(uint32_t);
+                prev.states.read(j, at, sizeof a, a);
+                cur.states.read(i, at, sizeof b, b);
+                if (std::memcmp(a, b, sizeof a) != 0) return false;
+            }
+        return true;
+    };
+    size_t p = 0;
+    float to[30][4];
+    for (size_t c = 0; c < cur_tex_states_.size();) {
+        const uint32_t load = cur_tex_states_[c].load;
+        size_t ce = c;
+        while (ce < cur_tex_states_.size() && cur_tex_states_[ce].load == load) ++ce;
+        while (p < prev_tex_states_.size() && prev_tex_states_[p].load < load) ++p;
+        size_t pe = p;
+        while (pe < prev_tex_states_.size() && prev_tex_states_[pe].load == load) ++pe;
+        if (ce - c == pe - p)
+            for (size_t n = 0; n < ce - c; ++n) {
+                const uint32_t i = cur_tex_states_[c + n].state, j = prev_tex_states_[p + n].state;
+                if (!same_images(j, i)) continue;
+                TexBlend& tb = tex_.emplace_back();
+                tb.state = i, tb.groups = 0;
+                prev.states.read(j, kTexRows, kTexBytes, tb.from);
+                cur.states.read(i, kTexRows, kTexBytes, to);
+                for (unsigned g = 0; g < 10; ++g) {
+                    if (std::memcmp(tb.from[3 * g], to[3 * g], 3 * sizeof(float[4])) == 0) continue;
+                    bool jump = false;
+                    for (unsigned r = 3 * g; r < 3 * g + 3; ++r) jump |= !(std::fabs(to[r][3] - tb.from[r][3]) <= kTextureJump);
+                    if (jump) ++counts_.texture_snaps;
+                    else tb.groups |= 1u << g, ++counts_.textures;
+                }
+                if (!tb.groups) tex_.pop_back();
+            }
+        c = ce;
     }
 }
 

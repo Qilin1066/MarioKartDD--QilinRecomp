@@ -414,6 +414,34 @@ void test_hud() {
     check(!hud::anchor_of(hud::Place::stretched, 0, 608, 100, 200, false, a), "stretched: nothing is placed");
 }
 
+unsigned shape_calls = 0;
+void test_confirming_shape() {
+    if (!gx::early_frame_end()) return;
+    hud::set_place(hud::Place::stretched);
+    hud::set_widening_source([] { ++shape_calls; return g_test_widening; });
+    gx::set_copy_kept(true);
+    Gx g;
+    g.setup();
+    g_test_widening = 1.5f;
+    for (unsigned i = 0; i < 4; ++i) g.quad(20, 20, 100, 60), g.end();
+    g.quad(20, 20, 100, 60);
+    gx::request_frame_end(64 << 8);
+    g.BP(0x45, 2);
+    const auto foretold = gx::next_frame(0);
+    check(foretold && foretold->foretold && foretold->widening == 1.5f, "early frame keeps its recorded shape");
+    const unsigned calls = shape_calls;
+    g_test_widening = 1.0f;  // the game has changed scene before making the real copy
+    const auto real = g.end();
+    check(real && real->confirming && real->widening == 1.5f, "real copy keeps the earlier picture's shape");
+    check(shape_calls == calls, "a confirming copy never advances camera settings twice");
+    g.quad(20, 20, 100, 60);
+    const auto next = g.end();
+    check(next && !next->confirming && next->widening == 1 && shape_calls == calls + 1,
+          "the next drawn frame takes the new scene's shape");
+    gx::set_copy_kept(false);
+    hud::set_widening_source(nullptr);
+}
+
 const rt::FunctionEntry kNoFunctions[] = {{0x80004000u, [](rt::Cpu&) {}}};
 
 }  // namespace
@@ -423,6 +451,7 @@ int main() {
     gx::set_rendering(true);       // (frames are kept for whoever takes them: here, the test)
     test_game_side();
     test_hud();
+    test_confirming_shape();
     if (g_failures) {
         std::printf("enhance_test: %d check(s) failed\n", g_failures);
         return 1;

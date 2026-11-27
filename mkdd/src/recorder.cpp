@@ -1635,13 +1635,20 @@ void survey(const Frame& f, uint64_t frame_number) {
 }  // namespace
 
 // ---- the frame's end: at its copy to the frame buffer, or early (request_frame_end)
+static float g_drawn_widening = 1.0f;
 static void end_frame(Frame& f) {
     f.captured = g_capture_next;
     g_capture_next = false;
     f.serial = g_stats.frames.load(std::memory_order_relaxed) + 1;
     if (g_survey) [[unlikely]] survey(f, g_stats.frames.load(std::memory_order_relaxed));
     textures_end_frame(f);
-    hud::place(f);  // (a widened picture: the flat parts back in proportion)
+    // A confirming frame contains only the previous picture's real copy.
+    // It must keep that picture's shape and must not advance camera settings again.
+    if (f.confirming) f.widening = g_drawn_widening;
+    else {
+        hud::place(f);
+        g_drawn_widening = f.widening;
+    }
     g_stats.frames.fetch_add(1, std::memory_order_relaxed);
     static uint64_t passes = 0;  // (MKDD_LATENCY numbers the passes' frames: a confirming copy isn't one)
     const bool counted = !f.confirming;

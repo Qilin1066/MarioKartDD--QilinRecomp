@@ -567,6 +567,11 @@ int main(int argc, char** argv) {
     uint64_t sequence = 0, shown = 0;
     uint64_t taken = 0;                                // frames taken from the recorder, numbered as it hands them over
     std::unordered_map<uint32_t, uint64_t> xfb_frame;  // the frame that last copied to each XFB (MKDD_LATENCY)
+    std::unordered_map<uint32_t, float> xfb_aspects;  // each buffer keeps the shape of its recorded picture
+    const auto aspect_for = [&](uint32_t at) {
+        const auto it = xfb_aspects.find(at & 0x1FFFFFFFu);
+        return it == xfb_aspects.end() ? 4.0f / 3.0f : it->second;
+    };
     uint32_t newest_xfb = 0;                           // the frame buffer the newest frame copied to
     std::unique_ptr<mkdd::gx::Frame> waiting_frame;    // taken while waiting to present, drawn next pass
     bool newest_foretold = false;                      // the newest frame's copy is foretold, its real one not yet come
@@ -744,7 +749,11 @@ int main(int argc, char** argv) {
                 }() : 0)) {
                 if (!f->confirming) ++taken;  // (MKDD_LATENCY numbers the passes' frames)
                 for (const auto& c : f->copies)
-                    if (c.to_xfb) xfb_frame[c.dest & 0x1FFFFFFFu] = taken, newest_xfb = c.dest, newest_foretold = f->foretold;
+                    if (c.to_xfb) {
+                        xfb_frame[c.dest & 0x1FFFFFFFu] = taken;
+                        xfb_aspects[c.dest & 0x1FFFFFFFu] = f->aspect();
+                        newest_xfb = c.dest, newest_foretold = f->foretold;
+                    }
                 if (between) {  // drawn as ever, and kept: the pictures until the next one are blended towards it
                     mkdd::gx::Frame* kept = f.get();
                     renderer->render_held(std::move(f));
@@ -758,14 +767,14 @@ int main(int argc, char** argv) {
                 if (mkdd::latency::hashing_frames() && display && !display->sdl_window())  // MKDD_PICTURE_HASHES: each frame's own picture
                     for (const auto& c : f->copies)
                         if (const qilin::host::Image* x = c.to_xfb && &c == &f->copies.back() ? renderer->xfb(c.dest) : nullptr) {
-                            display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), x->height / renderer_scale);
+                            display->present_image(x->image, x->view, x->width, x->height, f->aspect(), x->height / renderer_scale);
                             mkdd::latency::hash_picture(display->read_back(), mkdd::frame_count() / 60.0,
                                                         f->foretold ? "foretold" : f->confirming ? "real" : "frame");
                         }
                 if (f->captured && display) {  // MKDD_DFF: our picture of the captured frame, beside it
                     for (const auto& c : f->copies)
                         if (const qilin::host::Image* x = c.to_xfb ? renderer->xfb(c.dest) : nullptr) {
-                            display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), x->height / renderer_scale);
+                            display->present_image(x->image, x->view, x->width, x->height, f->aspect(), x->height / renderer_scale);
                             const std::vector<uint8_t> px = display->read_back();
                             std::string name = std::getenv("MKDD_DFF");
                             name = name.substr(0, name.rfind('@')) + ".ppm";
@@ -858,19 +867,20 @@ int main(int argc, char** argv) {
                 next_present_ns += period;
             }
             const double phase = mkdd::interp::phase(arrived_ns, seen);
+            float picture_aspect = newest->aspect();
             const qilin::host::Image* x = phase < 1.0 ? renderer->render_between(float(phase)) : nullptr;
             if (!x) {  // the newest frame itself (its phase has come, or it can't be blended): its own picture
                 uint32_t at = vi_xfb;
                 for (const auto& c : newest->copies)
                     if (c.to_xfb) at = c.dest;
                 x = renderer->xfb(at);
-                if (!x) x = renderer->xfb(vi_xfb);
+                if (!x) x = renderer->xfb(vi_xfb), picture_aspect = aspect_for(vi_xfb);
                 shown_phase = 1.0;
             } else {
                 shown_phase = phase;
             }
             if (!x) continue;  // (no picture of it yet)
-            display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(),
+            display->present_image(x->image, x->view, x->width, x->height, picture_aspect,
                                    vi_h ? vi_h : x->height / renderer->scale());
             mkdd::latency::presented(taken);  // (blended or whole, the newest frame is in it)
             if ((mkdd::latency::checking() || mkdd::latency::hashing()) && !display->sdl_window()) {
@@ -893,7 +903,7 @@ int main(int argc, char** argv) {
             const bool cpu_wrote = xfb && renderer->cpu_wrote_xfb(xfb);
             if (xfb && newest_xfb && !newest_foretold && mkdd::gx::early_frame_end() && !cpu_wrote) xfb = newest_xfb;
             if (const qilin::host::Image* x = xfb && !cpu_wrote ? renderer->xfb(xfb) : nullptr) {
-                display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(), h);
+                display->present_image(x->image, x->view, x->width, x->height, aspect_for(xfb), h);
                 if (const auto it = xfb_frame.find(xfb & 0x1FFFFFFFu); it != xfb_frame.end()) mkdd::latency::presented(it->second);
                 if ((mkdd::latency::checking() || mkdd::latency::hashing()) && !display->sdl_window()) {
                     const std::vector<uint8_t> px = display->read_back();
@@ -906,7 +916,7 @@ int main(int argc, char** argv) {
             } else {
                 uint64_t s2 = sequence - 1;
                 if (mkdd::take_frame(&s2, 0, rgba, w, h)) {
-                    display->present(w, h, rgba.data(), mkdd::enhance::shown_aspect(), h);
+                    display->present(w, h, rgba.data(), 4.0f / 3.0f, h);  // CPU-drawn console screens
                     g_pictures_shown.fetch_add(1, std::memory_order_relaxed);
                     if (menu) menu->frame_shown();
                 }
@@ -944,7 +954,7 @@ int main(int argc, char** argv) {
                         x = renderer->xfb(at);
                     }
                     if (!x) break;
-                    display->present_image(x->image, x->view, x->width, x->height, mkdd::enhance::shown_aspect(),
+                    display->present_image(x->image, x->view, x->width, x->height, held->aspect(),
                                            vi_h ? vi_h : x->height / renderer->scale());
                     std::snprintf(name, sizeof name, "%s/frame%05llu_%uof%u%s.ppm", dump, static_cast<unsigned long long>(shown / every), k,
                                   dump_burst, blended || k == dump_burst ? "" : "_unblended");

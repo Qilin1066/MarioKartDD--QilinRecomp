@@ -4,6 +4,21 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-27
+
+### Fixed
+
+- Recorded frames and their frame buffers retain their own aspect ratio. A queued race picture no longer borrows the shape of a newer menu or movie; captures use the recorded shape too.
+- A real-copy confirmation inherits the earlier picture's shape and does not advance camera settings a second time. Interpolation skips pairs recorded at different aspect ratios.
+- Texture interpolation matches material-state sequences under each paired model load, with matching counts and image/palette bindings. A second material no longer scrolls towards the first material's texture transform; ambiguous or reordered materials keep their current transform.
+- HUD elements in vertically split views are grouped only within the same clipped view. Oversized elements crossing the dividing line no longer pull another player's HUD away from its anchor.
+- HUD callbacks are published atomically and sampled once per frame. Repeated settings updates no longer race the recording thread or change the callback between its null check and call.
+
+### Tests
+
+- Added material-count/order, split-view boundary, queued aspect ratio, recycled-frame, incompatible-projection and real-copy confirmation regressions.
+- Added a concurrent callback-publication test to the ThreadSanitizer job. The old callbacks reproduce a data race; the corrected code passes the same test.
+
 ## [0.1.1] - 2026-11-26
 
 ### Fixed

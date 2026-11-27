@@ -104,14 +104,16 @@ private:
         uint32_t prev;  // paired: the older frame's load
     };
     // A state's texture matrices (XF rows 30-59, GX_TEXMTX0-9) blended from those of the older
-    // frame's state that drew the same thing (the state its first paired position matrix was
-    // loaded in): an animated texture (a scroll, water) moves between frames as its model does.
+    // frame's matching material state under its first paired position load. Counts and image
+    // bindings must agree: an animated texture moves without borrowing another material's transform.
     struct TexBlend {
         uint32_t state, groups;  // groups: bit g, the matrix at row 30 + 3g
         float from[30][4];
     };
     std::vector<TexBlend> tex_;
-    std::vector<uint32_t> prev_state_of_;  // the older frame's first state each of its loads is in
+    struct TextureState { uint32_t load, state; };
+    std::vector<TextureState> prev_tex_states_, cur_tex_states_;
+    std::vector<uint8_t> matched_loads_;
     struct ViewPair {
         bool blend;
         Pose from, to;      // the camera: rotation and eye position

@@ -111,7 +111,7 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: xvfb-run -a env QILIN_REQUIRE_GRAPHICS=1 ctest --test-dir build --output-on-failure --timeout 600
 
-  # The tests of the threads' handoffs and the guest's clock with ThreadSanitizer (Clang 19). Newer
+  # Thread handoffs, the guest clock and HUD callback publication with ThreadSanitizer (Clang 19). Newer
   # kernels randomise mmap over more bits than TSan's memory layout allows: lowered for the run.
   tsan:
     name: linux-x64-tsan
@@ -128,8 +128,8 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQILIN_SANITIZE=thread -DQILIN_HOST=OFF \
             -DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19
       - name: Build
-        run: cmake --build build --parallel --target mkdd_threads_test mkdd_guest_clock_test
+        run: cmake --build build --parallel --target mkdd_threads_test mkdd_guest_clock_test mkdd_interp_test
       - name: Test
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
-        run: ctest --test-dir build -R 'mkdd_threads_test|mkdd_guest_clock_test' --output-on-failure --timeout 300
+        run: ctest --test-dir build -R 'mkdd_threads_test|mkdd_guest_clock_test|mkdd_interp_test' --output-on-failure --timeout 300

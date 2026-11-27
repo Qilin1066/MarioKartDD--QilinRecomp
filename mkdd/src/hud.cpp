@@ -28,8 +28,10 @@ namespace mkdd::hud {
 namespace {
 
 std::atomic<Place> g_place{Place::edges};
-float (*g_widening)() = nullptr;
-bool (*g_follows)(const gx::Frame&, const gx::Draw&) = nullptr;
+using WideningSource = float (*)();
+using FollowsSource = bool (*)(const gx::Frame&, const gx::Draw&);
+std::atomic<WideningSource> g_widening{nullptr};
+std::atomic<FollowsSource> g_follows{nullptr};
 
 constexpr float kFills = 0.9f;     // of the view's width: not a part of the HUD
 constexpr float kLineGap = 0.03f;  // of the view's width: pieces of one line
@@ -37,7 +39,7 @@ constexpr float kReaches = 0.05f;  // of the view's width: a part this near the 
 
 struct Flat {
     uint32_t draw;
-    float left, right;     // the view, EFB pixels
+    float left, right, top, bottom;  // the clipped view, EFB pixels
     float x0, x1, y0, y1;  // the draw's extent, EFB pixels
     float sign;            // the vertex shader's flip of x (the viewport's width negative)
     bool follows;
@@ -68,8 +70,8 @@ void extent(const gx::Frame& f, const gx::Draw& d, const gx::State& s, const V* 
 }  // namespace
 
 void set_place(Place p) { g_place.store(p, std::memory_order_relaxed); }
-void set_widening_source(float (*source)()) { g_widening = source; }
-void set_follows_world(bool (*source)(const gx::Frame&, const gx::Draw&)) { g_follows = source; }
+void set_widening_source(float (*source)()) { g_widening.store(source, std::memory_order_relaxed); }
+void set_follows_world(bool (*source)(const gx::Frame&, const gx::Draw&)) { g_follows.store(source, std::memory_order_relaxed); }
 
 bool anchor_of(Place p, float left, float right, float x0, float x1, bool follows_world, float& anchor) {
     const float width = right - left;
@@ -89,7 +91,10 @@ bool anchor_of(Place p, float left, float right, float x0, float x1, bool follow
 }
 
 void place(gx::Frame& f) {
-    const float w = g_widening ? g_widening() : 1.0f;  // (asked every frame: the source keeps its own time by it)
+    const auto source = g_widening.load(std::memory_order_relaxed);
+    const auto follows = g_follows.load(std::memory_order_relaxed);
+    const float w = source ? source() : 1.0f;  // one snapshot of each callback for the whole frame
+    f.widening = w;  // presentation must use this frame's shape, even with no HUD or a stretched HUD
     const Place p = g_place.load(std::memory_order_relaxed);
     if (!(w > 1.001f) || p == Place::stretched) return;
 
@@ -118,7 +123,9 @@ void place(gx::Frame& f) {
         fl.y0 = std::min(ya, yb), fl.y1 = std::max(ya, yb);
         fl.left = std::max(vx, float(d.scissor[0]));
         fl.right = std::min(vx + vw, float(d.scissor[0] + d.scissor[2]));
-        if (!(fl.right > fl.left)) continue;
+        fl.top = std::max(d.viewport[1], float(d.scissor[1]));
+        fl.bottom = std::min(d.viewport[1] + d.viewport[3], float(d.scissor[1] + d.scissor[3]));
+        if (!(fl.right > fl.left) || !(fl.bottom > fl.top)) continue;
         if (std::min(fl.x1, fl.right) - std::max(fl.x0, fl.left) >= kFills * (fl.right - fl.left)) continue;
         // Read back by a texture copy later in the frame: something's work area.
         bool copied = false;
@@ -129,7 +136,7 @@ void place(gx::Frame& f) {
                      float(c.src[1]) < fl.y1 && float(c.src[1] + c.src[3]) > fl.y0;
         }
         if (copied) continue;
-        fl.follows = g_follows && g_follows(f, d);
+        fl.follows = follows && follows(f, d);
         flats.push_back(fl);
     }
     if (flats.empty()) return;
@@ -146,7 +153,7 @@ void place(gx::Frame& f) {
         for (uint32_t j = i + 1; j < flats.size(); ++j) {
             const Flat& a = flats[i];
             const Flat& b = flats[j];
-            if (a.left != b.left || a.right != b.right || a.follows || b.follows) continue;
+            if (a.left != b.left || a.right != b.right || a.top != b.top || a.bottom != b.bottom || a.follows || b.follows) continue;
             const float shared = std::min(a.y1, b.y1) - std::max(a.y0, b.y0);
             if (shared < 0.5f * std::min(a.y1 - a.y0, b.y1 - b.y0) || !(shared > 0)) continue;
             if (std::max(a.x0, b.x0) - std::min(a.x1, b.x1) > kLineGap * (a.right - a.left)) continue;

@@ -1,9 +1,11 @@
 // Interpolation and widened HUD integration without a window, GPU or game data.
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <thread>
 #include "hud.hpp"
 #include "interp.hpp"
 
@@ -54,7 +56,8 @@ void add_model(gx::Frame& f, uint16_t view, float x) {
     f.loads.push_back(l);
     f.states.push(s);
 }
-void add_hud(gx::Frame& f) {
+void add_hud(gx::Frame& f, float x0 = 20, float y0 = 20, float x1 = 100, float y1 = 60,
+             int top = 0, int height = 480) {
     gx::State s{};
     s.posmtx[0][0] = s.posmtx[1][1] = s.posmtx[2][2] = 1;
     s.projection[0][0] = 2.0f / 640;
@@ -67,18 +70,20 @@ void add_hud(gx::Frame& f) {
     d.state = uint32_t(f.states.size());
     d.direct = 1;
     d.index_count = 3;
+    d.first_index = uint32_t(f.vertices.size());
     d.viewport[2] = 640, d.viewport[3] = 480;
-    d.scissor[2] = 640, d.scissor[3] = 480;
+    d.scissor[1] = top, d.scissor[2] = 640, d.scissor[3] = height;
     f.states.push(s);
     f.state_info.push_back(info(gx::kNoView));
-    f.vertices.resize(3);
-    const float xy[3][2] = {{20, 20}, {100, 20}, {20, 60}};
+    f.vertices.resize(f.vertices.size() + 3);
+    const float xy[3][2] = {{x0, y0}, {x1, y0}, {x0, y1}};
     for (unsigned i = 0; i < 3; ++i) {
-        f.vertices[i] = {};
-        f.vertices[i].pos[0] = xy[i][0], f.vertices[i].pos[1] = xy[i][1];
+        auto& v = f.vertices[d.first_index + i];
+        v = {};
+        v.pos[0] = xy[i][0], v.pos[1] = xy[i][1];
     }
+    f.packets.push_back({gx::Packet::kDraw, uint32_t(f.draws.size())});
     f.draws.push_back(d);
-    f.packets.push_back({gx::Packet::kDraw, 0});
 }
 float widening = 1;
 void widened_interpolation() {
@@ -130,11 +135,121 @@ void independent_views() {
         check(std::memcmp(&own, &out[1], sizeof own) == 0, "phase one remains the exact real frame");
     }
 }
+
+void split_hud_boundary() {
+    widening = 4.0f / 3;
+    mkdd::hud::set_widening_source([] { return widening; });
+    mkdd::hud::set_place(mkdd::hud::Place::edges);
+    gx::Frame f;
+    // Both sprites extend beyond their own player's scissor. Their unclipped
+    // bounds overlap vertically and are close horizontally, but they are not
+    // pieces of one player's line of text.
+    add_hud(f, 100, 210, 200, 250, 0, 240);
+    add_hud(f, 210, 220, 310, 260, 240, 240);
+    mkdd::hud::place(f);
+    const auto upper = f.states[f.draws[0].state], lower = f.states[f.draws[1].state];
+    const float k = 1.0f / widening;
+    check(std::fabs(upper.projection[0][3] + 1.0f) < 1e-5f, "upper player's HUD keeps its own left anchor");
+    check(std::fabs(lower.projection[0][3] - (-k - 0.1875f * (1 - k))) < 1e-5f,
+          "lower player's HUD keeps its own centre anchor");
+    mkdd::hud::set_widening_source(nullptr);
+}
+
+void materials(gx::Frame& f, float a, float b) {
+    auto s = f.states[0];
+    f.states.clear();
+    s.posmtx[30][0] = s.posmtx[31][1] = s.posmtx[32][2] = 1.0f;
+    s.posmtx[30][3] = a;
+    s.bp[0x94 / 4][0x94 % 4] = 0x100;
+    f.states.push(s);
+    s.posmtx[30][3] = b;
+    s.bp[0x94 / 4][0x94 % 4] = 0x200;
+    f.states.push(s);
+    f.state_info.push_back(f.state_info[0]);
+}
+
+void texture_materials() {
+    gx::Frame prev, cur;
+    add_view(prev), add_view(cur);
+    add_model(prev, 0, 0), add_model(cur, 0, 0.2f);
+    materials(prev, 0.1f, 0.2f);
+    materials(cur, 0.12f, 0.22f);
+    interp::Blender b;
+    check(b.pair(prev, cur), "multi-material frames pair");
+    std::vector<gx::State> out(cur.states.size());
+    b.states(cur, 0.5f, out.data());
+    check(std::fabs(out[0].posmtx[30][3] - 0.11f) < 1e-5f, "first material scrolls from its own previous state");
+    check(std::fabs(out[1].posmtx[30][3] - 0.21f) < 1e-5f, "second material never scrolls from the first material");
+    const auto first = cur.states[0];
+    // A changed material count cannot be matched by ordinal.
+    const auto only = cur.states[1];
+    cur.states.clear();
+    cur.states.push(only);
+    cur.state_info.resize(1);
+    b.pair(prev, cur);
+    b.states(cur, 0.5f, out.data());
+    check(out[0].posmtx[30][3] == 0.22f, "ambiguous material counts keep the new texture transform");
+    cur.states.push(first);
+    cur.state_info.push_back(cur.state_info[0]);
+    b.pair(prev, cur);
+    b.states(cur, 0.5f, out.data());
+    check(out[0].posmtx[30][3] == 0.22f && out[1].posmtx[30][3] == 0.12f,
+          "reordered image bindings never blend different materials");
+}
+
+void recorded_shape() {
+    mkdd::hud::set_widening_source([] { return widening; });
+    mkdd::hud::set_place(mkdd::hud::Place::stretched);
+    gx::Frame wide, menu;
+    widening = 2;
+    mkdd::hud::place(wide);  // no HUD and stretched still need shape metadata
+    widening = 1;
+    mkdd::hud::place(menu);
+    check(wide.widening == 2 && menu.widening == 1, "queued frames retain independent shapes");
+    check(std::fabs(wide.aspect() - 8.0f / 3) < 1e-6f, "an older frame keeps its own presentation aspect");
+    add_view(wide), add_view(menu);
+    add_model(wide, 0, 0), add_model(menu, 0, 0.2f);
+    interp::Blender b;
+    check(!b.pair(wide, menu), "aspect changes never blend incompatible projections");
+    wide.clear();
+    check(wide.widening == 1, "recycled frames reset their shape");
+    mkdd::hud::set_widening_source(nullptr);
+}
+
+float twice_wide() { return 2; }
+bool follows_world(const gx::Frame&, const gx::Draw&) { return true; }
+void callback_handoff() {
+    mkdd::hud::set_place(mkdd::hud::Place::edges);
+    std::atomic<bool> start{false};
+    std::thread setter([&] {
+        while (!start.load(std::memory_order_acquire)) {}
+        for (unsigned i = 0; i < 20000; ++i) {
+            mkdd::hud::set_widening_source(i & 1 ? twice_wide : nullptr);
+            mkdd::hud::set_follows_world(i & 1 ? follows_world : nullptr);
+        }
+    });
+    start.store(true, std::memory_order_release);
+    bool valid = true;
+    for (unsigned i = 0; i < 20000; ++i) {
+        gx::Frame f;
+        add_hud(f);
+        mkdd::hud::place(f);
+        valid = valid && (f.widening == 1 || f.widening == 2);
+    }
+    setter.join();
+    check(valid, "callback changes use one valid snapshot for each frame");
+    mkdd::hud::set_widening_source(nullptr);
+    mkdd::hud::set_follows_world(nullptr);
+}
 }  // namespace
 
 int main() {
     widened_interpolation();
     independent_views();
+    split_hud_boundary();
+    texture_materials();
+    recorded_shape();
+    callback_handoff();
     std::printf("interp_test: %d failures\n", failures);
     return failures ? 1 : 0;
 }

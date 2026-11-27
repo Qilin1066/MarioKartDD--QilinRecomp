@@ -366,6 +366,8 @@ static_assert(States::kBlocks <= 32, "a block mask is 32 bits");
 
 // One frame: everything from one XFB copy to the next.
 struct Frame {
+    float widening = 1.0f;  // the shape this frame was recorded for, not the producer's newest frame
+    float aspect() const { return (4.0f / 3.0f) * widening; }
     // (The recorder writes every byte of each vertex and index it makes room for.)
     std::vector<Vertex, Unfilled<Vertex>> vertices;
     std::vector<SmallVertex, Unfilled<SmallVertex>> small;  // draws with PipelineKey::small_vertices kLayoutSmall index these
@@ -388,6 +390,7 @@ struct Frame {
     // Empty again, keeping the vectors' capacity (recycle_frame). A new
     // member must be reset here too.
     void clear() {
+        widening = 1.0f;
         vertices.clear(), small.clear(), tiny.clear(), indices.clear(), states.clear(), draws.clear(), copies.clear(), packets.clear();
         state_info.clear(), loads.clear(), views.clear();
         textures.clear(), released.clear();
