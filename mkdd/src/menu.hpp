@@ -91,6 +91,7 @@ private:
     uint32_t capture_held_ = 0;  // the pad's buttons held when it began (they don't count)
     bool wait_release_ = false;  // after a pad button was taken: gamepad navigation back once it's let go
     std::string note_;           // said under the table (what moved where)
+    std::string restore_note_;   // why a save couldn't be restored (the Game page's own)
     bool history_loaded_ = false;
     std::vector<SaveBackup> save_history_;
     std::vector<std::string> sound_devices_;

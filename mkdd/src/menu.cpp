@@ -642,6 +642,12 @@ void Menu::controls_page() {
     if (ImGui::Button("Back to the defaults")) {
         // (Keys the first player's defaults name leave whoever had them: a key presses one control.)
         default_controls(s_, player_);
+        // The reset button too: a default (Return is Start) left on it as well would reset the game at a press.
+        std::erase_if(s_.reset, [&](const Binding& b) {
+            for (unsigned k = 0; k < kControlCount; ++k)
+                if (std::find(controls[k].begin(), controls[k].end(), b) != controls[k].end()) return true;
+            return false;
+        });
         for (unsigned p = 0; p < kPlayers; ++p)
             for (unsigned c = 0; p != player_ && c < kControlCount; ++c)
                 std::erase_if(s_.players[p].controls[c], [&](const Binding& b) {
@@ -768,11 +774,11 @@ void Menu::display_page() {
     }
     ImGui::Checkbox("Vsync (off: the lowest latency, may tear)", &s_.vsync);
     {
-        static constexpr const char* kRates[] = {"60 (original)", "60", "The display's refresh rate", "Unlimited"};
+        static constexpr const char* kRates[] = {"60 (original)", "The display's refresh rate", "Unlimited"};
         const bool can = enhance::frame_rate_supported();
         int rate = int(s_.frame_rate);
         ImGui::BeginDisabled(!can);
-        if (ImGui::Combo("Frame rate", &rate, kRates, 4)) s_.frame_rate = FrameRate(rate);
+        if (ImGui::Combo("Frame rate", &rate, kRates, 3)) s_.frame_rate = FrameRate(rate);
         ImGui::EndDisabled();
         // The game computes 59.94 frames a second whatever is chosen; more are pictures drawn between them.
         ImGui::TextDisabled("%s", !can ? kNeedsFrameRate
@@ -780,7 +786,7 @@ void Menu::display_page() {
                                       ? "(pictures drawn between the game's 60 frames, one for each refresh of a faster display; one frame, 17 ms, later)"
                                   : s_.frame_rate == FrameRate::unlimited
                                       ? "(pictures between the game's 60 frames as fast as they draw, without vsync; one frame, 17 ms, later)"
-                                      : "(each of the game's frames as it comes; for this game original and 60 are the same)");
+                                      : "(each of the game's frames as it comes, as on the console)");
     }
     ImGui::BeginDisabled(!display_.gpu().present_wait);
     ImGui::Checkbox("Low latency (with vsync: at most one frame waiting)", &s_.low_latency);
@@ -884,14 +890,14 @@ void Menu::game_page() {
             ImGui::TextWrapped("%s", backups[i].label.c_str());
             if (ImGui::Button("Restore and restart")) {
                 s_.fullscreen = display_.fullscreen();
-                if (!save_settings(folder_, s_)) note_ = "Settings could not be saved; restore was not queued.";
-                else if (request_save_restore(folder_, backups[i].file, note_)) restart_program();
+                if (!save_settings(folder_, s_)) restore_note_ = "Settings could not be saved; restore was not queued.";
+                else if (request_save_restore(folder_, backups[i].file, restore_note_)) restart_program();
             }
             ImGui::PopID();
         }
         ImGui::TreePop();
     }
-    if (!note_.empty()) ImGui::TextWrapped("%s", note_.c_str());
+    if (!restore_note_.empty()) ImGui::TextWrapped("%s", restore_note_.c_str());
 
     ImGui::SeparatorText("About");
     ImGui::TextWrapped("Mario Kart: Double Dash!! QilinRecomp %s: a static recompilation, the game's own code compiled for this computer.",

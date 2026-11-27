@@ -118,7 +118,7 @@ const char* scaling_name(host::Scaling s) {
     return "fit";
 }
 // In their enumerations' order.
-constexpr const char* kFrameRates[] = {"original", "60", "display", "unlimited"};
+constexpr const char* kFrameRates[] = {"original", "display", "unlimited"};
 constexpr const char* kHuds[] = {"edges", "middle", "stretched"};
 constexpr const char* kOutputs[] = {"stereo", "surround", "device"};
 
@@ -380,8 +380,10 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
             } else if (name == "vsync") {
                 if (!boolean(s.vsync)) return false;
             } else if (name == "frame_rate") {
-                if (!choice(kFrameRates, pick)) return false;
-                s.frame_rate = FrameRate(pick);
+                // (Earlier versions offered "60", which was the same as original for this game.)
+                if (v == "60") s.frame_rate = FrameRate::original;
+                else if (!choice(kFrameRates, pick)) return false;
+                else s.frame_rate = FrameRate(pick);
             } else if (name == "low_latency") {
                 if (!boolean(s.low_latency)) return false;
             } else if (name == "gpu") {
@@ -507,8 +509,7 @@ std::string settings_text(const Settings& s) {
         "monitor = " + q(s.monitor) + "\n"
         "# The picture's shape, width:height: 4:3 is the original; a wider one (16:10, 16:9, 21:9, 32:9, any up to\n"
         "# 4:1) shows more at the sides; auto is the screen's own. hud: where the game's HUD goes on a wider\n"
-        "# picture: edges, middle (the middle 4:3) or stretched. Not yet: both need the game's cameras and HUD\n"
-        "# patched, and until that is done the picture is 4:3 whatever is set here.\n"
+        "# picture: edges, middle (the middle 4:3) or stretched. Menus and movies stay 4:3.\n"
         "aspect = " + (s.aspect_w && s.aspect_h ? std::to_string(s.aspect_w) + ":" + std::to_string(s.aspect_h) : std::string("auto")) + "\n"
         "hud = " + kHuds[unsigned(s.hud)] + "\n"
         "# The picture's size: integer (whole multiples of the console's, the sharpest), fit (the largest that\n"
@@ -539,10 +540,9 @@ std::string settings_text(const Settings& s) {
         "# waiting for the display.\n"
         "vsync = " + b(s.vsync) + "\n"
         "low_latency = " + b(s.low_latency) + "\n"
-        "# Frames a second: original or 60 (the same for this game: it computes 59.94 a second, and each is\n"
-        "# shown as it comes), display (pictures drawn between the game's frames, one for each refresh of a\n"
-        "# faster display) or unlimited (as fast as they draw, without vsync). The last two show the game\n"
-        "# one frame (17 ms) later.\n"
+        "# Frames a second: original (the game's own 59.94, each shown as it comes), display (pictures drawn\n"
+        "# between the game's frames, one for each refresh of a faster display) or unlimited (as fast as they\n"
+        "# draw, without vsync). The last two show the game one frame (17 ms) later.\n"
         "frame_rate = " + kFrameRates[unsigned(s.frame_rate)] + "\n"
         "# The graphics device, by name (empty: the best one).\n"
         "gpu = " + q(s.gpu) + "\n"

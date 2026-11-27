@@ -50,7 +50,7 @@ namespace mkdd::interp {
 // build (mtxtag::replacements() was given to the runtime).
 bool supported();
 // The frame-rate setting, with the display's refresh in Hz (0: not known).
-// original and sixty: every frame is shown as it comes, nothing is held back
+// original: every frame is shown as it comes, nothing is held back
 // and nothing blended. display and unlimited: the newest frame is held for
 // one logic tick while pictures blended from the one before towards it are
 // shown, one a refresh (display) or as fast as they draw (unlimited).

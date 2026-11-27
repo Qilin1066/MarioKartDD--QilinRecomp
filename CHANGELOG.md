@@ -4,6 +4,14 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Fixed
+
+- The Windows build compiles again with warnings as errors: the audio transition test filled 16-bit buffers from `int` constants (MSVC C4244).
+- The settings menu's frame rate no longer lists "60" beside "60 (original)": the two were the same in this game (it only differed in LAN play, which has no adapter here). `frame_rate = 60` in an existing `mkdd.ini` still loads, as original.
+- Controls' "Back to the defaults" also takes the restored inputs off the console's Reset button. A key or button bound to Reset (Return, say) no longer ends up on Start and Reset at once, resetting the game when pressed.
+- The Game page's save-recovery message is its own: notes from the Controls page ("X moved here from ...") no longer appear under Save recovery, and a restore error no longer appears on the Controls page.
+- `mkdd.ini`'s comment on `aspect` and `hud` no longer says the picture stays 4:3 whatever is set: the wider picture is built and the setting is used.
+
 ## [0.1.4] - 2026-11-27
 
 ### Fixed

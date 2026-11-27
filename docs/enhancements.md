@@ -96,10 +96,9 @@ Both functions are leaves that write opcode 0x10, `(11 << 16) | id × 4` and twe
 
 ### Recommendation and hooks
 
-The menu's four settings, for this game:
+The menu's three settings, for this game:
 
-- **original**: as the console. Logic and pictures at the VI's 59.94; LAN's draw skip kept.
-- **60**: every tick drawn (LAN's skip off), pictures shown as they come. No interpolation, no added latency.
+- **original**: as the console. Logic and pictures at the VI's 59.94, shown as they come. No interpolation, no added latency. (A fourth, "60", was to draw every tick with LAN's skip off; with no Broadband Adapter there is no LAN play and so no skip, and it was the same as original. It was removed in 0.1.5; `frame_rate = 60` in an older file reads as original.)
 - **display**: one picture per refresh, interpolated when the refresh is above 60.
 - **unlimited**: interpolated pictures as fast as they render, without vsync.
 

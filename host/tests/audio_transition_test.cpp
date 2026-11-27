@@ -18,7 +18,7 @@ int main() {
         std::vector<int16_t> data(2 * (ramp + 1), 12000);
         t.process(data.data(), ramp + 1, ramp + 1);
         check(data[0] == 0 && data[2 * ramp] == 12000, "playback starts with a bounded fade from silence");
-        std::fill(data.begin(), data.end(), -12000);
+        std::fill(data.begin(), data.end(), int16_t(-12000));
         t.process(data.data(), ramp + 1, ramp + 1, true);
         check(data[0] == 12000 && data[2 * ramp] == -12000, "a queue trim bridges the old and new samples");
         bool smooth = true;
@@ -26,7 +26,7 @@ int main() {
         check(smooth, "the trim does not create a full-amplitude sample jump");
         t.process(data.data(), 0, ramp + 1);
         check(data[0] == -12000 && data[2 * ramp] == 0, "running dry fades the last sample to actual silence");
-        std::fill(data.begin(), data.end(), 8000);
+        std::fill(data.begin(), data.end(), int16_t(8000));
         t.process(data.data(), ramp + 1, ramp + 1);
         check(data[0] == 0 && data[2 * ramp] == 8000, "fresh sound resumes from silence without a click");
         for (size_t i = 0; i <= ramp; ++i) data[2 * i] = int16_t(i * 5), data[2 * i + 1] = int16_t(-int(i) * 7);

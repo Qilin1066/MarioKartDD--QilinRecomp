@@ -56,11 +56,11 @@ Both are settings and menu entries (`aspect`, `hud`, `frame_rate`) routed throug
 - *Run the game's frame more often with a scaled time step*, as GBTGhoulies does. Ruled out by the analysis: the game has no time step to scale; everything counts steps.
 - *Keep the logic at its own rate and interpolate what is drawn* (the way chosen). The renderer keeps the transforms (positions and joint matrices, cameras) of the last two logic frames and draws frames in between at the display's rate. It never changes the game's behaviour, so times, ghosts and physics stay exactly the console's, at the cost of up to one logic frame of added latency, and of care for what must not be interpolated (camera cuts, respawns, particles being born, texture animation). It needs draws identified across frames, which the GX command stream doesn't give by itself: the hook would be in the game's own scene code (JSystem's model and joint updates), not in the renderer alone.
 
-It also suits a racing game: time trials and ghosts are compared between players. "Unlimited" and "the display's refresh rate" are pacing choices on top of it; "60" is to draw every step (LAN's skip off; not wired yet), and is otherwise the same as original.
+It also suits a racing game: time trials and ghosts are compared between players. "Unlimited" and "the display's refresh rate" are pacing choices on top of it. (An earlier "60", to draw every step with LAN's skip off, was the same as original without LAN play and has been removed.)
 
 What each kind of display then does, with the game's clock (the retraces) and the pictures presented:
 
-| Display | Retraces (the game's clock) | Frame rate original or 60 | Frame rate display | Unlimited |
+| Display | Retraces (the game's clock) | Frame rate original | Frame rate display | Unlimited |
 |---|---|---|---|---|
 | 59.94 or 60 Hz | the display's own (locked, steered to its vblank) | each frame at one refresh | the same: nothing to put between, so nothing is held (no added latency) | 59.94 Hz by the clock, no vsync; pictures as fast as they draw |
 | 119.88 or 120 Hz | every second refresh (locked) | each frame shown for two refreshes | two pictures a frame, at phases 1/2 and 1 | as above |

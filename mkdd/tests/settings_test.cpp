@@ -201,12 +201,12 @@ int main() {
         mkdd::Settings s;
         std::string e;
         check(mkdd::parse_settings("[display]\nframe_rate = original\n", s, e) && s.frame_rate == mkdd::FrameRate::original &&
-                  mkdd::parse_settings("[display]\nframe_rate = 60\n", s, e) && s.frame_rate == mkdd::FrameRate::sixty &&
+                  mkdd::parse_settings("[display]\nframe_rate = 60\n", s, e) && s.frame_rate == mkdd::FrameRate::original &&
                   mkdd::parse_settings("[display]\nframe_rate = Display\n", s, e) && s.frame_rate == mkdd::FrameRate::display &&
                   mkdd::parse_settings("[display]\nframe_rate = unlimited\nlow_latency = false\n", s, e) &&
                   s.frame_rate == mkdd::FrameRate::unlimited && !s.low_latency,
               "the frame rates, and low latency");
-        check(error_has("[display]\nframe_rate = 120\n", "frame_rate is original, 60, display or unlimited"), "a frame rate that isn't offered");
+        check(error_has("[display]\nframe_rate = 120\n", "frame_rate is original, display or unlimited"), "a frame rate that isn't offered");
         check(error_has("[display]\nlow_latency = 1\n", "low_latency is true or false"), "low latency is a switch");
         check(error_has("[display]\nsmaa = on\n", "smaa is true or false") && error_has("[display]\nfsr = yes\n", "fsr is true or false"),
               "SMAA and FSR are switches");

@@ -62,11 +62,12 @@ struct Player {
     std::vector<Binding> controls[kControlCount];
 };
 
-// Frames a second: the game's own 59.94 (original and sixty are the same
-// for this game: each frame is shown as it comes), the display's refresh
-// rate, or as many as the computer draws. Above the game's own they are
-// pictures drawn between its frames (interp.hpp, docs/graphics.md).
-enum class FrameRate : uint8_t { original, sixty, display, unlimited };
+// Frames a second: the game's own 59.94 (each frame shown as it comes), the
+// display's refresh rate, or as many as the computer draws. Above the game's
+// own they are pictures drawn between its frames (interp.hpp,
+// docs/graphics.md). (Older files' "60" was the same as original for this
+// game and still reads as it.)
+enum class FrameRate : uint8_t { original, display, unlimited };
 // The HUD where the picture is wider than 4:3: at the screen's edges, in the
 // middle 4:3, or stretched with the picture.
 enum class Hud : uint8_t { edges, middle, stretched };

@@ -367,8 +367,6 @@ void presented_phases() {
     check(std::fabs(interp::phase(came, came + uint64_t(tick / 4)) - 0.25) < 1e-3, "a display whose rate isn't known: the share of the tick");
     interp::set_frame_rate(FrameRate::original, 120.0);
     check(!interp::between_frames(), "original: no pictures between");
-    interp::set_frame_rate(FrameRate::sixty, 240.0);
-    check(!interp::between_frames() && !interp::unlimited(), "60: none either");
 }
 
 void scale_change(Target& t, Gx& g) {
