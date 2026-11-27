@@ -1177,6 +1177,31 @@ void between_frames(Target& t, Stream& st) {
     check(t.between(0.5f).empty() && t.renderer.pairing().cuts == 1, "a camera cut gives no picture between");
 }
 
+// A newly appearing perspective overlay inherits the world-camera tag, but
+// uses a different projection. Its native picture must stay put between ticks.
+void between_perspective_ui(Target& t, Stream& st) {
+    const auto frame = [&](bool overlay) {
+        const float camera = overlay ? 0.4f : 0.0f;
+        stream_begin(st);
+        perspective(st);
+        object(st, camera_at(camera), model_at(-3, -3), 0x80500000u);
+        if (overlay) {
+            st.xff(0x1020, {4.0f});
+            object(st, camera_at(camera), model_at(camera + 1, 0), 0x80500040u);
+        }
+        st.end_frame(); st.send();
+        return t.shown(true);
+    };
+    frame(false);
+    const auto own = frame(true);
+    const auto half = t.between(0.5f);
+    check(!half.empty(), "world interpolation remains available beside perspective UI");
+    if (half.empty()) return;
+    const auto a = blob(own, 360, 170, 560, 350), b = blob(half, 360, 170, 560, 350);
+    check(a.n > 0 && a.n == b.n && a.x == b.x && a.y == b.y,
+          "perspective UI keeps its native pixels between ticks: x " + num(a.x) + " | " + num(b.x));
+}
+
 // Leaving interpolation or changing filtering invalidates recorded GPU resources
 // and old frame history, even if no replacement frame is available yet.
 void replay_changes(Target& t, Stream& st, bool anisotropy) {
@@ -1851,6 +1876,7 @@ int main(int argc, char** argv) {
         z_before_alpha_test(t, st);
         address_bits(t, st);
         between_frames(t, st);
+        between_perspective_ui(t, st);
         replay_changes(t, st, gpu.max_anisotropy >= 2.0f);
         between_four_views(t, st);
         between_textures(t, st);

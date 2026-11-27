@@ -63,5 +63,20 @@ int main() {
     write(0x36, 0);
     advance(c, ms(20));
     check(interrupts == 4, "stopping DMA stops its clock");
+    const auto ai_write = [&](uint32_t v) { ranges[1].write(c, 0xCC006C00, v, 4); };
+    const auto counter = [&] { return ranges[1].read(c, 0xCC006C08, 4); };
+    ai_write(0x41); // running, stream at 32 kHz, DMA at 32 kHz
+    advance(c, ms(10));
+    check(counter() == 320, "the AI stream counter advances at 32 kHz");
+    ai_write(0x43); // stream changes to 48 kHz while still running
+    check(counter() == 320, "changing stream rate preserves the current sample count");
+    advance(c, ms(10));
+    check(counter() == 800, "only subsequent time is counted at the new stream rate");
+    ai_write(0x42); // stop, retain the stream rate
+    advance(c, ms(10));
+    check(counter() == 800, "a stopped stream counter keeps its count");
+    ai_write(0x63); // restart and reset
+    advance(c, ms(3));
+    check(counter() == 144, "counter reset starts counting anew at the selected rate");
     return failures ? 1 : 0;
 }

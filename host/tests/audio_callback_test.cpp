@@ -9,7 +9,10 @@
 int main() {
     using qilin::host::AudioOut;
     for (int cycle = 0; cycle < 3; ++cycle) {
-        AudioOut out;
+        AudioOut::Options options;
+        if (cycle == 2) options.output = qilin::host::SoundOutput::surround;
+        AudioOut out(options);
+        if (out.surround() != (cycle == 2)) return 1;
         std::vector<int16_t> samples(8192 * 2, 1000);
         std::thread producer([&] {
             for (int i = 0; i < 300; ++i) {

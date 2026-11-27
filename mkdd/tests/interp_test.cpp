@@ -248,6 +248,51 @@ void recorded_shape() {
     mkdd::hud::set_widening_source(nullptr);
 }
 
+void perspective_overlay() {
+    gx::Frame prev, cur;
+    add_view(prev), add_view(cur);
+    // A moving world camera alongside a screen-space perspective pass.
+    cur.views[0].m[3] = 0.2f;
+    add_model(prev, 0, 0), add_model(cur, 0, 0.2f);
+    add_model(cur, 0, 12);
+    cur.loads[1].tag = 0x80002000u; // a newly appearing UI element, with its own load
+    const auto world = cur.states[0];
+    auto overlay = cur.states[1];
+    overlay.projection[0][0] *= 2;
+    overlay.posmtx[0][3] = 12;
+    overlay.lights[0].pos[0] = 7;
+    cur.states.clear(); cur.states.push(world); cur.states.push(overlay);
+    interp::Blender b;
+    check(b.pair(prev, cur), "world geometry still pairs beside a perspective overlay");
+    std::vector<gx::State> out(cur.states.size());
+    b.states(cur, 0.5f, out.data());
+    check(std::fabs(out[0].posmtx[0][3] - 0.1f) < 1e-5f, "the world camera still interpolates");
+    check(std::memcmp(&overlay, &out[1], sizeof overlay) == 0,
+          "a separate perspective overlay keeps its matrices, lights and projection");
+}
+
+void changed_texgen() {
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        gx::Frame prev, cur;
+        add_view(prev), add_view(cur);
+        add_model(prev, 0, 0), add_model(cur, 0, 0.2f);
+        materials(prev, 0.1f, 0.2f), materials(cur, 0.12f, 0.22f);
+        auto s = cur.states[0];
+        if (mode == 0) s.xf[2][0] = 1;
+        if (mode == 1) s.xf[4][0] = 1;
+        if (mode == 2) s.texdims[0][2] = 128;
+        if (mode == 3) s.postmtx[0][3] = 0.5f;
+        const auto other = cur.states[1];
+        cur.states.clear(); cur.states.push(s); cur.states.push(other);
+        interp::Blender b;
+        check(b.pair(prev, cur), "changed texgen does not disrupt model interpolation");
+        std::vector<gx::State> out(cur.states.size());
+        b.states(cur, 0.5f, out.data());
+        check(out[0].posmtx[30][3] == 0.12f, "a changed texture coordinate system keeps its new transform");
+        check(std::fabs(out[1].posmtx[30][3] - 0.21f) < 1e-5f, "an unaffected material still scrolls smoothly");
+    }
+}
+
 float twice_wide() { return 2; }
 bool follows_world(const gx::Frame&, const gx::Draw&) { return true; }
 void callback_handoff() {
@@ -282,6 +327,8 @@ int main() {
     countdown_overlay();
     texture_materials();
     recorded_shape();
+    perspective_overlay();
+    changed_texgen();
     callback_handoff();
     std::printf("interp_test: %d failures\n", failures);
     return failures ? 1 : 0;

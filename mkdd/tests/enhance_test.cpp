@@ -442,6 +442,33 @@ void test_confirming_shape() {
     hud::set_widening_source(nullptr);
 }
 
+void test_partial_matrix() {
+    Gx g;
+    g.setup();
+    const float view[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    gx::matrix_loaded(0, g.xf, 0x80001000, view);
+    g.quad(20, 20, 100, 60);
+    // Rewrite just the translation, including a neighbouring slot. Neither
+    // matrix is any longer the complete matrix described by the old tag.
+    gx::matrix_loaded(12, g.xf, 0x80002000, view);
+    g.xf[11] = f2u(3);
+    gx::xf_changed(11, 2);
+    g.quad(120, 20, 200, 60);
+    gx::matrix_loaded(0, g.xf, 0x80003000, view);
+    g.quad(220, 20, 300, 60);
+    const auto f = g.end();
+    check(f && f->draws.size() == 3, "partial matrix writes keep separate recorded states");
+    if (!f || f->draws.size() != 3) return;
+    const auto& before = f->state_info[f->draws[0].state];
+    const auto& partial = f->state_info[f->draws[1].state];
+    const auto& after = f->state_info[f->draws[2].state];
+    check(before.load[0] != gx::kNoLoad, "the first draw retains its original matrix tag");
+    check(partial.load[0] == gx::kNoLoad && partial.load[1] == gx::kNoLoad && f->draws[1].tag == 0,
+          "partial writes invalidate every overlapping matrix tag");
+    check(after.load[0] != gx::kNoLoad && f->loads[after.load[0]].tag == 0x80003000,
+          "a subsequent complete load installs a fresh tag");
+}
+
 const rt::FunctionEntry kNoFunctions[] = {{0x80004000u, [](rt::Cpu&) {}}};
 
 }  // namespace
@@ -452,6 +479,7 @@ int main() {
     test_game_side();
     test_hud();
     test_confirming_shape();
+    test_partial_matrix();
     if (g_failures) {
         std::printf("enhance_test: %d check(s) failed\n", g_failures);
         return 1;

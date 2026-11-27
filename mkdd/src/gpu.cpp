@@ -637,7 +637,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
                     changed |= g_xf[addr + i] != v;
                     g_xf[addr + i] = v;
                 }
-            if (changed) gx::xf_changed(addr, count);  // the same values again change nothing
+            if (changed || addr < 120) gx::xf_changed(addr, count);  // position writes replace provenance even when their bits agree
             if (addr < 120 && count == 12) {  // a position matrix: with its tag, if the loader gave one
                 const MatrixTag* t = in_display_list || data != g_fifo.data() ? nullptr : take_tag(g_stream_base + used);
                 gx::matrix_loaded(addr, &g_xf[addr], t ? t->tag : 0, t ? t->view : nullptr, t ? t->id : 0, t ? t->context : uint8_t(0));
@@ -663,7 +663,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
                     changed |= g_xf[addr + i] != word;
                     g_xf[addr + i] = word;
                 }
-            if (changed) gx::xf_changed(addr, words);
+            if (changed || addr < 120) gx::xf_changed(addr, words);
             if (addr < 120 && words == 12) gx::matrix_loaded(addr, &g_xf[addr], src | 1u, nullptr);  // tagged by where it comes from
             n = 5;
             break;

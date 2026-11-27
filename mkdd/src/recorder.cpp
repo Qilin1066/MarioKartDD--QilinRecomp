@@ -1223,6 +1223,10 @@ void matrix_loaded(uint32_t address, const uint32_t* words, uint32_t tag, const 
 void xf_changed(uint32_t address, uint32_t count) {
     const uint32_t end = address + count;
     const auto overlaps = [&](uint32_t lo, uint32_t hi) { return address < hi && end > lo; };
+    // A partial or untagged write supersedes the old object's load too.
+    // Full tagged loads follow this call and install their new provenance.
+    for (unsigned slot = 0; slot < kMatrixSlots; ++slot)
+        if (overlaps(slot * 12, (slot + 1) * 12)) g_slot_load[slot] = kNoLoad;
     uint32_t parts = 0;
     if (overlaps(0x000, 0x100)) parts |= kPartPos, g_pos_lo = std::min(g_pos_lo, address), g_pos_hi = std::max(g_pos_hi, std::min(end, 0x100u));
     if (overlaps(0x400, 0x460)) parts |= kPartNormal;

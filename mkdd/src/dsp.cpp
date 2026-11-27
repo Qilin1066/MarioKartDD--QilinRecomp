@@ -617,7 +617,7 @@ void ai_write(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
             if (v & 4) rt::fatal(&c, "the AI's sample-counter interrupt was enabled (%08X): not handled", v);
             if (g_trace && ((v ^ g_ai_control) & 0x42)) dsp::trace::event("AI control written (rates changed)", v);
             const uint32_t counter = ai_counter();
-            if ((v ^ g_ai_control) & 1) ai_counter_restart(counter);  // run or stop, keeping the count
+            if ((v ^ g_ai_control) & 3) ai_counter_restart(counter);  // run, stop or stream-rate change, keeping the count
             g_ai_control = (v & 0x57) & ~0x08u;
             if (v & 0x20) ai_counter_restart(0);
             const unsigned rate = (v & 0x40) ? 32000 : 48000;

@@ -71,6 +71,8 @@ bool AudioOut::open(bool fallback) {
     }
     const SDL_AudioSpec spec{SDL_AUDIO_S16, static_cast<int>(channels_), static_cast<int>(rate_)};
     surround_.set_rate(rate_);
+    transitions_.set_rate(rate_);
+    discontinuity_ = false;
     // The device asks for sound as it needs it (feed): nothing waits inside SDL.
     stream_ = SDL_OpenAudioDeviceStream(id, &spec, [](void* self, SDL_AudioStream* stream, int additional, int) {
         static_cast<AudioOut*>(self)->feed(stream, additional);
@@ -152,13 +154,15 @@ void AudioOut::feed(SDL_AudioStream* stream, int bytes) {
     bool ran_dry;
     const size_t n = queue_.pull(feeding_.data(), frames, ran_dry);
     if (ran_dry) empty_.fetch_add(1, std::memory_order_relaxed);
+    transitions_.process(feeding_.data(), n, frames, discontinuity_);
+    discontinuity_ = false;
     const int16_t* data = feeding_.data();
-    if (n && channels_ == 6) {
-        decoded_.resize(n * 6);
-        surround_.decode(feeding_.data(), n, decoded_.data());
+    if (channels_ == 6) {
+        decoded_.resize(frames * 6);
+        surround_.decode(feeding_.data(), frames, decoded_.data());
         data = decoded_.data();
     }
-    if (n && !SDL_PutAudioStreamData(stream, data, static_cast<int>(n * frame_bytes))) fail("sound callback cannot queue data");  // (short of it, the device plays silence)
+    if (!SDL_PutAudioStreamData(stream, data, static_cast<int>(frames * frame_bytes))) fail("sound callback cannot queue data");
 }
 
 void AudioOut::push(const int16_t* lr, size_t frames, unsigned rate) {
@@ -177,6 +181,8 @@ void AudioOut::push(const int16_t* lr, size_t frames, unsigned rate) {
             if (!SDL_SetAudioStreamFormat(stream_, &spec, nullptr)) fail("the sound rate can't change");
             rate_ = rate;
             surround_.set_rate(rate_);
+            transitions_.set_rate(rate_);
+            discontinuity_ = false;
             queue_.clear();
             queue_.set_limits(frames_of(target_ms_, rate_), frames_of(2.0 * target_ms_, rate_));
         }
@@ -184,6 +190,7 @@ void AudioOut::push(const int16_t* lr, size_t frames, unsigned rate) {
         dropped = queue_.push(lr, frames);
     }
     if (dropped) {
+        discontinuity_ = true;
         dropped_.fetch_add(1, std::memory_order_relaxed);
         dropped_us_.fetch_add(static_cast<uint64_t>(double(dropped) * 1e6 / double(rate)), std::memory_order_relaxed);
         smoothed_ms_ = target_ms_;

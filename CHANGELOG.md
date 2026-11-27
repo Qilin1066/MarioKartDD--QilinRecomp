@@ -4,6 +4,22 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-27
+
+### Fixed
+
+- Partial XF position-matrix writes invalidate every overlapping interpolation tag. Equal-valued untagged writes also replace provenance; a later draw no longer inherits an earlier object's transform or HUD context. Complete tagged loads install fresh provenance afterwards.
+- Perspective passes whose projection differs from their tagged camera conservatively keep their native transforms, lights and texture matrices. Screen-space perspective overlays no longer move under an inherited world-camera tag; world passes with a separate projection also use this conservative fallback.
+- Texture interpolation checks texgen sources, post-transform selection and matrices, and coordinate scales as well as image bindings. Changed coordinate systems no longer borrow texture transforms from the preceding frame.
+- Audio callbacks submit explicit silence while rebuffering, advancing both SDL's resampler and the surround decoder. Old rear-channel delay history no longer waits through a gap and resurfaces when fresh sound arrives.
+- Short, 2 ms transitions bridge audio queue trims, underruns and restarts, reducing discontinuity clicks. Continuous stereo samples pass through unchanged after the transition; no extra sound is queued.
+- Changing the AI stream's sample rate preserves the current sample counter and counts only subsequent time at the new rate, avoiding a jump in audio timing.
+
+### Tests
+
+- Added regressions for partial matrix writes across slot boundaries, perspective overlays beside a moving camera (including a GPU pixel check), changed texgen/post-transform/coordinate-scale settings, and live AI stream-rate changes.
+- Added device-free audio transition checks at 32 and 48 kHz, including short callbacks, stereo polarity, queue trims, underruns, exact continuous samples and surround-history drainage.
+
 ## [0.1.3] - 2026-11-27
 
 ### Fixed

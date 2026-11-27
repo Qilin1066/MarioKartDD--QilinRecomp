@@ -17,6 +17,17 @@ namespace mkdd::interp {
 
 namespace {
 
+// A separate perspective pass (for example a screen-space countdown) may
+// inherit the last world-camera tag. Its projection is not that camera's:
+// moving it under the world camera warps the UI on intermediate pictures.
+bool scene_projection(const float p[4][4], const gx::Frame& f, uint16_t view) {
+    if (p[3][2] != -1.0f || view >= f.views.size()) return false;
+    const auto& v = f.views[view];
+    if (!v.has_projection) return true;
+    const float values[6] = {p[0][0], p[0][2], p[1][1], p[1][2], p[2][2], p[2][3]};
+    return std::memcmp(values, v.projection, sizeof values) == 0;
+}
+
 // ---- small matrix maths
 
 void multiply(const float a[12], const float b[12], float out[12]) {  // a after b
@@ -391,9 +402,9 @@ void Blender::pair_textures(const gx::Frame& prev, const gx::Frame& cur) {
         if (p.how == 1) matched_loads_[p.prev] = 1;
     prev_tex_states_.clear(), cur_tex_states_.clear();
     const auto perspective = [](const gx::Frame& f, size_t i) {
-        float w;
-        f.states.read(i, offsetof(gx::State, projection) + 14 * sizeof(float), sizeof w, &w);
-        return w == -1.0f;
+        float projection[4][4];
+        f.states.read(i, offsetof(gx::State, projection), sizeof projection, projection);
+        return scene_projection(projection, f, f.state_info[i].view);
     };
     for (size_t i = 0; i < prev.state_info.size(); ++i) {
         if (!perspective(prev, i)) continue;
@@ -427,6 +438,20 @@ void Blender::pair_textures(const gx::Frame& prev, const gx::Frame& cur) {
                 cur.states.read(i, at, sizeof b, b);
                 if (std::memcmp(a, b, sizeof a) != 0) return false;
             }
+        // Identical images do not identify the same coordinate system when
+        // texgen sources, post-transform selection or coordinate scales change.
+        uint32_t ax[8][4], bx[8][4];
+        prev.states.read(j, offsetof(gx::State, xf), sizeof ax, ax);
+        cur.states.read(i, offsetof(gx::State, xf), sizeof bx, bx);
+        if (ax[1][1] != bx[1][1] || ax[1][2] != bx[1][2] || std::memcmp(ax + 2, bx + 2, 4 * sizeof ax[0]) != 0) return false;
+        float ap[64][4], bp[64][4];
+        prev.states.read(j, offsetof(gx::State, postmtx), sizeof ap, ap);
+        cur.states.read(i, offsetof(gx::State, postmtx), sizeof bp, bp);
+        if (std::memcmp(ap, bp, sizeof ap) != 0) return false;
+        int32_t ad[8][4], bd[8][4];
+        prev.states.read(j, offsetof(gx::State, texdims), sizeof ad, ad);
+        cur.states.read(i, offsetof(gx::State, texdims), sizeof bd, bd);
+        if (std::memcmp(ad, bd, sizeof ad) != 0) return false;
         return true;
     };
     size_t p = 0;
@@ -509,8 +534,8 @@ void Blender::states(const gx::Frame& cur, float phase, gx::State* out) {
         thread_local gx::State was;  // (the frame keeps its states as blocks)
         cur.states.resolve(i, was);
         gx::State& s = out[i];
-        if (was.projection[3][2] != -1.0f) continue;  // flat drawing (orthographic): as the newer frame has it
         const gx::StateInfo& info = cur.state_info[i];
+        if (!scene_projection(was.projection, cur, info.view)) continue;  // flat drawing and separate perspective UI keep their own transforms
         for (unsigned slot = 0; slot < gx::kMatrixSlots; ++slot) {
             const uint32_t l = info.load[slot];
             if (l == gx::kNoLoad || prepared_[l].how == 0) continue;

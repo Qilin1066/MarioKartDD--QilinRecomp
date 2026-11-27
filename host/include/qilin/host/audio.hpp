@@ -92,6 +92,43 @@ private:
     bool playing_ = false;
 };
 
+// A gap or a queue trim changes the sample stream discontinuously. Bridge
+// just that boundary over 2 ms; continuous sound passes through unchanged.
+// Silence is explicit input too, so surround delay lines and SDL's resampler
+// advance through a gap instead of retaining old sound until playback resumes.
+class AudioTransitions {
+public:
+    void set_rate(unsigned rate) {
+        ramp_ = std::max(1u, rate / 500);
+        remaining_ = 0;
+        last_[0] = last_[1] = 0;
+        sounding_ = false;
+    }
+    // `data` has room for frames stereo pairs; only the first `valid` pairs
+    // need initialising. The rest become silence, with a short outgoing ramp.
+    void process(int16_t* data, size_t valid, size_t frames, bool discontinuity = false) {
+        for (size_t i = 0; i < frames; ++i) {
+            const bool sounding = i < valid;
+            const int16_t raw[2] = {sounding ? data[2 * i] : int16_t{0}, sounding ? data[2 * i + 1] : int16_t{0}};
+            if ((i == 0 && discontinuity) || sounding != sounding_) {
+                for (unsigned c = 0; c < 2; ++c) offset_[c] = float(last_[c]) - raw[c];
+                remaining_ = ramp_;
+            }
+            sounding_ = sounding;
+            for (unsigned c = 0; c < 2; ++c) {
+                const float v = raw[c] + (remaining_ ? offset_[c] * float(remaining_) / float(ramp_) : 0);
+                data[2 * i + c] = last_[c] = static_cast<int16_t>(std::clamp(v, -32768.0f, 32767.0f));
+            }
+            if (remaining_) --remaining_;
+        }
+    }
+private:
+    unsigned ramp_ = 64, remaining_ = 0;
+    int16_t last_[2] = {};
+    float offset_[2] = {};
+    bool sounding_ = false;
+};
+
 // What the device is given: the game's two channels as they are; 5.1 decoded
 // from them (SurroundDecoder); or whichever suits the device (surround where
 // it has six channels or more).
@@ -209,6 +246,8 @@ private:
     // SDL stream lock protects the queue, format and resampler state, including callbacks.
     float gain_ = 1.0f;
     AudioQueue queue_{0, 0};
+    AudioTransitions transitions_;
+    bool discontinuity_ = false;  // under the stream lock: a producer trimmed the queue
     std::vector<int16_t> feeding_;  // the device thread's own
     std::atomic<uint64_t> sum_us_{0}, dropped_us_{0};
     std::atomic<uint32_t> max_us_{0}, pushes_{0}, empty_{0}, dropped_{0}, ratio_ppm_{1000000}, callbacks_{0};
