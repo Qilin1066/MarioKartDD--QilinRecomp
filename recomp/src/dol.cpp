@@ -39,11 +39,17 @@ const KnownBuild* known_build(std::string_view sha256_hex) {
     return nullptr;
 }
 
+std::span<const KnownBuild> known_builds() { return kKnownBuilds; }
+
 std::expected<Dol, std::string> Dol::load(const std::filesystem::path& path) {
+    // (The path in messages as UTF-8: string() throws on Windows for a name
+    // the code page can't hold.)
+    const std::u8string u8 = path.u8string();
+    const std::string shown(u8.begin(), u8.end());
     std::ifstream f(path, std::ios::binary);
-    if (!f) return fail("cannot open " + path.string());
+    if (!f) return fail("cannot open " + shown);
     std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
-    if (f.bad()) return fail("cannot read " + path.string());
+    if (f.bad()) return fail("cannot read " + shown);
     return parse(bytes);
 }
 

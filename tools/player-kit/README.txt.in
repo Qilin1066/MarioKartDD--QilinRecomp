@@ -1,0 +1,120 @@
+@TITLE@ QilinRecomp for Windows (64-bit)
+=============================================
+
+@FULL_TITLE@ (@STUDIO@), recompiled to run natively: the game's own
+program translated into C++ and compiled for your PC, drawn with Vulkan.
+
+No game data is included. You need your own copy of the game: @RELEASE@,
+as a disc image.
+
+
+Your disc image
+---------------
+An image of your disc as it is: an .iso, .gcm or .ciso file. GameCube discs
+aren't encrypted, so nothing has to be extracted first. Dolphin's
+compressed formats aren't read: convert an .rvz, .wia or .gcz image in
+Dolphin first (right-click the game in the list, Convert File, Format: ISO).
+An NKit image has to be converted back to a full one with NKit.
+
+
+Playing
+-------
+1. Unzip the download anywhere. Building the game needs about 2 GB free.
+2. Open the folder and double-click "Play @TITLE@.exe".
+3. Click "Choose your disc image" and pick the file above, or drag it onto
+   the window. It tells you straight away if it is the wrong game, another
+   region or another revision.
+4. Wait for the first build: a few minutes (up to 15 on a slower PC). Your
+   game files never leave your PC.
+5. Click Play. The window hides while the game runs. "Add a desktop
+   shortcut" puts Play @TITLE@ on your desktop.
+
+After that, Play @TITLE@.exe remembers your disc image (even in a new
+download folder), and Play starts the game straight away. The game reads
+the image while it runs, so leave it where it is (if you move it, choose it
+again). After an update it builds the game again first, recompiling only
+what changed.
+
+The game's output is in work\run.log and work\run-errors.log, and the
+build's in work\build.log; the game also keeps mkdd.log beside its settings
+(below). Send them when reporting a problem.
+
+If Windows says "Windows protected your PC": More info, then Run anyway.
+(The download isn't signed.) Or before unpacking, right-click the zip,
+Properties, tick Unblock, OK.
+
+Needs: Windows 10 or 11, 64-bit, and a graphics driver with Vulkan 1.3
+(any recent NVIDIA, AMD or Intel driver).
+
+
+Controls
+--------
+Four GameCube controllers. Controllers take the ports in the order each
+first has a button pressed; the keyboard plays the first.
+
+  GameCube controller   Xbox controller      Keyboard (player 1)
+  A                     A (bottom)           X
+  B                     X (left)             Z
+  X                     B (right)            C
+  Y                     Y (top)              S
+  Z                     RB or LB             D
+  L, R                  LT, RT               A, Space
+  Start                 Start                Enter
+  Control stick         left stick           arrows
+  C-stick               right stick          I K J L
+  D-pad                 D-pad                T G F H
+
+Back + Start together, or F1 or Esc: the settings menu (the game pauses):
+controls for each player (set by pressing them), the picture (size, render
+resolution, a wider picture, SMAA, FSR 1, a CRT look, frame rate), full
+screen, sound. F3: frame times. F9: capture frames for a bug report.
+Alt+Enter or F11: full screen.
+
+Settings, saves, captures and the game's log are kept in
+%LOCALAPPDATA%\qilin\@GAME@, with the disc image you chose and the build's
+cache of compiled files (build-cache).
+
+
+What's in here
+--------------
+Play @TITLE@.exe    chooses your disc image, builds the game (once) and starts it
+kit\qilin-disc.exe  reads your disc image: takes @BOOT@ from it
+kit\qilin.exe       the recompiler: turns the disc's @BOOT@ into C++, and
+                    says which disc an image is
+kit\qilin-dsp.exe   the same for the sound processor's program inside @BOOT@
+kit\plan.tsv        which parts of the game are recompiled, and which run natively
+kit\lib, include    the prebuilt rest of the game: its runtime, the disc
+                    reader, the renderer, sound, the window and controls
+                    (SDL3), the menu (Dear ImGui)
+kit\toolchain       LLVM-MinGW, a C++ compiler for Windows (Clang)
+kit\files.txt       every file this release holds (see below)
+work\               made when building: the game (@EXE@), built from your
+                    disc, the recompiled code, the build's files and the logs
+LICENSES\           the licences of everything included
+
+Source, changes and issues: https://github.com/Qilin1066/MarioKartDD--QilinRecomp
+
+
+Updates and recovery
+--------------------
+"Check for updates" in Play @TITLE@.exe asks GitHub for a newer release of
+@FULL_TITLE@ (it sends nothing about you or your PC). If there is one, it
+downloads it, unpacks it beside this folder and swaps in the new kit and
+launcher, then starts again and builds the game for the new version. If
+anything fails on the way, the old version is left as it was. You can also
+unzip a new download anywhere, even over this folder: it finds your disc
+image and the cache by itself, and at its first start it removes what an
+older version left behind (the Play @TITLE@.bat, play.ps1 and Ninja of the
+first downloads, and files the new kit no longer has: anything in kit\ or
+LICENSES\ that kit\files.txt doesn't name). Your saves and settings are
+never in this folder, so nothing of yours is touched.
+
+The game is compiled for this PC's processor; moved to another PC, it is
+built again. Compiled files come from the cache when nothing they're made
+from has changed. A failed build leaves the working game as it was; the one
+before a new build is kept as work\@EXE@.previous until the new one has run
+and closed normally. "Build again from scratch" compiles everything anew.
+
+Before the game writes to a memory card, the save it replaces is kept: the
+five most recent of each. The settings menu's Game page, Previous saves,
+restores one and restarts (backing up the current save first).
