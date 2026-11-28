@@ -4,6 +4,19 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- **Downloads for Windows, Linux (x86-64, and ARM64 for the Raspberry Pi 4 and 5) and macOS (one universal app for Apple silicon and Intel)**, with the players' launcher shared by the QilinRecomp projects (`tools/player-kit/launcher/`, copied unchanged from Toy Commander's, launcher 3): unpack, double-click `Play Double Dash`, choose the disc image (`.iso`, `.gcm` or `.ciso`, or drop it onto the window), and the first start builds the game from it; after that Play starts it at once. The launcher checks the image before building, remembers it, runs the three steps (`qilin-disc dol`, `qilin lift` with the library plan into 32 files, `qilin-dsp lift` for the sound processor's microcode), compiles with a cache of compiled files, builds again only what an update changed, and updates itself from GitHub Releases. Windows bundles llvm-mingw, Linux bundles zig, and the Mac uses Apple's command line tools (the launcher offers Apple's installer) with MoltenVK inside the app. Each release is to carry `MarioKartDD--QilinRecomp-X.Y.Z-windows-x64.zip`, `-linux-x86_64.tar.gz`, `-linux-arm64.tar.gz` and `-macos.dmg`, made by three workflows (`player-kit.yml`, `player-kit-linux.yml`, `player-kit-macos.yml`) on every push and attached to the release of a `vX.Y.Z` tag; CI checks each download as a player gets it (`smoke-linux.sh`, `check-macos.sh` on both kinds of Mac).
+- **`qilin identify <disc image> --json [--build <title>]`**, the launcher's identify contract (`recomp/src/identify.cpp`, tested by `qilin_identify_test` on images made in the test): one JSON object saying what the image is, and exit 0 for the supported build (GM4E01 revision 0, by its `main.dol`'s SHA-256), 3 for another (another game, region or revision, a changed `main.dol`, a Wii disc), 2 for what can't be used (an RVZ, WIA or GCZ image, with how to convert it in Dolphin; an NKit image; a folder; a file that isn't a GameCube disc; a damaged image), each with a plain sentence for the player.
+- `qilin`, `qilin-dsp` (and `qilin-disc`, as before) read their arguments as UTF-8 from Windows' wide command line (`recomp/src/command_line.hpp`, from Toy Commander's), so a disc image or a download folder with an accented or other non-ASCII name works. `qilin lift` and `qilin-dsp lift` also take `--out` for `-o`.
+
+### Changed
+
+- **The Windows download is the launcher's**: `Play Double Dash.exe` replaces `Play Double Dash.bat` and `kit/play.ps1`, and the game is built into `work/`. A new download unzipped over an old folder removes the old `.bat`, `Double Dash.exe`, `play.ps1`, `ninja.exe`, `kit.ninja` and the build's Ninja files, and keeps the disc it remembered (`work/disc-folder.txt`; game.txt's `old_files` and `old_input_file`). A remembered extracted folder is asked for again as an image.
+- The player kit's archive is `kit/lib/libmkdd_kit.a` with `kit/build-flags.txt` (was `kit.ninja`), and has Linux (zig) and macOS (universal) builds besides Windows'. The game links the launcher's icon on Windows, beside its manifest.
+- macOS: the Vulkan instance asks for the loader's portability enumeration only where it is offered, so the game also starts with MoltenVK's own library and no Vulkan loader (the macOS download's app), as Toy Commander's and Punch-Out's hosts do.
+- CMake no longer scans for C++ modules (zig has no `clang-scan-deps`), and puts SDL's own Wayland protocol headers before the system's, so the Linux downloads build with zig on Ubuntu 22.04.
+
 ## [0.1.6] - 2026-11-27
 
 ### Fixed

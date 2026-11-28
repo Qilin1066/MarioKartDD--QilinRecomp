@@ -13,6 +13,10 @@ project(MarioKartDDQilinRecomp VERSION 0.1.6 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# No C++ modules anywhere: without this, Ninja builds scan every C++ source
+# for them with clang-scan-deps, which zig's Clang (the Linux download's
+# compiler, and a Windows PC's without LLVM) doesn't have.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
@@ -159,6 +163,30 @@ add_test(NAME qilin_disc_tests COMMAND qilin_disc_tests)
 set_tests_properties(qilin_disc_tests PROPERTIES TIMEOUT 120)
 # ---- <<< the disc agent's block ----
 
+# qilin identify (recomp/src/identify.hpp): what a disc image is, for the
+# downloads' launcher, through the disc reader. Its tests make their own images.
+add_library(qilin_identify STATIC recomp/src/identify.cpp)
+target_include_directories(qilin_identify PUBLIC recomp/src)
+target_link_libraries(qilin_identify PUBLIC qilin_dol qilin_disc PRIVATE qilin_warnings)
+qilin_tool(qilin_identify)
+target_link_libraries(qilin PRIVATE qilin_identify)
+add_executable(qilin_identify_test recomp/tests/identify_test.cpp)
+target_link_libraries(qilin_identify_test PRIVATE qilin_identify qilin_warnings)
+qilin_tool(qilin_identify_test)
+add_test(NAME qilin_identify_test COMMAND qilin_identify_test)
+
+# The downloads' launcher (tools/player-kit/launcher, the same files in every
+# QilinRecomp project, copied from Toy Commander's: ADOPTING.md there): its
+# core and tests here, its program in the host section below (where SDL3 and
+# Dear ImGui are known). Its build test runs the real build with stand-in
+# children, and qilin's identify.
+option(QILIN_REQUIRE_LAUNCHER_TESTS "Require the launcher's build test (CI): a native build, not a cross-compile" OFF)
+if(QILIN_REQUIRE_LAUNCHER_TESTS AND CMAKE_CROSSCOMPILING)
+    message(FATAL_ERROR "the launcher's build test needs a native build")
+endif()
+set(QILIN_LAUNCHER_QILIN qilin)
+include(tools/player-kit/launcher/launcher.cmake)
+
 # ---- The host platform: window, input and audio (SDL3), Vulkan ----
 # Fetched at configure time, pinned, built statically: SDL3, the Vulkan headers
 # and volk (which loads Vulkan at run time, so no SDK is needed to build or run).
@@ -180,6 +208,17 @@ if(QILIN_HOST)
     FetchContent_Declare(volk GIT_REPOSITORY https://github.com/zeux/volk GIT_TAG vulkan-sdk-1.4.363.0 GIT_SHALLOW ON
                          SOURCE_SUBDIR no-cmake)
     FetchContent_MakeAvailable(SDL3 VulkanHeaders volk)
+    # SDL's Wayland protocol headers, made from its own XML, before the
+    # system's (as Toy Commander's): SDL adds them as a system folder, and
+    # zig's compiler (the Linux download's) searches the system's
+    # /usr/include first, whose older wayland-client-protocol.h (Ubuntu
+    # 22.04's) lacks what SDL uses (WL_KEYBOARD_KEY_STATE_REPEATED). SDL
+    # includes them in quotes, and -iquote folders come before every -I and
+    # -isystem one. (An option, not an include folder: CMake would merge
+    # that into SDL's system one.)
+    if(TARGET SDL3-static AND EXISTS "${sdl3_BINARY_DIR}/wayland-generated-protocols" AND NOT MSVC)
+        target_compile_options(SDL3-static BEFORE PRIVATE "-iquote${sdl3_BINARY_DIR}/wayland-generated-protocols")
+    endif()
     add_library(qilin_volk STATIC ${volk_SOURCE_DIR}/volk.c)
     target_include_directories(qilin_volk PUBLIC ${volk_SOURCE_DIR})
     target_link_libraries(qilin_volk PUBLIC Vulkan::Headers ${CMAKE_DL_LIBS})
@@ -295,6 +334,25 @@ if(QILIN_HOST)
         set_property(TEST qilin_vktest qilin_padtest mkdd_render_test mkdd_render_test_ubershader mkdd_render_test_specialized
                      mkdd_render_test_full_vertices mkdd_pipe_test APPEND PROPERTY ENVIRONMENT ${QILIN_GRAPHICS_TEST_ENV})
     endif()
+
+    # The downloads' launcher, `Play Double Dash` (Windows: .exe; macOS: the
+    # app's program), which reads kit/game.txt (tools/player-kit/launcher).
+    find_package(Threads REQUIRED)
+    qilin_launcher_program(IMGUI_DIR ${imgui_SOURCE_DIR} LIBRARIES qilin_imgui qilin_volk SDL3::SDL3-static Threads::Threads)
+    if(WIN32)
+        # The launcher's icon for the game too, which the player's PC links
+        # (the player kit's icon.o; QILIN_WINDOWS_RESOURCES is launcher.cmake's).
+        if(QILIN_WINDOWS_RESOURCES)
+            add_library(qilin_game_icon OBJECT tools/player-kit/game_icon.rc)
+        elseif(QILIN_PLAYER_KIT)
+            message(FATAL_ERROR "the player kit needs QILIN_WINDOWS_RESOURCES=ON (the game's icon and manifest)")
+        endif()
+    endif()
+endif()
+
+# The macOS download's CMake side (the universal kit): tools/player-kit/macos.cmake.
+if(APPLE)
+    include(tools/player-kit/macos.cmake)
 endif()
 
 # ---- Tests (no game files needed) ----
@@ -436,18 +494,16 @@ list(APPEND mkdd_runtime_sources mkdd/src/dsp_trace.cpp)  # (MKDD_AUDIO_DUMP, MK
 list(APPEND mkdd_runtime_sources mkdd/src/input.cpp)  # the controller ports (input.hpp)
 list(APPEND mkdd_runtime_sources mkdd/src/enhance.cpp mkdd/src/hud.cpp)  # the widened picture (enhance.hpp)
 # Windows: the game's manifest (UTF-8 for every narrow path and string, long paths): MSVC's linker
-# takes the .manifest, MinGW links the resource.
-if(WIN32 AND NOT MSVC)
-    enable_language(RC)
-endif()
+# takes the .manifest, MinGW links the resource (where there is a resource compiler: the option
+# QILIN_WINDOWS_RESOURCES, launcher.cmake's, which enables RC; zig has none).
 function(mkdd_manifest target)
     if(MSVC)
         target_sources(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mkdd/res/mkdd.manifest)
-    elseif(WIN32)
+    elseif(WIN32 AND QILIN_WINDOWS_RESOURCES)
         target_sources(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mkdd/res/mkdd.rc)
     endif()
 endfunction()
-if(WIN32)  # the manifest at work: paths in any script through the narrow APIs
+if(WIN32 AND (MSVC OR QILIN_WINDOWS_RESOURCES))  # the manifest at work: paths in any script through the narrow APIs
     add_executable(mkdd_utf8_paths_test mkdd/tests/utf8_paths_test.cpp)
     target_link_libraries(mkdd_utf8_paths_test PRIVATE qilin_warnings)
     mkdd_manifest(mkdd_utf8_paths_test)
@@ -529,66 +585,112 @@ if(QILIN_GAME_DOL)
 endif()
 
 # ---- The player kit: everything mkdd needs but the code lifted from main.dol ----
-# For the Windows download (tools/player-kit), as the APB recomp's: the game's
-# runtime and every library it links (the host layer, SDL3, Dear ImGui, volk),
-# merged into one archive, with the headers the lifted code includes, qilin,
-# qilin-disc and qilin-dsp, the library plan, and the flags and libraries to
-# build the rest with (kit.ninja). A player's own PC lifts their own main.dol
-# (the game's code and the DSP's microcode in it) and compiles only that code,
-# with the same compiler, against the kit. Needs a MinGW toolchain
-# (tools/player-kit/mingw-cross.cmake) and SDL3 built statically (the fetched one).
-option(QILIN_PLAYER_KIT "Build the player kit (tools/player-kit)" OFF)
+# For the downloads (tools/player-kit), as Toy Commander's and Punch-Out's:
+# the game's runtime and every library it links (the disc reader, the host
+# layer, SDL3, Dear ImGui, volk) in one archive (kit/lib/libmkdd_kit.a), the
+# headers the lifted code includes (kit/include: the runtime's, and
+# dsp_core.hpp for the DSP microcode's), the tools the launcher's steps run
+# (qilin-disc, qilin, qilin-dsp), the library plan (kit/plan.tsv), and
+# kit/build-flags.txt: how the launcher (tools/player-kit/launcher, build.cpp)
+# compiles and links the code it lifts from the player's own disc. Windows:
+# cross-compiled on Linux with llvm-mingw (package.sh). Linux: built with the
+# zig the download bundles, so the archive's libc++ is the one the player's
+# compiles link with (package-linux.sh). macOS: universal, with Apple's clang
+# (package-macos.sh, tools/player-kit/macos.cmake).
+option(QILIN_PLAYER_KIT "Build the player kit (tools/player-kit): the game's runtime as one archive, for the downloads" OFF)
+# What the lifted code is compiled with, in build-flags.txt: as the mkdd
+# target's (CMake's Release flags, and -ffp-contract=off from above).
+set(QILIN_LIFTED_OPTIONS -ffp-contract=off)
 if(QILIN_PLAYER_KIT)
     if(NOT QILIN_HOST OR NOT TARGET SDL3-static)
         message(FATAL_ERROR "the player kit needs the host layer with SDL3 built statically (QILIN_HOST=ON)")
     endif()
-    add_library(mkdd_kit_main OBJECT ${mkdd_runtime_sources})
+    add_library(mkdd_kit_main STATIC ${mkdd_runtime_sources})
     target_include_directories(mkdd_kit_main PRIVATE mkdd/src)
     target_link_libraries(mkdd_kit_main PRIVATE qilin_rt qilin_dol qilin_disc qilin_host qilin_imgui SDL3::SDL3-static qilin_warnings)
     target_compile_definitions(mkdd_kit_main PRIVATE MKDD_VERSION="${PROJECT_VERSION}")
-    set(kit_libraries qilin_rt qilin_dol qilin_disc qilin_host qilin_imgui qilin_volk SDL3-static)
-    set(kit_archive "${CMAKE_BINARY_DIR}/libmkdd_kit.a")
-    set(mri "CREATE ${kit_archive}\n")
-    foreach(library IN LISTS kit_libraries)
-        string(APPEND mri "ADDLIB $<TARGET_FILE:${library}>\n")
-    endforeach()
-    string(APPEND mri "ADDMOD $<JOIN:$<TARGET_OBJECTS:mkdd_kit_main>,\nADDMOD >\nSAVE\nEND\n")
-    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/mkdd_kit.mri" CONTENT "${mri}")
-    add_custom_command(OUTPUT "${kit_archive}"
-        COMMAND "${CMAKE_COMMAND}" "-DAR=${CMAKE_AR}" "-DMRI=${CMAKE_BINARY_DIR}/mkdd_kit.mri" "-DOUT=${kit_archive}"
-                -P "${CMAKE_SOURCE_DIR}/tools/player-kit/merge.cmake"
-        DEPENDS mkdd_kit_main ${kit_libraries} $<TARGET_OBJECTS:mkdd_kit_main> "${CMAKE_BINARY_DIR}/mkdd_kit.mri"
-        COMMENT "Merging the player kit's libraries" VERBATIM)
-    add_custom_target(mkdd_kit ALL DEPENDS "${kit_archive}")
-    # The system libraries SDL3 and the runtime need (MinGW names).
-    set(kit_system_libraries -lm -lkernel32 -luser32 -lgdi32 -lwinmm -limm32 -lole32 -loleaut32 -lversion -luuid -ladvapi32
-        -lsetupapi -lshell32 -ldinput8 -lwinspool -lcomdlg32)
-    string(JOIN " " kit_system_text ${kit_system_libraries})
-    # What the lifted code is compiled and linked with: kit.ninja, included by
-    # the build.ninja the player's script writes ($kit is the kit's folder).
-    # Lifted calls nest as deeply as the guest's: a 16 MB main stack, as MSVC's /STACK.
-    file(WRITE "${CMAKE_BINARY_DIR}/kit.ninja"
-        "# Written by CMake for the player kit (QILIN_PLAYER_KIT).\n"
-        "cxxflags = -O2 -DNDEBUG -std=c++23 -w -ffp-contract=off -I$kit/include\n"
-        "ldflags = -static -O2 -Wl,--stack,16777216\n"
-        "libs = $kit/lib/mkdd_manifest.o $kit/lib/libmkdd_kit.a ${kit_system_text}\n")
-    # The manifest's resource, linked as an object of its own (from an archive, nothing would pull it in).
-    add_library(mkdd_kit_manifest OBJECT mkdd/res/mkdd.rc)
-    install(FILES $<TARGET_OBJECTS:mkdd_kit_manifest> DESTINATION kit/lib RENAME mkdd_manifest.o COMPONENT player)
-    # Linked with stand-ins for the lifted code (the game's, and the DSP microcode's empty
-    # table): the kit is complete.
-    add_executable(mkdd_kit_link_check tools/player-kit/link_check.cpp mkdd/src/dsp_no_ucode.cpp $<TARGET_OBJECTS:mkdd_kit_manifest>)
-    target_include_directories(mkdd_kit_link_check PRIVATE mkdd/src)
-    target_link_libraries(mkdd_kit_link_check PRIVATE qilin_rt "${kit_archive}" ${kit_system_libraries})
-    add_dependencies(mkdd_kit_link_check mkdd_kit)
-
-    install(TARGETS qilin qilin_disc_tool qilin-dsp RUNTIME DESTINATION kit COMPONENT player)
+    if(NOT MSVC)  # Vulkan structures written {sType}, as in the host layer
+        set_source_files_properties(mkdd/src/renderer.cpp mkdd/src/menu.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
+    endif()
+    set(kit_libraries mkdd_kit_main qilin_rt qilin_dol qilin_disc qilin_host qilin_imgui qilin_volk SDL3-static)
+    set(kit_archive "${CMAKE_BINARY_DIR}/kit/libmkdd_kit.a")
+    string(JOIN " " lifted_text ${QILIN_LIFTED_OPTIONS})
+    if(APPLE)
+        qilin_player_kit_macos()  # tools/player-kit/macos.cmake
+    else()
+        set(mri "CREATE ${kit_archive}\n")
+        foreach(library IN LISTS kit_libraries)
+            string(APPEND mri "ADDLIB $<TARGET_FILE:${library}>\n")
+        endforeach()
+        string(APPEND mri "SAVE\nEND\n")
+        file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/kit/mkdd_kit.mri" CONTENT "${mri}")
+        add_custom_command(OUTPUT "${kit_archive}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/kit"
+            COMMAND "${CMAKE_COMMAND}" "-DAR=${CMAKE_AR}" "-DMRI=${CMAKE_BINARY_DIR}/kit/mkdd_kit.mri" "-DOUT=${kit_archive}"
+                    -P "${CMAKE_SOURCE_DIR}/tools/player-kit/merge.cmake"
+            DEPENDS ${kit_libraries} "${CMAKE_BINARY_DIR}/kit/mkdd_kit.mri"
+            COMMENT "Merging the player kit's libraries" VERBATIM)
+        add_custom_target(mkdd_kit ALL DEPENDS "${kit_archive}")
+        if(WIN32)
+            # The system libraries SDL3 and the runtime need (MinGW names).
+            # Lifted calls nest as deeply as the guest's: a 16 MB main stack,
+            # as MSVC's /STACK. The game's manifest (mkdd_manifest.o: UTF-8
+            # paths, long paths) and icon (icon.o) are objects of their own:
+            # from an archive, nothing would pull them in.
+            set(kit_system_libraries -lm -lkernel32 -luser32 -lgdi32 -lwinmm -limm32 -lole32 -loleaut32 -lversion -luuid -ladvapi32
+                -lsetupapi -lshell32 -ldinput8 -lwinspool -lcomdlg32)
+            set(kit_ldflags "-static -O2 -Wl,--stack,16777216")
+            set(kit_objects " $kit/lib/mkdd_manifest.o $kit/lib/icon.o")
+            set(kit_native "")  # the launcher's default, -march=native (FMA for the GameCube's fused multiply-adds)
+        elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            # SDL3 loads X11, Wayland, the sound servers and Vulkan at run
+            # time: the game links only glibc's own libraries (and zig's libc++).
+            # Lifted calls nest deeply: the main thread's stack is the
+            # system's (8 MB by default), as the mkdd target's.
+            set(kit_system_libraries -lm -ldl -lpthread -lrt)
+            set(kit_ldflags "-O2")
+            set(kit_objects "")
+            # For the player's processor: x86-64's -march, ARM's -mcpu.
+            if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+                set(kit_native "native = -mcpu=native\n")
+            else()
+                set(kit_native "native = -march=native\n")
+            endif()
+        else()
+            message(FATAL_ERROR "no player kit for ${CMAKE_SYSTEM_NAME} yet")
+        endif()
+        string(JOIN " " kit_system_text ${kit_system_libraries})
+        # Read by the launcher (tools/player-kit/launcher/build.cpp): `name = value`
+        # lines, $kit the kit's folder.
+        file(WRITE "${CMAKE_BINARY_DIR}/kit/build-flags.txt"
+            "# Written by CMake for the player kit (QILIN_PLAYER_KIT).\n"
+            "cxxflags = -O2 -DNDEBUG -std=c++23 -w ${lifted_text} -I$kit/include\n"
+            "${kit_native}"
+            "ldflags = ${kit_ldflags}\n"
+            "libs = $kit/lib/libmkdd_kit.a${kit_objects} ${kit_system_text}\n")
+        # Linked with stand-ins for the lifted code (the game's, and the DSP
+        # microcode's empty table): the kit is complete.
+        add_executable(mkdd_kit_link_check tools/player-kit/link_check.cpp mkdd/src/dsp_no_ucode.cpp)
+        target_include_directories(mkdd_kit_link_check PRIVATE runtime/include mkdd/src)
+        target_link_libraries(mkdd_kit_link_check PRIVATE "${kit_archive}" ${kit_system_libraries})
+        add_dependencies(mkdd_kit_link_check mkdd_kit)
+        if(WIN32)
+            add_library(mkdd_kit_manifest OBJECT mkdd/res/mkdd.rc)
+            target_sources(mkdd_kit_link_check PRIVATE $<TARGET_OBJECTS:mkdd_kit_manifest>)
+            # The game's icon (the launcher's), linked into it on the player's PC.
+            add_dependencies(mkdd_kit qilin_game_icon mkdd_kit_manifest)
+            install(FILES $<TARGET_OBJECTS:mkdd_kit_manifest> DESTINATION kit/lib RENAME mkdd_manifest.o COMPONENT mkdd)
+            install(FILES $<TARGET_OBJECTS:qilin_game_icon> DESTINATION kit/lib RENAME icon.o COMPONENT mkdd)
+        endif()
+        install(TARGETS qilin qilin_disc_tool qilin-dsp RUNTIME DESTINATION kit COMPONENT mkdd)
+        install(FILES "${kit_archive}" DESTINATION kit/lib COMPONENT mkdd)
+        install(FILES "${CMAKE_BINARY_DIR}/kit/build-flags.txt" DESTINATION kit COMPONENT mkdd)
+    endif()
+    install(FILES data/GM4E01/plan.tsv DESTINATION kit COMPONENT mkdd)
     # What qilin-dsp's output includes (the lifted game code includes only the runtime's headers).
-    install(FILES mkdd/src/dsp_core.hpp DESTINATION kit/include COMPONENT player)
-    install(FILES "${kit_archive}" DESTINATION kit/lib COMPONENT player)
-    install(FILES "${CMAKE_BINARY_DIR}/kit.ninja" data/GM4E01/plan.tsv DESTINATION kit COMPONENT player)
+    install(FILES mkdd/src/dsp_core.hpp DESTINATION kit/include COMPONENT mkdd)
     file(GLOB kit_headers runtime/include/qilin/rt/*.hpp)
-    install(FILES ${kit_headers} DESTINATION kit/include/qilin/rt COMPONENT player)
+    install(FILES ${kit_headers} DESTINATION kit/include/qilin/rt COMPONENT mkdd)
 endif()
 
 # Compile/link the complete runtime without distributing or requiring game data.

@@ -39,7 +39,7 @@ The game plays, as far as scripted runs have taken it: from the disc through the
 - Split screen and courses other than the one surveyed have not been checked for culling at wide shapes; matching pictures between frames to their neighbours in a played race (items, Lakitu, cannons) is checked only on the demo races.
 - Measuring on a Raspberry Pi 4.
 
-**Platforms.** The game itself has been built and run only on Windows x64 with MSVC. CI (`.github/workflows/ci.yml`) builds everything except the game's own code (which needs the disc) and runs the tests on Linux x64 (GCC 14 and Clang 19), Linux ARM64 (GCC 14), macOS ARM64 and x64, and Windows x64, with warnings as errors, and every test again on Linux under AddressSanitizer, LeakSanitizer and UndefinedBehaviorSanitizer (the threading tests under ThreadSanitizer too); the Windows download is cross-built and packaged by `.github/workflows/player-kit.yml`. The game has not been run on Linux, macOS or ARM64.
+**Platforms.** The game itself has been built and run only on Windows x64 with MSVC. CI (`.github/workflows/ci.yml`) builds everything except the game's own code (which needs the disc) and runs the tests on Linux x64 (GCC 14 and Clang 19), Linux ARM64 (GCC 14), macOS ARM64 and x64, and Windows x64, with warnings as errors, and every test again on Linux under AddressSanitizer, LeakSanitizer and UndefinedBehaviorSanitizer (the threading tests under ThreadSanitizer too); the downloads are built and checked by `.github/workflows/player-kit.yml`, `player-kit-linux.yml` and `player-kit-macos.yml` (the Windows one cross-built with llvm-mingw, the Linux ones with zig on x86-64 and ARM64, the Mac's universal). The game has not been run on Linux, macOS or ARM64.
 
 ## What it is meant to be
 
@@ -47,13 +47,24 @@ The same requirements and scope as the author's other recompilations (Grabbed by
 
 ## Playing
 
-The game's code is built on your own computer from your own disc, and never distributed. These are the ways to start it; of them, the source build on Windows (`Play Double Dash.bat`, or by hand) is the one that has been used. The Windows download and the Linux and macOS commands are written but not yet tried.
+The game's code is built on your own computer from your own disc, and never distributed. The downloads do that for you; the source build is for working on the project. Of these, only the source build on Windows has been used so far: the downloads are built and checked by CI but haven't yet been played.
 
-Your disc can be an image as it is, `.iso`, `.gcm` or `.ciso` (GameCube discs aren't encrypted, so nothing has to be extracted first), or a folder extracted from one (the folder holding `sys` and `files`). Compressed formats aren't read: convert an `.rvz` or `.gcz` to ISO with Dolphin (right-click the game, Convert File); an NKit image has to be converted back to the original with NKit. The launcher says which it is and what to do.
+Your disc is an image of it as it is: `.iso`, `.gcm` or `.ciso` (GameCube discs aren't encrypted, so nothing has to be extracted first). Dolphin's compressed formats aren't read: convert an `.rvz`, `.wia` or `.gcz` image to ISO in Dolphin (right-click the game, Convert File); an NKit image has to be converted back to a full one with NKit. The launcher says which it is and what to do. (The source build also takes a folder extracted from an image, the one holding `sys` and `files`.)
 
-### Windows download
+### The downloads
 
-Each tagged release is to have `MarioKartDD--QilinRecomp-<version>-windows-x64.zip` attached, built by `.github/workflows/player-kit.yml` (which has not run yet). Unpack it and double-click **`Play Double Dash.bat`**: the first time, it asks for your disc and builds the game from it with the bundled compiler (LLVM-MinGW); after that it starts the game at once. `-ChooseDisc` picks another disc.
+Each release on the [Releases page](https://github.com/Qilin1066/MarioKartDD--QilinRecomp/releases) has a download for each system:
+
+| System | Download | Then |
+|---|---|---|
+| Windows 10 or 11 (64-bit) | `MarioKartDD--QilinRecomp-<version>-windows-x64.zip` | unzip it and double-click **`Play Double Dash.exe`** |
+| Linux on x86-64 | `MarioKartDD--QilinRecomp-<version>-linux-x86_64.tar.gz` | unpack it and double-click **`Play Double Dash`** |
+| Linux on ARM64 (a Raspberry Pi 4 or 5 with the 64-bit Raspberry Pi OS) | `MarioKartDD--QilinRecomp-<version>-linux-arm64.tar.gz` | the same |
+| macOS 14.5 or newer, Apple silicon or Intel | `MarioKartDD--QilinRecomp-<version>-macos.dmg` | drag **Double Dash.app** onto Applications and open it (the first time, allow it in System Settings, Privacy & Security, Open Anyway: it isn't signed by an Apple developer account) |
+
+Then choose your disc image (or drag it onto the window). The launcher says straight away if it is another game, region or revision. The first start builds the game from it: it takes `main.dol` from the image, recompiles it and the sound processor's program in it into C++, and compiles that with the compiler the download brings (LLVM-MinGW on Windows, zig on Linux; on a Mac, Apple's command line tools, which the launcher offers to install). That takes a few minutes on a desktop PC (an hour or more on a Raspberry Pi 4). After that, Play starts the game at once. The launcher remembers the image (the game reads it while it runs), keeps a cache of compiled files so that an update rebuilds only what changed, and updates itself from the Releases page. Each download's `README.txt` has the details: what's in it, the logs, the Raspberry Pi's settings.
+
+The downloads are made by `.github/workflows/player-kit.yml` (Windows), `player-kit-linux.yml` and `player-kit-macos.yml` from `tools/player-kit/`. The launcher (`tools/player-kit/launcher/`) is the one shared by the QilinRecomp projects, copied unchanged from Toy Commander's; what it knows of this game is `kit/game.txt` (written by `tools/player-kit/games.sh`) and `qilin identify` (`recomp/src/identify.cpp`).
 
 ### From the source on Windows
 
@@ -64,7 +75,7 @@ With Visual Studio 2022 (17.10 or newer, with "Desktop development with C++") an
 
 Both run `tools/build-mkdd.ps1`.
 
-### Linux and macOS
+### Linux and macOS from the source
 
 ```sh
 ./mkdd.sh --disc path/to/your/disc.iso    # the first time: builds, then starts
@@ -76,8 +87,8 @@ Both run `tools/build-mkdd.ps1`.
 
 ```sh
 cmake -S . -B build-game -DCMAKE_BUILD_TYPE=Release
-cmake --build build-game --target qilin_disc_tool
-build-game/qilin-disc info path/to/your/disc.iso            # GM4E01, revision 0, and its main.dol's SHA-256
+cmake --build build-game --target qilin qilin_disc_tool
+build-game/qilin identify path/to/your/disc.iso --json        # is it GM4E01 revision 0, with the right main.dol?
 build-game/qilin-disc dol  path/to/your/disc.iso build-game/main.dol
 cmake -S . -B build-game -DQILIN_GAME_DOL=$PWD/build-game/main.dol
 cmake --build build-game --parallel --target mkdd           # lifts the game's code and its DSP microcode, then compiles
@@ -153,6 +164,7 @@ Each reads the player's own disc or its `main.dol`; none of their output belongs
 
 ```sh
 build/qilin-disc info|list|extract|dol|verify <image or folder> ...   # the disc (docs/disc.md)
+build/qilin identify path/to/disc.iso --json               # what an image is, as the downloads' launcher asks
 build/qilin info     path/to/main.dol [--json info.json]   # SHA-256, supported build, entry point, sections
 build/qilin insns    path/to/main.dol [-o listing.txt]     # every word of the code, decoded
 build/qilin cfg      path/to/main.dol [--json cfg.json]    # function discovery and control flow
@@ -174,7 +186,7 @@ build/qilin-dsp lift path/to/main.dol -o dsp_ucode.cpp     # the DSP microcode i
 | `host/` | The platform layer: window, Vulkan presentation and the picture's passes, controllers, sound output, captures, paths |
 | `mkdd/` | The game's runtime: OS, disc, video, controllers, memory cards, the GX renderer, sound, settings and the menu |
 | `data/GM4E01/` | `plan.tsv`: what is lifted, replaced or dropped, library by library |
-| `tools/` | Checks, analysis scripts, the shader build, the Windows download's packaging, launcher tests |
+| `tools/` | Checks, analysis scripts, the shader build, the downloads' packaging and their launcher (`tools/player-kit/`), launcher tests |
 | `docs/` | Design targets and roadmap, naming, prior art, and a note for each part |
 
 ## Versions and changes
@@ -183,6 +195,6 @@ Releases are tagged `vX.Y.Z`, and every release is recorded in [`CHANGELOG.md`](
 
 ## Licence
 
-This project's own code and documentation are under the [GNU General Public License, version 3](LICENSE) (GPL-3.0). The dependencies CMake fetches keep their own: SDL3 (zlib), the Vulkan headers (Apache-2.0 or MIT), volk (MIT), Dear ImGui (MIT), SMAA (MIT; Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro, Diego Gutierrez) and AMD FidelityFX FSR 1 (MIT). The last two are also in the repository in compiled form, as SPIR-V (`host/src/post_shaders.inc`). The Windows download carries each licence under `LICENSES/`.
+This project's own code and documentation are under the [GNU General Public License, version 3](LICENSE) (GPL-3.0). The dependencies CMake fetches keep their own: SDL3 (zlib), the Vulkan headers (Apache-2.0 or MIT), volk (MIT), Dear ImGui (MIT), SMAA (MIT; Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro, Diego Gutierrez) and AMD FidelityFX FSR 1 (MIT). The last two are also in the repository in compiled form, as SPIR-V (`host/src/post_shaders.inc`). Each download carries each licence under `LICENSES/`, with those of what it adds: the compiler it brings (LLVM-MinGW, zig with the libraries it bundles), MoltenVK in the Mac's app, and the PAL symbol lists in `third_party/mkdd` (CC0) that the library plan's names were checked against.
 
 Mario Kart: Double Dash!! itself, its code and data, belong to Nintendo and are not covered by anything here: you need your own copy, and nothing built from it may be shared.

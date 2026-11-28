@@ -32,6 +32,7 @@
 #include <string_view>
 #include <vector>
 
+#include "command_line.hpp"
 #include "dol.hpp"
 
 namespace {
@@ -899,7 +900,7 @@ std::string lift_one(const std::vector<uint16_t>& words, const std::vector<uint1
 }
 
 std::vector<uint16_t> parse_words(const std::string& path) {
-    std::ifstream in(path);
+    std::ifstream in(qilin::native_path(path));
     if (!in) fail("can't read " + path);
     std::vector<uint16_t> words;
     std::string line;
@@ -920,7 +921,19 @@ std::vector<uint16_t> parse_words(const std::string& path) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int raw_argc, char** raw_argv) {
+    // UTF-8 arguments on every system (Windows: from the wide command line),
+    // and paths made from them as UTF-8: a folder with any name works.
+    int argc = raw_argc;
+    char** argv = raw_argv;
+    std::optional<qilin::CommandLine> command_line;
+    try {
+        command_line.emplace(raw_argc, raw_argv);
+        argc = command_line->count();
+        argv = command_line->values();
+    } catch (const std::exception& e) {
+        fail(e.what());
+    }
     std::string input, output, roots_text;
     bool raw = false;
     if (argc < 2 || std::string_view(argv[1]) != "lift") {
@@ -930,7 +943,7 @@ int main(int argc, char** argv) {
     }
     for (int i = 2; i < argc; ++i) {
         const std::string_view a = argv[i];
-        if (a == "-o" && i + 1 < argc) output = argv[++i];
+        if ((a == "-o" || a == "--out") && i + 1 < argc) output = argv[++i];
         else if (a == "--words" && i + 1 < argc) raw = true, input = argv[++i];
         else if (a == "--roots" && i + 1 < argc) roots_text = argv[++i];
         else if (input.empty()) input = argv[i];
@@ -958,7 +971,7 @@ int main(int argc, char** argv) {
         table += row;
         std::printf("qilin-dsp: %s: %s\n", input.c_str(), summary.c_str());
     } else {
-        auto dol = qilin::Dol::load(input);
+        auto dol = qilin::Dol::load(qilin::native_path(input));
         if (!dol) fail(dol.error());
         unsigned found = 0;
         for (const Known& k : known()) {
@@ -985,7 +998,7 @@ int main(int argc, char** argv) {
         << "const size_t g_program_count = sizeof kPrograms / sizeof kPrograms[0];\n}\n";
 
     const std::string text = out.str();
-    std::filesystem::path path(output);
+    const std::filesystem::path path = qilin::native_path(output);
     if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
     {   // Leave an unchanged file alone, so nothing rebuilds for it.
         std::ifstream old(path, std::ios::binary);

@@ -10,7 +10,16 @@
 //   qilin coverage <main.dol> [--list]           word accounting of the text: code / padding / unknown
 //   qilin suspects <main.dol>                    functions with problems, for review
 //   qilin polls   <main.dol>                     poll loops (idle.hpp): function, back edge, loop head
+//   qilin lift    <main.dol> -o <dir> [--plan plan.tsv] [--files n]
+//                                                the game's code as C++ (--out is -o)
+//   qilin identify <disc image> --json [--build <title>]
+//                                                what the image is, for the downloads' launcher: one
+//                                                JSON object on stdout (identify.hpp); exit 0 the
+//                                                supported build, 3 another, 2 unreadable
 //
+// Arguments are UTF-8 (on Windows read from the wide command line,
+// command_line.hpp), and paths are made from them as UTF-8 (path.hpp), so a
+// folder with an accented or other non-ASCII name works.
 // Listings are one line per word: address, word, text ("8000310c 4e800020 bclr 20,lt,0").
 // Exit status is non-zero on any error; nothing fails silently.
 #include <algorithm>
@@ -30,9 +39,12 @@
 #include <vector>
 
 #include "cfg.hpp"
+#include "command_line.hpp"
 #include "decoder.hpp"
 #include "dol.hpp"
+#include "identify.hpp"
 #include "lift.hpp"
+#include "path.hpp"
 
 #ifndef QILIN_VERSION
 #define QILIN_VERSION "unknown"
@@ -59,6 +71,7 @@ int usage() {
                "  qilin suspects <main.dol>\n"
                "  qilin polls   <main.dol>\n"
                "  qilin lift    <main.dol> -o <dir> [--plan plan.tsv] [--files n] [--leaf-single] [--full-sync]\n"
+               "  qilin identify <disc image> --json [--build <title>]\n"
                "  qilin --version\n");
     return 2;
 }
@@ -91,7 +104,7 @@ Args parse_args(std::span<char*> argv) {
             if (i + 1 >= argv.size()) throw Failure{std::format("{} needs a value", arg)};
             return argv[++i];
         };
-        if (arg == "-o") a.out = value();
+        if (arg == "-o" || arg == "--out") a.out = value();
         else if (arg == "--json") a.json = value();
         else if (arg == "--base") a.base = parse_u32(value());
         else if (arg == "--plan") a.plan = value();
@@ -108,7 +121,7 @@ Args parse_args(std::span<char*> argv) {
 }
 
 Dol load_dol(const std::string& path) {
-    auto dol = Dol::load(path);
+    auto dol = Dol::load(native_path(path));
     if (!dol) throw Failure{std::format("{}: {}", path, dol.error())};
     return std::move(*dol);
 }
@@ -118,7 +131,11 @@ class Output {
 public:
     explicit Output(const std::optional<std::string>& path) {
         if (!path) return;
+#if defined(_WIN32)
+        file_ = _wfopen(native_path(*path).c_str(), L"w");
+#else
         file_ = std::fopen(path->c_str(), "w");
+#endif
         if (!file_) throw Failure{std::format("cannot write {}", *path)};
     }
     ~Output() {
@@ -144,7 +161,7 @@ int cmd_info(const Args& a) {
     const Dol dol = load_dol(a.input);
     const std::string json = to_json(dol);
     if (a.json) {
-        std::ofstream f(*a.json, std::ios::binary);
+        std::ofstream f(native_path(*a.json), std::ios::binary);
         if (!(f << json)) throw Failure{std::format("cannot write {}", *a.json)};
     } else {
         std::print("{}", json);
@@ -161,7 +178,7 @@ int cmd_insns(const Args& a) {
 }
 
 int cmd_disasm(const Args& a) {
-    std::ifstream f(a.input, std::ios::binary);
+    std::ifstream f(native_path(a.input), std::ios::binary);
     if (!f) throw Failure{std::format("cannot open {}", a.input)};
     const std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
     if (bytes.size() % 4) throw Failure{std::format("{}: size is not a multiple of 4", a.input)};
@@ -201,7 +218,7 @@ int cmd_cfg(const Args& a) {
     cfg.run();
     std::print("{}", cfg.summary());
     if (a.json) {
-        std::ofstream f(*a.json, std::ios::binary);
+        std::ofstream f(native_path(*a.json), std::ios::binary);
         if (!(f << cfg.to_json())) throw Failure{std::format("cannot write {}", *a.json)};
     }
     return 0;
@@ -275,7 +292,7 @@ struct PlanRange {
     std::string plan, library;
 };
 std::vector<PlanRange> load_plan(const std::string& path) {
-    std::ifstream f(path);
+    std::ifstream f(native_path(path));
     if (!f) throw Failure{std::format("cannot read {}", path)};
     std::vector<PlanRange> out;
     std::string line;
@@ -325,7 +342,7 @@ int cmd_lift(const Args& a) {
         if (!best) throw Failure{std::format("function {:08X} is in no range of the plan", start)};
         return best;
     };
-    const std::filesystem::path dir = *a.out;
+    const std::filesystem::path dir = native_path(*a.out);
     std::filesystem::create_directories(dir);
     // A file whose text is unchanged is left alone, so a build after an update
     // recompiles only what the update changed.
@@ -335,7 +352,7 @@ int cmd_lift(const Args& a) {
             if (old && std::string(std::istreambuf_iterator<char>(old), {}) == text) return;
         }
         std::ofstream f(dir / name, std::ios::binary);
-        if (!(f << text)) throw Failure{std::format("cannot write {}", (dir / name).string())};
+        if (!(f << text)) throw Failure{std::format("cannot write {}", utf8_path(dir / name))};
     };
 
     const size_t total = cfg.functions().size();
@@ -465,9 +482,53 @@ int cmd_lift(const Args& a) {
     return 0;
 }
 
+// The launcher's contract (identify.hpp): JSON whatever happens, and only
+// exit codes 0, 3 and 2.
+int cmd_identify(int argc, char** argv) {
+    std::optional<std::string> path, build;
+    bool json = false;
+    std::string problem;
+    for (int i = 2; i < argc; ++i) {
+        const std::string_view a = argv[i];
+        if (a == "--json") json = true;
+        else if (a == "--build" && i + 1 < argc) build = argv[++i];
+        else if (!a.starts_with("-") && !path) path = std::string(a);
+        else problem = std::format("identify: unexpected argument {}.", a);
+    }
+    if (!path) problem = "identify takes one disc image.";
+    if (!json) problem = "identify needs --json.";
+    Identity id;
+    if (!problem.empty()) {
+        id.message = problem;
+    } else {
+        try {
+            id = identify(native_path(*path), build.value_or(""));
+        } catch (const std::exception& e) {
+            id = Identity{};
+            id.message = std::format("The recompiler failed: {}.", e.what());
+        }
+    }
+    std::print("{}", to_json(id));
+    std::fflush(stdout);
+    return id.code;
+}
+
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int raw_argc, char** raw_argv) {
+    // UTF-8 arguments on every system (Windows: from the wide command line).
+    int argc = raw_argc;
+    char** argv = raw_argv;
+    std::optional<CommandLine> command_line;
+    try {
+        command_line.emplace(raw_argc, raw_argv);
+        argc = command_line->count();
+        argv = command_line->values();
+    } catch (const std::exception& e) {
+        std::println(stderr, "qilin: {}", e.what());
+        return 1;
+    }
+    if (argc >= 2 && std::string_view(argv[1]) == "identify") return cmd_identify(argc, argv);
     if (argc == 2 && std::string_view(argv[1]) == "--version") {
         std::println("qilin " QILIN_VERSION);
         return 0;
