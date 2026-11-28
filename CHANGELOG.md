@@ -4,6 +4,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-28
+
 ### Added
 
 - **Downloads for Windows, Linux (x86-64, and ARM64 for the Raspberry Pi 4 and 5) and macOS (one universal app for Apple silicon and Intel)**, with the players' launcher shared by the QilinRecomp projects (`tools/player-kit/launcher/`, copied unchanged from Toy Commander's, launcher 4): unpack, double-click `Play Double Dash`, choose the disc image (`.iso`, `.gcm` or `.ciso`, or drop it onto the window), and the first start builds the game from it; after that Play starts it at once. The launcher checks the image before building, remembers it, runs the three steps (`qilin-disc dol`, `qilin lift` with the library plan into 32 files, `qilin-dsp lift` for the sound processor's microcode), compiles with a cache of compiled files, builds again only what an update changed, and updates itself from GitHub Releases. Windows bundles llvm-mingw, Linux bundles zig, and the Mac uses Apple's command line tools (the launcher offers Apple's installer) with MoltenVK inside the app. Each release is to carry `MarioKartDD--QilinRecomp-X.Y.Z-windows-x64.zip`, `-linux-x86_64.tar.gz`, `-linux-arm64.tar.gz` and `-macos.dmg`, made by three workflows (`player-kit.yml`, `player-kit-linux.yml`, `player-kit-macos.yml`) on every push and attached to the release of a `vX.Y.Z` tag; CI checks each download as a player gets it (`smoke-linux.sh`, `check-macos.sh` on both kinds of Mac).
